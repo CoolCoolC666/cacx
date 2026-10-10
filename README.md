@@ -10,6 +10,17 @@
 
 ## 快速开始
 
+**Windows 双击即可**（不用记命令）：
+
+```
+start-cacx.bat        双击 → 自动装依赖 → 起服务 → 自动开浏览器
+sync-latest.bat       双击 → 同步两站最新文章 → 打印统计
+```
+
+首次运行会自动 `pip install`，之后就直接开。关闭黑色命令行窗口即停止服务。
+
+命令行用法：
+
 ```bash
 git clone <repo>
 cd <repo>
@@ -139,15 +150,26 @@ cacx config import ~/Downloads/some-tool-config.json
 
 ## Web 界面
 
-`cacx serve` 后打开 http://127.0.0.1:8770/
+`cacx serve`（或双击 `start-cacx.bat`）后打开 http://127.0.0.1:8770/
+
+**检索页**
 
 - 关键词 + 站点/栏目/年份/日期区间/字数下限 组合筛选，四种排序
-- 结果列表点开是详情抽屉，全文 + 元信息 + **跳转原文**
-- 原文跳��走 `/open?id=…` 中转，以后要做「检索→阅读→传播」行为分析，
-  在这个端点埋点即可
+- **命中高亮**：标题与正文片段里的命中词标黄，长词优先不切碎
+- 一键导出当前检索结果（CSV / JSONL，可指定条数）
+- 结果点开是详情抽屉，全文 + 元信息 + **跳转原文**
+- 原文跳转走 `/open?id=…` 中转并记录点击 —— 以后做「检索→阅读→传播」
+  行为分析时，这张行为表就是最直接的一手数据
+
+**数据面板**
+
+- 按年 / 按月分布柱状图（可切站点）
+- 栏目 Top 12
+- 检索行为统计：各类操作次数、跳原文最多的文章
 
 接口：`/api/search` `/api/article/{id}` `/api/facets` `/api/stats`
-`/api/recent` `/api/health` `/open`，交互式文档在 `/docs`。
+`/api/recent` `/api/health` `/api/export` `/api/trend` `/api/events`
+`/api/ai/status` `/open`，交互式文档在 `/docs`。
 
 ---
 

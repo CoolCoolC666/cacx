@@ -75,6 +75,35 @@ _ghost = d.conn.execute(
 ).fetchone()[0]
 check("无半成品幽灵行", _ghost == 0, f"{_ghost} 条")
 
+# 新增：命中片段 + 埋点 + 导出取数
+# 文本要够长，否则 width 内不触发截断，测不到「…」是否正确
+_long = "中央网信办印发通知在全国范围内部署开展为期两个月的清朗专项行动，" \
+        "本次行动重点整治短视频虚假人设乱象问题。"
+_snip = D.Database.make_snippet(_long, ["清朗"], 40)
+check("命中片段截取正确", "清朗" in _snip and "…" in _snip, repr(_snip))
+check("未命中时片段退化为开头",
+      D.Database.make_snippet(_long, ["不存在"], 40) == _long[:40].replace("\n", " "),
+      repr(D.Database.make_snippet(_long, ["不存在"], 40)[:20]))
+_ids = [it["id"] for it in d.search(q="网信办", limit=3)["items"]]
+_rows = d.fetch_for_export(_ids)
+check("批量导出按传入顺序取全字段",
+      [r["id"] for r in _rows] == _ids and len(_rows) == len(_ids)
+      and "content_text" in _rows[0],
+      f"{len(_rows)} 行，字段 {len(_rows[0])} 个")
+_n0 = d.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+d.record_event("search", detail="__selftest__")
+d.record_event("open", article_id=_ids[0] if _ids else None, detail="example.com")
+_st = d.event_stats(1)
+check("埋点写入并可统计", _st["total"] == _n0 + 2
+      and {x["kind"] for x in _st["by_kind"]} >= {"search", "open"},
+      f"总数 {_st['total']}")
+# 埋点自检数据必须清掉，不能污染真实行为统计
+with d._lock:
+    d.conn.execute("DELETE FROM events WHERE detail IN ('__selftest__','example.com')")
+    d.conn.commit()
+check("埋点测试数据已清理",
+      d.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == _n0)
+
 r3 = d.search(q="清朗", limit=1)
 check("2字词走 LIKE 兜底且有结果", r3["mode"] == "like" and r3["total"] > 0,
       f"mode={r3['mode']} 命中 {r3['total']}")
@@ -109,6 +138,43 @@ from cacx.collector.base import html_to_text
 t = html_to_text("<p>第一段</p><p>第二段<img src='//x.com/a.jpg'></p>", "https://x.com")
 check("HTML→纯文本 + 图片绝对化",
       "第一段" in t and "第二段" in t and "https://x.com/a.jpg" in t, repr(t[:70]))
+
+print()
+print("=" * 70)
+print("4b) Web 前端（不启服务）")
+print("=" * 70)
+import subprocess
+from cacx.web.app import STATIC_DIR
+_index = STATIC_DIR / "index.html"
+check("前端文件存在", _index.is_file())
+if _index.is_file():
+    _html = _index.read_text(encoding="utf-8")
+    # 前端硬编码的接口路径必须在后端真存在，否则点了就是 404。
+    # 取到的是前缀（/api/article、/api/ai），后端用 {id} 占位或带子路径，
+    # 所以比的是「存在以此为前缀的路由」，不是全等。
+    import re as _re
+    _paths = set(_re.findall(r"['\"](/api/[a-z_]+)", _html))
+    from cacx.web.app import app as _fa
+    _routes = [r.path for r in _fa.routes if hasattr(r, "path")]
+    _missing = sorted(p for p in _paths
+                      if not any(r == p or r.startswith(p + "/") or f"{p}/{{" in r
+                                 for r in _routes))
+    check("前端调用的接口后端都存在", not _missing,
+          f"检查 {len(_paths)} 个前缀" +
+          (f"，缺 {sorted(_missing)}" if _missing else "，全部命中"))
+    # 高亮逻辑跑 node 回归：实现从 index.html 抽取，改前端后不会变成假通过
+    _js = Path(__file__).resolve().parent / "tests_mark.js"
+    if _js.is_file():
+        try:
+            r = subprocess.run(["node", str(_js)], capture_output=True,
+                               text=True, timeout=60,
+                               cwd=str(Path(__file__).resolve().parent))
+            _last = [x for x in r.stdout.splitlines() if x.strip()][-1] if r.stdout else ""
+            check("高亮函数 node 回归", r.returncode == 0, _last)
+        except FileNotFoundError:
+            check("高亮函数 node 回归", False, "未装 node，跳过")
+    else:
+        check("高亮函数 node 回归", False, "缺 tests_mark.js")
 
 print()
 print("=" * 70)

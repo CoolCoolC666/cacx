@@ -8,96 +8,178 @@
   :root{
     --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
     --fg:#e6e8ee; --dim:#9aa3b2; --acc:#4c8dff; --acc2:#7ab8ff;
-    --warn:#ffb454; --err:#ff6b6b; --ok:#5ddc9a;
+    --warn:#ffb454; --err:#ff6b6b; --ok:#5ddc9a; --hl:#ffd479;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--fg);
        font:14px/1.6 -apple-system,"Microsoft YaHei",Segoe UI,sans-serif}
-  header{padding:14px 22px;border-bottom:1px solid var(--line);
-         display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-  header h1{font-size:17px;margin:0;font-weight:600;letter-spacing:.3px}
-  header .stat{color:var(--dim);font-size:12.5px}
-  header .stat b{color:var(--acc2);font-weight:600}
-  main{padding:18px 22px;max-width:1400px;margin:0 auto}
+  header{padding:12px 22px;border-bottom:1px solid var(--line);
+         display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+         position:sticky;top:0;background:var(--bg);z-index:20}
+  header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.3px}
+  header h1 span{color:var(--dim);font-weight:400;font-size:14px}
+  .stat{color:var(--dim);font-size:12.5px}
+  .stat b{color:var(--acc2);font-weight:600}
+  .grow{flex:1}
+  .btn{background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+       border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer;
+       font-family:inherit}
+  .btn:hover{border-color:var(--acc)}
+  .btn.on{background:var(--acc);border-color:var(--acc);color:#fff}
+  main{padding:16px 22px;max-width:1500px;margin:0 auto}
+
+  /* ---- 检索区 ---- */
   .searchbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-  input,select,button{background:var(--panel2);color:var(--fg);
+  input,select{background:var(--panel2);color:var(--fg);
     border:1px solid var(--line);border-radius:6px;padding:7px 11px;font-size:13.5px;
     outline:none;font-family:inherit}
   input:focus,select:focus{border-color:var(--acc)}
-  input#q{flex:1;min-width:260px}
-  button{cursor:pointer}
-  button:hover{border-color:var(--acc)}
-  button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:500}
-  .filters{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  input#q{flex:1;min-width:240px}
+  .filters{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px;align-items:center}
   .filters label{color:var(--dim);font-size:12.5px;display:flex;
                  align-items:center;gap:5px}
-  .meta{color:var(--dim);font-size:12.5px;margin:14px 0 8px;
-        display:flex;gap:14px;flex-wrap:wrap;align-items:center}
-  .pill{background:var(--panel2);border:1px solid var(--line);
-        padding:2px 8px;border-radius:10px;font-size:11.5px}
-  .pill.fts{color:var(--ok);border-color:#2c5a45}
-  .pill.like{color:var(--warn);border-color:#5a4527}
+  .bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;
+       margin:12px 0 8px}
+  .meta{color:var(--dim);font-size:12.5px;display:flex;gap:12px;
+        flex-wrap:wrap;align-items:center;margin-left:auto}
+  b.n{color:var(--acc2)}
+
+  /* ---- 结果 ---- */
   .list{display:flex;flex-direction:column;gap:8px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-        padding:12px 14px;cursor:pointer;transition:.12s}
+        padding:11px 14px;cursor:pointer;transition:.12s}
   .card:hover{border-color:var(--acc);background:var(--panel2)}
-  .card .t{font-size:14.5px;font-weight:500;margin-bottom:5px}
-  .card .m{color:var(--dim);font-size:12px;display:flex;gap:12px;flex-wrap:wrap}
+  .card .t{font-size:14.5px;font-weight:500;margin-bottom:5px;line-height:1.5}
+  .card .m{color:var(--dim);font-size:12px;display:flex;gap:11px;flex-wrap:wrap}
+  .card .s{color:#c2c8d4;font-size:12.5px;margin-top:6px;line-height:1.6;
+           border-left:2px solid var(--line);padding-left:9px}
+  mark{background:var(--hl);color:#1a1a1a;border-radius:2px;padding:0 2px;
+       font-weight:600}
   .tag{background:#232936;border-radius:4px;padding:1px 7px;font-size:11.5px}
   .empty{padding:60px;text-align:center;color:var(--dim)}
-  /* 详情抽屉 */
+
+  /* ---- 面板 ---- */
+  .panel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+              gap:12px;margin-bottom:16px}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+       padding:13px 15px}
+  .box h3{margin:0 0 10px;font-size:13px;color:var(--acc2);font-weight:600;
+          display:flex;align-items:center;gap:8px}
+  .bars{display:flex;align-items:flex-end;gap:3px;height:96px;
+        overflow-x:auto;padding-top:4px}
+  .bar-item{flex:1;min-width:5px;display:flex;flex-direction:column;
+            align-items:center;gap:3px}
+  .bar-fill{width:100%;background:linear-gradient(180deg,var(--acc),#2f5fa8);
+            border-radius:2px 2px 0 0;min-height:2px;transition:.2s}
+  .bar-fill:hover{background:var(--acc2)}
+  .bar-x{font-size:9px;color:var(--dim);white-space:nowrap;
+          transform:rotate(-45deg);transform-origin:center;height:22px}
+  .bar-v{font-size:9.5px;color:var(--dim)}
+  .rank{display:flex;justify-content:space-between;font-size:12.5px;
+        padding:3px 0;border-bottom:1px dashed var(--line)}
+  .rank:last-child{border-bottom:none}
+  .rank .v{color:var(--dim);flex-shrink:0;margin-left:10px}
+  .rank .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* ---- 抽屉 ---- */
   .drawer{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;z-index:40}
   .drawer.on{display:block}
-  .panel{position:absolute;right:0;top:0;bottom:0;width:min(760px,94vw);
+  .panel{position:absolute;right:0;top:0;bottom:0;width:min(780px,94vw);
          background:var(--bg);border-left:1px solid var(--line);
          overflow:auto;padding:20px 24px}
-  .panel h2{font-size:18px;margin:0 0 10px;line-height:1.45}
-  .kv{color:var(--dim);font-size:12.5px;display:flex;gap:14px;
-      flex-wrap:wrap;margin-bottom:14px;padding-bottom:12px;
-      border-bottom:1px solid var(--line)}
-  .kv a{color:var(--acc2)}
+  .panel h2{font-size:18px;margin:0 0 10px;line-height:1.45;padding-right:30px}
+  .kv{color:var(--dim);font-size:12.5px;display:flex;gap:14px;flex-wrap:wrap;
+      margin-bottom:13px;padding-bottom:11px;border-bottom:1px solid var(--line)}
   .body{white-space:pre-wrap;font-size:14px;line-height:1.85;word-break:break-word}
-  .close{position:absolute;right:16px;top:16px;font-size:20px;
-         background:none;border:none;color:var(--dim);cursor:pointer}
+  .close{position:absolute;right:16px;top:16px;font-size:20px;background:none;
+         border:none;color:var(--dim);cursor:pointer;z-index:2}
   .aibox{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-         padding:12px 14px;margin:14px 0}
+         padding:12px 14px;margin:13px 0}
   .aibox h3{margin:0 0 8px;font-size:13px;color:var(--acc2)}
+  .aibox pre{white-space:pre-wrap;font-size:12.5px;margin:8px 0 0;color:#c9cfdb}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .link{background:var(--acc);color:#fff;padding:7px 14px;border-radius:6px;
+        text-decoration:none;font-size:13.5px;display:inline-block}
   .pager{display:flex;gap:8px;align-items:center;justify-content:center;
          margin:20px 0 40px}
-  code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12.5px}
+  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
+         background:var(--panel2);border:1px solid var(--acc);border-radius:6px;
+         padding:9px 18px;font-size:13px;z-index:60;display:none}
+  .toast.on{display:block}
+  .toast.err{border-color:var(--err)}
 </style>
 </head>
 <body>
 <header>
-  <h1>cacx <span style="color:var(--dim);font-weight:400">网信办语料检索</span></h1>
+  <h1>cacx <span>网信办语料检索</span></h1>
   <div class="stat" id="stat">加载中…</div>
+  <div class="grow"></div>
+  <button class="btn on" id="tab_search" onclick="showTab('search')">检索</button>
+  <button class="btn" id="tab_panel" onclick="showTab('panel')">数据面板</button>
 </header>
 
 <main>
-  <div class="searchbar">
-    <input id="q" placeholder="输入关键词，支持空格分词（≥3字走 FTS5 索引，1~2字自动降级为扫描）">
-    <select id="site"><option value="">全部站点</option></select>
-    <select id="column"><option value="">全部栏目</option></select>
-    <select id="year"><option value="">全部年份</option></select>
-    <select id="sort">
-      <option value="date_desc">按日期 ↓</option>
-      <option value="date_asc">按日期 ↑</option>
-      <option value="chars_desc">按字数 ↓</option>
-      <option value="chars_asc">按字数 ↑</option>
-    </select>
-    <button class="primary" onclick="go(1)">检索</button>
-  </div>
-  <div class="filters">
-    <label>日期 <input type="date" id="date_from" style="width:150px">
-      → <input type="date" id="date_to" style="width:150px"></label>
-    <label>最少字数 <input type="number" id="min_chars" style="width:100px" placeholder="0"></label>
-    <label><input type="checkbox" id="skip_empty" checked> 隐藏空正文</label>
-    <button onclick="reset()">重置</button>
-  </div>
+  <!-- ============ 检索 ============ -->
+  <section id="v_search">
+    <div class="searchbar">
+      <input id="q" placeholder="输入关键词，空格分词。≥3字走 FTS5 索引，1~2字自动降级扫描">
+      <select id="site"><option value="">全部站点</option></select>
+      <select id="column"><option value="">全部栏目</option></select>
+      <select id="year"><option value="">全部年份</option></select>
+      <select id="sort">
+        <option value="date_desc">按日期 ↓</option>
+        <option value="date_asc">按日期 ↑</option>
+        <option value="chars_desc">按字数 ↓</option>
+        <option value="chars_asc">按字数 ↑</option>
+      </select>
+      <button class="btn" onclick="reset()">重置</button>
+    </div>
+    <div class="filters">
+      <label>日期 <input type="date" id="date_from" style="width:145px">
+        → <input type="date" id="date_to" style="width:145px"></label>
+      <label>最少字数 <input type="number" id="min_chars" style="width:90px" placeholder="0"></label>
+      <label><input type="checkbox" id="skip_empty" checked> 隐藏空正文</label>
+    </div>
+    <div class="bar">
+      <button class="btn" onclick="go(1)">检索</button>
+      <button class="btn" onclick="doExport('csv')">↓ 导出 CSV</button>
+      <button class="btn" onclick="doExport('jsonl')">↓ 导出 JSONL</button>
+      <label style="color:var(--dim);font-size:12.5px;display:flex;
+                    align-items:center;gap:4px">
+        条数 <input type="number" id="exp_n" value="100" min="1" max="2000"
+        style="width:78px"></label>
+      <div class="meta" id="meta"></div>
+    </div>
+    <div class="list" id="list"></div>
+    <div class="pager" id="pager"></div>
+  </section>
 
-  <div class="meta" id="meta"></div>
-  <div class="list" id="list"></div>
-  <div class="pager" id="pager"></div>
+  <!-- ============ 数据面板 ============ -->
+  <section id="v_panel" style="display:none">
+    <div class="panel-grid">
+      <div class="box">
+        <h3>按年分布</h3>
+        <div class="bars" id="bar_year"></div>
+      </div>
+      <div class="box">
+        <h3>按月分布（近 36 月） <select id="trend_site" onchange="loadTrend()"
+             style="font-size:12px;padding:2px 6px">
+          <option value="">全部站点</option>
+          <option value="cac">中国网信办</option>
+          <option value="zjwx">浙江网信网</option>
+        </select></h3>
+        <div class="bars" id="bar_month"></div>
+      </div>
+      <div class="box">
+        <h3>栏目 Top 12</h3>
+        <div id="rank_col"></div>
+      </div>
+      <div class="box">
+        <h3>检索行为（近 30 天）</h3>
+        <div id="rank_ev"></div>
+      </div>
+    </div>
+  </section>
 </main>
 
 <div class="drawer" id="drawer" onclick="if(event.target===this)closeDrawer()">
@@ -107,116 +189,234 @@
   </div>
 </div>
 
-<script>
-let PAGE = 1, TOTAL = 0, PAGES = 0;
+<div class="toast" id="toast"></div>
 
+<script>
+let PAGE=1, TOTAL=0, PAGES=0, CURRENT=null;
 const $ = id => document.getElementById(id);
 
+function esc(s){ return String(s==null?'':s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+/* 把命中词包成 <mark>。先转义再插标签，避免 XSS：
+   顺序反了就会把正文里的尖括号当标签解析。
+   必须是「一次性扫描」而不是逐词 replace —— 逐词替换会让上一轮生成的
+   <mark> 标签文本被下一轮的正则当成正文匹配进去，产生嵌套高亮。 */
+function mark(text, terms){
+  const s = String(text==null?'':text);
+  if(!terms || !terms.length) return esc(s);
+  const list=[...new Set(terms.filter(Boolean))];
+  if(!list.length) return esc(s);
+  // 长词优先：保证「清朗行动」不会被「清朗」先切开
+  list.sort((a,b)=>b.length-a.length);
+  // 转义成正则字符类；字符类里不再有元字符，天然安全
+  const alt = list.map(t=>t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|');
+  const re = new RegExp(alt,'gi');
+  let out='', last=0, m;
+  while((m=re.exec(s))!==null){
+    out += esc(s.slice(last, m.index)) + '<mark>' + esc(m[0]) + '</mark>';
+    last = m.index + m[0].length;
+    if(m[0].length===0) re.lastIndex++;   // 防零宽死循环
+  }
+  out += esc(s.slice(last));
+  return out;
+}
+
+function toast(msg, isErr){
+  const t=$('toast'); t.textContent=msg; t.className='toast on'+(isErr?' err':'');
+  clearTimeout(t._h); t._h=setTimeout(()=>t.className='toast',2600);
+}
+
 function params(){
-  const p = new URLSearchParams();
-  const add=(k,v)=>{ if(v) p.set(k,v); };
-  add('q', $('q').value.trim());
-  add('site', $('site').value);
-  add('column', $('column').value);
-  add('year', $('year').value);
-  add('sort', $('sort').value);
-  add('date_from', $('date_from').value);
-  add('date_to', $('date_to').value);
-  add('min_chars', $('min_chars').value);
+  const p=new URLSearchParams();
+  const add=(k,v)=>{ if(v!=='' && v!=null) p.set(k,v); };
+  add('q',$('q').value.trim()); add('site',$('site').value);
+  add('column',$('column').value); add('year',$('year').value);
+  add('sort',$('sort').value); add('date_from',$('date_from').value);
+  add('date_to',$('date_to').value); add('min_chars',$('min_chars').value);
   if($('skip_empty').checked) p.set('skip_empty','true');
   return p;
 }
 
 async function loadFacets(){
-  const f = await (await fetch('/api/facets')).json();
-  $('stat').innerHTML = `<b>${f.total.toLocaleString()}</b> 篇文章 · ` +
-    `<b>${(f.chars/10000).toFixed(0)}</b> 万字 · ${f.days} 天 · ` +
+  const f=await (await fetch('/api/facets')).json();
+  $('stat').innerHTML=`<b>${f.total.toLocaleString()}</b> 篇文章 · `+
+    `<b>${(f.chars/10000).toFixed(0)}</b> 万字 · ${f.days} 天 · `+
     `${f.external} 条站外`;
   for(const s of f.sites){
-    const o = document.createElement('option');
-    o.value = s.site; o.textContent = s.site_name || s.site;
+    const o=document.createElement('option');
+    o.value=s.site; o.textContent=`${s.site_name||s.site} (${s.n})`;
     $('site').appendChild(o);
   }
   for(const c of f.columns){
-    const o = document.createElement('option');
-    o.value = c.column_name; o.textContent = `${c.site==='cac'?'国':'浙'}·${c.column_name} (${c.n})`;
+    const o=document.createElement('option');
+    o.value=c.column_name;
+    o.textContent=`${c.site==='cac'?'国':'浙'}·${c.column_name} (${c.n})`;
     $('column').appendChild(o);
   }
   for(const y of f.years){
-    const o = document.createElement('option');
-    o.value = y.year; o.textContent = `${y.year} (${y.n})`;
+    const o=document.createElement('option');
+    o.value=y.year; o.textContent=`${y.year} (${y.n})`;
     $('year').appendChild(o);
   }
 }
 
 async function go(page){
-  PAGE = page;
-  const p = params(); p.set('page', page);
-  const r = await (await fetch('/api/search?'+p)).json();
-  TOTAL = r.total; PAGES = r.pages;
-  const modeTxt = r.mode==='fts' ? '<span class="pill fts">FTS5 索引</span>'
-              : r.mode==='like' ? '<span class="pill like">LIKE 扫描（词过短）</span>'
+  PAGE=page;
+  const p=params(); p.set('page',page);
+  const r=await (await fetch('/api/search?'+p)).json();
+  CURRENT=r; TOTAL=r.total; PAGES=r.pages;
+  const pill = r.mode==='fts' ? '<span class="pill" style="color:var(--ok)">FTS5 索引</span>'
+              : r.mode==='like' ? '<span class="pill" style="color:var(--warn)">LIKE 扫描（词过短）</span>'
               : '<span class="pill">浏览</span>';
-  $('meta').innerHTML = `命中 <b>${r.total.toLocaleString()}</b> 条 · ${modeTxt} · ${r.took_ms}ms`;
-  const L = $('list');
-  if(!r.items.length){ L.innerHTML = '<div class="empty">没有命中。换个词，或放宽筛选条件。</div>'; }
-  else L.innerHTML = r.items.map(it=>`
-    <div class="card" onclick="detail(${it.id})">
-      <div class="t">${esc(it.title)}</div>
-      <div class="m">
-        <span class="tag">${it.site_name||it.site}</span>
-        <span class="tag">${esc(it.column_name||'')}</span>
-        <span>${(it.pub_date||'').slice(0,10)}</span>
-        <span>${(it.chars||0).toLocaleString()} 字</span>
-        ${it.source_text?`<span>来源 ${esc(it.source_text)}</span>`:''}
-      </div>
-    </div>`).join('');
+  $('meta').innerHTML=`命中 <b class="n">${r.total.toLocaleString()}</b> 条 · ${pill} · ${r.took_ms}ms`;
+  const L=$('list');
+  if(!r.items.length){
+    L.innerHTML='<div class="empty">没有命中。换个词，或放宽筛选条件。</div>';
+  } else {
+    L.innerHTML=r.items.map(it=>{
+      const snip = it.snippet
+        ? `<div class="s">${mark(it.snippet, it.highlights)}</div>` : '';
+      return `<div class="card" onclick="detail(${it.id})">
+        <div class="t">${mark(it.title, it.highlights)}</div>
+        <div class="m">
+          <span class="tag">${esc(it.site_name||it.site)}</span>
+          <span class="tag">${esc(it.column_name||'')}</span>
+          <span>${(it.pub_date||'').slice(0,10)}</span>
+          <span>${(it.chars||0).toLocaleString()} 字</span>
+          ${it.source_text?`<span>来源 ${esc(it.source_text)}</span>`:''}
+        </div>${snip}</div>`;
+    }).join('');
+  }
   $('pager').innerHTML = PAGES>1 ? `
-    <button ${PAGE<=1?'disabled':''} onclick="go(${PAGE-1})">上一页</button>
+    <button class="btn" ${PAGE<=1?'disabled':''} onclick="go(${PAGE-1})">上一页</button>
     <span style="color:var(--dim)">${PAGE} / ${PAGES}</span>
-    <button ${PAGE>=PAGES?'disabled':''} onclick="go(${PAGE+1})">下一页</button>` : '';
+    <button class="btn" ${PAGE>=PAGES?'disabled':''} onclick="go(${PAGE+1})">下一页</button>` : '';
+}
+
+function doExport(fmt){
+  const p=params();
+  p.set('format',fmt);
+  p.set('limit', $('exp_n').value||'100');
+  window.location.href='/api/export?'+p;
+  toast(`正在导出 ${fmt.toUpperCase()}…`);
 }
 
 async function detail(id){
-  const a = await (await fetch('/api/article/'+id)).json();
-  const ai = a.ai && a.ai.summarize;
-  $('detail').innerHTML = `
+  const a=await (await fetch('/api/article/'+id)).json();
+  const ai=a.ai&&a.ai.summarize;
+  const ready=a.ai_status&&a.ai_status.ready;
+  $('detail').innerHTML=`
     <h2>${esc(a.title)}</h2>
     <div class="kv">
-      <span>${a.site_name||a.site} · ${esc(a.column_name||'')}</span>
-      <span>${a.pub_date||''}</span>
+      <span>${esc(a.site_name||a.site)} · ${esc(a.column_name||'')}</span>
+      <span>${(a.pub_date||'').slice(0,10)}</span>
       <span>${(a.chars||0).toLocaleString()} 字</span>
       ${a.source_text?`<span>来源 ${esc(a.source_text)}</span>`:''}
     </div>
-    ${a.content_empty ? '<div class="aibox"><h3>注意</h3>本文正文在源站即为空（转载占位条目）。</div>' : ''}
-    <div style="margin-bottom:14px">
-      <a href="/open?id=${a.id}" target="_blank" rel="noopener"
-         style="display:inline-block;background:var(--acc);color:#fff;
-                padding:7px 14px;border-radius:6px;text-decoration:none;font-size:13.5px">
-         ↗ 跳转原文</a>
+    ${a.content_empty?'<div class="aibox"><h3>注意</h3>本文正文在源站即为空（转载占位条目），非抓取失败。</div>':''}
+    <div class="row" style="margin-bottom:14px">
+      <a class="link" href="/open?id=${a.id}" target="_blank" rel="noopener">↗ 跳转原文</a>
       <a href="${esc(a.url)}" target="_blank" rel="noopener"
-         style="color:var(--dim);margin-left:12px;font-size:12.5px">直接打开</a>
+         style="color:var(--dim);font-size:12.5px">直接打开</a>
+      <div class="grow"></div>
+      <button class="btn" onclick="aiSum(${a.id})"
+        ${ready?'':'title="AI 未配置，先 cacx config set ai.* "'}>
+        ${ready?'✨ 生成摘要':'✨ AI 未配置'}</button>
     </div>
-    ${ai ? `<div class="aibox"><h3>AI 摘要</h3>
+    <div id="aiout"></div>
+    ${ai?`<div class="aibox"><h3>AI 摘要（已落库）</h3>
         <div>${esc(ai.summary||'')}</div>
         ${(ai.tags||[]).length?`<div style="margin-top:7px">${
           ai.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join(' ')}</div>`:''}
-      </div>` : ''}
-    <div class="body">${esc(a.content_text || '（无正文）')}</div>`;
+      </div>`:''}
+    <div class="body">${esc(a.content_text||'（无正文）')}</div>`;
   $('drawer').classList.add('on');
+}
+
+async function aiSum(id, commit){
+  try{
+    const btn=event.target; if(btn) btn.textContent='生成中…';
+    const r=await (await fetch('/api/ai/summarize',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id, commit: !!commit})
+    })).json();
+    if(commit){
+      toast('摘要已生成并落库');
+      detail(id);
+    } else {
+      // 默认只预览：把将要发给模型的 prompt 显示出来，让人先看一眼
+      $('aiout').innerHTML=`<div class="aibox"><h3>预览（尚未发送请求）</h3>
+        <pre>${esc(JSON.stringify(r.result,null,2))}</pre>
+        <div class="row" style="margin-top:9px">
+          <button class="btn" onclick="aiSum(${id},true)">确认生成并保存</button>
+          <span style="color:var(--dim);font-size:12px">
+            不点「确认」就不会发请求、不会消耗配额</span>
+        </div></div>`;
+      if(btn) btn.textContent='✨ 生成摘要';
+    }
+  }catch(e){
+    toast('生成失败：'+e.message, true);
+    const btn=event.target; if(btn) btn.textContent='✨ 生成摘要';
+  }
 }
 
 function closeDrawer(){ $('drawer').classList.remove('on'); }
 function reset(){
   ['q','date_from','date_to','min_chars'].forEach(id=>$(id).value='');
   ['site','column','year'].forEach(id=>$(id).value='');
-  $('skip_empty').checked = true;
+  $('skip_empty').checked=true;
   go(1);
 }
-function esc(s){ return String(s==null?'':s)
-  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-$('q').addEventListener('keydown', e=>{ if(e.key==='Enter') go(1); });
+function showTab(t){
+  $('v_search').style.display = t==='search'?'block':'none';
+  $('v_panel').style.display  = t==='panel'?'block':'none';
+  $('tab_search').className='btn'+(t==='search'?' on':'');
+  $('tab_panel').className ='btn'+(t==='panel'?' on':'');
+  if(t==='panel') loadPanel();
+}
+
+function drawBars(el, rows, minRows){
+  if(!rows.length){ el.innerHTML='<div class="empty" style="padding:20px">无数据</div>'; return; }
+  const max=Math.max(...rows.map(r=>r.n))||1;
+  el.innerHTML=rows.map(r=>{
+    const h=Math.max(2, Math.round(r.n/max*88));
+    return `<div class="bar-item" title="${r.k}: ${r.n} 篇 / ${(r.c/10000).toFixed(1)} 万字">
+      <div class="bar-v">${r.n}</div>
+      <div class="bar-fill" style="height:${h}px"></div>
+      <div class="bar-x">${r.k}</div></div>`;
+  }).join('');
+  el.scrollLeft = el.scrollWidth;
+}
+
+async function loadTrend(){
+  const site=$('trend_site').value;
+  const t=await (await fetch('/api/trend?granularity=month'+(site?'&site='+site:''))).json();
+  drawBars($('bar_month'), t.items.slice(-36));
+  const y=await (await fetch('/api/trend?granularity=year')).json();
+  drawBars($('bar_year'), y.items);
+}
+
+async function loadPanel(){
+  await loadTrend();
+  const f=await (await fetch('/api/facets')).json();
+  $('rank_col').innerHTML=f.columns.slice(0,12).map(c=>
+    `<div class="rank"><span class="t">${c.site==='cac'?'国':'浙'}·${esc(c.column_name)}</span>
+     <span class="v">${c.n}</span></div>`).join('');
+  const e=await (await fetch('/api/events?days=30')).json();
+  const ev=e.by_kind.map(x=>({k:x.kind,n:x.n}));
+  const top=e.top_open.map(x=>({k:x.title||'(已删)',n:x.n}));
+  $('rank_ev').innerHTML = (ev.length||top.length)
+    ? ev.map(x=>`<div class="rank"><span class="t">${x.k}</span><span class="v">${x.n} 次</span></div>`).join('')
+      + (top.length?`<div style="margin-top:9px;color:var(--dim);font-size:12px">跳原文最多：</div>`
+        + top.slice(0,6).map(x=>`<div class="rank"><span class="t">${esc(x.k)}</span>
+           <span class="v">${x.n}</span></div>`).join(''):'')
+    : '<div class="empty" style="padding:20px">还没有行为记录</div>';
+}
+
+$('q').addEventListener('keydown',e=>{ if(e.key==='Enter') go(1); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeDrawer(); });
 loadFacets().then(()=>go(1));
 </script>
 </body>

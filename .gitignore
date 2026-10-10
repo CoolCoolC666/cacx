@@ -31,5 +31,11 @@ _cache/
 *.log
 
 # ---- 一次性临时脚本（调试用，跑完即弃）----
-_tmp_*.py
 _tmp*.py
+_tmp*.js
+_probe.py
+
+# ---- 中文名 bat 的旧版（cmd 按 GBK 解码，UTF-8 中文会碎成乱码）----
+# 正式版是同名的英文名 .bat，见 README「一键启动」
+启动cacx.bat
+同步最新文章.bat

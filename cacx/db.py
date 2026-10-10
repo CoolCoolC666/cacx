@@ -126,6 +126,20 @@ CREATE TABLE IF NOT EXISTS ai_annotations (
     created_at TEXT,
     UNIQUE (article_id, task)
 );
+
+-- 用户行为埋点：检索 / 跳原文 / 导出。
+-- 「检索到哪篇、点了哪篇」是舆情传播分析里最直接的一手信号，
+-- 所以原文跳转走本服务中转而不是直链，就是为了能把这条记下来。
+CREATE TABLE IF NOT EXISTS events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,          -- search / open / export / summarize
+    article_id INTEGER,                -- 可空：search 不针对单篇
+    detail     TEXT,                   -- 检索词等
+    meta       TEXT,
+    created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_kind_time ON events(kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_article  ON events(article_id);
 """
 
 
@@ -389,6 +403,100 @@ class Database:
                 "SELECT id FROM articles WHERE site=? AND url=?",
                 (site, url)).fetchone()
         return self.get_article(r["id"]) if r else None
+
+    # ---------------------------------------------------------- 命中片段
+    @staticmethod
+    def make_snippet(text: str, terms: List[str], width: int = 90) -> str:
+        """
+        截取第一个命中词周围的片段，供列表页高亮。
+
+        必须在 Python 侧做而不是 SQL：中文没法用 substr 找多字节词的边界，
+        且 SQLite 的 LIKE 不给位置。宁可多读一点文本，也别让「片段」变成猜测。
+        """
+        if not text:
+            return ""
+        terms = [t for t in terms if t]
+        if not terms:
+            return text[:width].replace("\n", " ")
+        low = text.lower()
+        pos = -1
+        for t in terms:
+            p = low.find(t.lower())
+            if p >= 0 and (pos < 0 or p < pos):
+                pos = p
+        if pos < 0:
+            return text[:width].replace("\n", " ")
+        start = max(0, pos - width // 3)
+        end = min(len(text), start + width)
+        frag = text[start:end].replace("\n", " ").replace("\r", "")
+        return ("…" if start > 0 else "") + frag + ("…" if end < len(text) else "")
+
+    def annotate_snippets(self, items: List[dict], q: str,
+                          width: int = 90) -> List[dict]:
+        """给 search 结果就地补 snippet + highlights（不改 DB，不影响 CLI）"""
+        terms = [t for t in re.split(r'[\s,，、;；]+', q or "") if t]
+        if not terms:
+            for it in items:
+                it["snippet"] = ""
+                it["highlights"] = []
+            return items
+        ids = [it["id"] for it in items]
+        if not ids:
+            return items
+        ph = ",".join("?" * len(ids))
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT id, content_text FROM articles WHERE id IN ({ph})",
+                ids).fetchall()
+        by_id = {r["id"]: r["content_text"] or "" for r in rows}
+        for it in items:
+            txt = by_id.get(it["id"], "")
+            it["snippet"] = self.make_snippet(txt, terms, width)
+            it["highlights"] = [t for t in terms if t.lower() in txt.lower()]
+        return items
+
+    # ---------------------------------------------------------- 埋点
+    def record_event(self, kind: str, article_id: int = 0,
+                     detail: str = "", meta: str = ""):
+        """记录一条用户行为（检索/点击/导出），供传播分析用"""
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO events(kind, article_id, detail, meta, created_at) "
+                "VALUES(?,?,?,?,?)",
+                (kind, article_id or None, detail, meta,
+                 time.strftime("%Y-%m-%d %H:%M:%S")))
+            self.conn.commit()
+
+    def event_stats(self, since_days: int = 30) -> Dict[str, Any]:
+        since = time.strftime("%Y-%m-%d",
+                              time.localtime(time.time() - since_days * 86400))
+        with self._lock:
+            total = self.conn.execute(
+                "SELECT COUNT(*) FROM events WHERE created_at>=?",
+                (since,)).fetchone()[0]
+            by_kind = [dict(r) for r in self.conn.execute(
+                "SELECT kind, COUNT(*) n FROM events WHERE created_at>=? "
+                "GROUP BY kind ORDER BY n DESC", (since,))]
+            top = [dict(r) for r in self.conn.execute(
+                "SELECT e.article_id, a.title, a.site_name, COUNT(*) n "
+                "FROM events e LEFT JOIN articles a ON a.id=e.article_id "
+                "WHERE e.kind='open' AND e.created_at>=? "
+                "GROUP BY e.article_id ORDER BY n DESC LIMIT 10", (since,))]
+        return {"since": since, "total": total, "by_kind": by_kind, "top_open": top}
+
+    # ---------------------------------------------------------- 批量导出
+    def fetch_for_export(self, ids: List[int]) -> List[dict]:
+        """按 id 列表取完整记录（含正文），保持传入顺序"""
+        if not ids:
+            return []
+        ph = ",".join("?" * len(ids))
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT id,site,site_name,column_name,column_code,title,"
+                f"pub_date,url,source_text,chars,content_text "
+                f"FROM articles WHERE id IN ({ph})", ids).fetchall()
+        got = {r["id"]: dict(r) for r in rows}
+        return [got[i] for i in ids if i in got]
 
     # ---------------------------------------------------------- 统计
     def facets(self) -> Dict[str, Any]:
