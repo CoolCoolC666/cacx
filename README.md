@@ -181,6 +181,28 @@ cacx config import ~/Downloads/some-tool-config.json
 - **接口自检**：界面里直接跑 doctor，真打两站网络
 - **历史批次**：列出每次同步的列表数/新增数/失败数，**失败批次也显示**
 
+**接口自检 + AI 辅助**
+
+自检返回的是**结构化结果**，不是一段纯文本，所以界面能分栏渲染：
+逐站显示耗时与栏目数、问题列表、数据层统计。
+
+| 按钮 | 做什么 | 是否消耗配额 |
+| --- | --- | --- |
+| 接口自检 | 真打两站，看接口还通不通、选择器有没有失效 | 否 |
+| 🩺 自检 + AI 根因 | **只在发现问题时**才问模型「什么原因、怎么修」 | 有问题时才消耗 |
+| 📊 数据健康顾问 | 无论接口好坏都做一次数据质量评估 | 是 |
+
+「数据健康顾问」是给**一切正常**的场景准备的。原来 AI 只在出问题时才跑，
+全绿时永远不出声，等于「AI 辅助」实际上没有。
+
+> 喂给模型的数据字段都做了**口径翻译**：两站原始字段名不一致
+> （CAC 叫 `total_rec`、浙江叫 `count`，语义都是「源站声称的总量」），
+> 加上 `_口径说明` 段落讲清每个数字是什么。
+> 实测不翻译时，模型会把 `total_rec` 理解成「自检记录条数」，
+> 进而报出「自检 2040 条 vs 库存 2956 篇口径不一致」这种**假问题**；
+> 翻译之后评分从 78 变成 87，那条假风险消失了。
+
+
 **AI 摘要（顶部 ✦ AI 摘要）**
 
 - 集中查看所有已生成的摘要，不再只藏在单篇详情里
@@ -215,7 +237,8 @@ cacx config import ~/Downloads/some-tool-config.json
 `/api/recent` `/api/health` `/api/export` `/api/trend` `/api/events`
 `/api/config` `/api/config/status` `/api/ai/status`
 `/api/annotations` `/api/annotations/stats`
-`POST /api/sync` `/api/sync/status` `/api/sync/runs` `/api/doctor` `/open`，
+`POST /api/sync` `/api/sync/status` `/api/sync/runs`
+`/api/doctor?ai=true`（根因分析）`/api/doctor?advisory=true`（健康顾问）`/open`，
 交互式文档在 `/docs`。
 
 ---

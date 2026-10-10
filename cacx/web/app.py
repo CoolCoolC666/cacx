@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 from .. import config as C
 from .. import db as D
+from ..ai import advisory as advisory_run
 from ..ai import diagnose as ai_diagnose
 from ..ai import summarize as ai_summarize
 from ..ai import status as ai_status
@@ -477,16 +478,67 @@ def api_sync_runs(limit: int = Query(10, ge=1, le=100)):
 
 
 @app.get("/api/doctor")
-def api_doctor():
-    """接口自检。放后台跑，因为要真打两站网络。"""
-    import subprocess
-    import sys
-    # PROJECT_ROOT 定义在 config.py，不在 cacx/__init__.py —— 从错的地方导会 ImportError
-    r = subprocess.run(
-        [sys.executable, "-m", "cacx", "doctor"],
-        cwd=str(C.PROJECT_ROOT), capture_output=True, text=True, timeout=300,
-        encoding="utf-8", errors="replace")
-    return {"rc": r.returncode, "out": (r.stdout or "") + (r.stderr or "")}
+def api_doctor(ai: bool = False, advisory: bool = False):
+    """
+    接口自检，返回结构化结果（不是只吐一段文本，界面要分栏渲染）。
+
+    ai=True        对「有问题的站点」做根因分析（原来只有 CLI 有，
+                   界面点不到，等于没有）
+    advisory=True  无论接口好坏都做一次数据健康评估 —— 全绿时也能问 AI
+                   「这批数据能不能用于研究、下一步该采什么」
+
+    两条 AI 链路都是**补充**：AI 没配置或调用失败都不影响规则层结论。
+    """
+    from ..collector import runner as RUN
+    cfg = _cfg()
+    d = _db()
+    reports = []
+    t_all = time.time()
+    for s in RUN.COLLECTORS:
+        col = RUN.get_collector(cfg, s, verbose=False)
+        if col is None:
+            continue
+        t0 = time.time()
+        try:
+            rep = col.health_check()
+        except Exception as e:
+            rep = {"ok": False, "issues": [f"自检异常: {type(e).__name__}: {e}"],
+                   "checked_columns": 0}
+        rep["elapsed_ms"] = int((time.time() - t0) * 1000)
+        rep["site"] = s
+        rep["site_name"] = col.name
+        reports.append(rep)
+
+    f = d.facets()
+    bad = [r for r in reports if not r.get("ok")]
+    out = {
+        "ok": not bad,
+        "elapsed_ms": int((time.time() - t_all) * 1000),
+        "reports": reports,
+        "data": {"total": f["total"], "chars": f["chars"], "days": f["days"],
+                 "empty": f["empty"], "external": f["external"]},
+        "ai": None,
+        "ai_note": "",
+    }
+
+    st = ai_status(cfg)
+    if (ai or advisory) and not st.get("ready"):
+        out["ai_note"] = "AI 未就绪，跳过 AI 辅助（规则层结论不受影响）"
+    elif ai and bad:
+        try:
+            out["ai"] = ai_diagnose(cfg, bad, d)
+            if out["ai"] is None:
+                out["ai_note"] = "AI 未返回结果"
+        except Exception as e:
+            out["ai_note"] = f"AI 调用失败: {type(e).__name__}"
+    elif advisory:
+        try:
+            out["ai"] = advisory_run(cfg, d, reports, d.recent_sync_runs(5))
+            if out["ai"] is None:
+                out["ai_note"] = "AI 未返回结果"
+        except Exception as e:
+            out["ai_note"] = f"AI 调用失败: {type(e).__name__}: {e}"
+    return out
 
 
 # ---------------------------------------------------------------- 配置

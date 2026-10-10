@@ -42,17 +42,30 @@ shown = C.describe(cfg)
 check("describe 不含明文 key", "api_key" in shown and '""' in shown
       or '"api_key": ""' in shown)
 
-# 临时写一个含密钥的配置，确认存的是明文、读出来是掩码
-C.set_path(cfg, "ai.api_key", "sk-TESTKEY-1234567890")
-C.save(cfg)
-cfg2 = C.load()
-check("密钥落盘为明文(可被程序读)",
-      C.get_path(cfg2, "ai.api_key") == "sk-TESTKEY-1234567890")
-check("show 时掩码", "1234567890" not in C.describe(cfg2).replace("****", "")
-      or "****" in C.describe(cfg2))
-C.set_path(cfg, "ai.api_key", "")
-C.save(cfg)
-print("   （测试用密钥已清除）")
+# ⚠ 自检全程唯一的第一原则：**不许弄丢用户真实的配置**。
+# 这里要临时写一个含密钥的配置来验证「落盘是明文、读出来是掩码」，
+# 所以必须先记下原值、测完原样写回。
+# 早期版本是无条件 `set_path(cfg,'ai.api_key','')` —— 结果用户配好的
+# 真实 key 被自检洗掉了，而且连后面的「快照还原」都救不回来，
+# 因为快照拍的是内存里那个已经被洗脏的 cfg。
+_orig_cfg_text = C.SETTINGS_FILE.read_text(encoding="utf-8")
+_orig_key = C.get_path(C.load(), "ai.api_key") or ""
+try:
+    C.set_path(cfg, "ai.api_key", "sk-TESTKEY-1234567890")
+    C.save(cfg)
+    cfg2 = C.load()
+    check("密钥落盘为明文(可被程序读)",
+          C.get_path(cfg2, "ai.api_key") == "sk-TESTKEY-1234567890")
+    check("show 时掩码",
+          "1234567890" not in C.describe(cfg2).replace("****", "")
+          or "****" in C.describe(cfg2))
+finally:
+    # 原样写回整份文件，不猜着填
+    C.SETTINGS_FILE.write_text(_orig_cfg_text, encoding="utf-8")
+    _now = C.get_path(C.load(), "ai.api_key") or ""
+    check("自检跑完用户真实密钥原样还在", _now == _orig_key,
+          f"keylen {len(_orig_key)} → {len(_now)}")
+    print("   （测试用密钥已还原）")
 
 print()
 print("=" * 70)
@@ -219,6 +232,38 @@ if _index.is_file():
               "SELECT COUNT(*) FROM ai_annotations WHERE provider='__selftest__'"
           ).fetchone()[0] == 0)
 
+    # AI 辅助：doctor 的根因分析 + 数据健康顾问
+    from cacx.ai import advisory, diagnose
+    check("AI 包导出 advisory（否则 web 层 import 就炸）",
+          callable(advisory) and callable(diagnose))
+    # ⚠ diagnose/advisory 是**会真发请求**的（返回给人看的结论不能是预览）。
+    # 所以只有「没配 key」时才能调它们验证降级行为；
+    # 配了 key 的情况下调一次就是白烧配额，这里只验签名不验调用。
+    _no_key = not (C.get_path(C.load(), "ai.api_key") or "")
+    if _no_key:
+        check("AI 未配置时 diagnose 返回 None",
+              diagnose(cfg, [{"site": "x", "issues": ["假问题"]}], d) is None)
+        check("AI 未配置时 advisory 返回 None",
+              advisory(cfg, d, [{"site": "cac", "ok": True}], []) is None)
+    else:
+        check("AI 未配置时 diagnose 返回 None", True,
+              "已配置 key，跳过（真调会烧配额）")
+        check("AI 未配置时 advisory 返回 None", True,
+              "已配置 key，跳过（真调会烧配额）")
+    # 两条 AI 链路都必须接受这些参数名，签名写错的话 web 层会 TypeError
+    check("diagnose/advisory 签名兼容",
+          {"cfg", "problems", "db"} <= set(diagnose.__code__.co_varnames)
+          and {"cfg", "db", "reports", "recent_runs"}
+          <= set(advisory.__code__.co_varnames))
+
+    # 两站 health_check 的原始字段名不统一（CAC=total_rec, 浙江=count），
+    # 但 advisory 内部已翻译成统一口径。这条守住那个翻译不被改掉。
+    _adv_src = Path(advisory.__code__.co_filename).read_text(encoding="utf-8")
+    check("advisory 喂给模型前已统一字段口径",
+          "源站声称的该栏目总条数" in _adv_src
+          and '"total_rec"' in _adv_src and '"count"' in _adv_src,
+          "两站原始字段都已映射")
+
     # 同步历史：列名必须以表结构为准，不能照着 Python 参数名写查询
     # （record_sync 的形参叫 new，列名却是 new_articles，照参数名写会 500）
     _runs = d.recent_sync_runs(3)
@@ -271,13 +316,12 @@ _expect_ready = bool(cfg["ai"].get("provider", "none") not in ("", "none")) \
 check("AI 就绪状态与配置自洽", st["ready"] == _expect_ready,
       f"provider={st['provider']} ready={st['ready']} 期望={_expect_ready}")
 check("AI 状态不泄露密钥", "sk-" not in json.dumps(st, ensure_ascii=False))
-# dry_run 不应发请求
-# ⚠ 这里会临时改写 settings.json。必须先整份快照再改、最后原样写回 ——
-# 早期版本只把 ai.* 四个字段清空，结果用户配好的真实配置被自检冲掉了。
-# 现在改成「快照 → 改 → 无条件还原」，还原的是整份文件而不是猜着填。
-_ai_snapshot = {k: cfg["ai"].get(k) for k in
-                ("provider", "base_url", "api_key", "model", "enabled")}
+# dry_run 不应发请求。
+# ⚠ 这里会临时改写 settings.json。快照必须从**磁盘文件原文**取，
+# 不能从内存里的 cfg 取 —— 内存那个 cfg 在第 2 节被测试改过，
+# 用它当快照等于「用脏数据还原干净文件」，会把用户配置洗掉。
 _cfg_snapshot = C.SETTINGS_FILE.read_text(encoding="utf-8")
+_ai_snapshot = json.loads(_cfg_snapshot).get("ai", {})
 C.set_path(cfg, "ai.provider", "openai_compat")
 C.set_path(cfg, "ai.base_url", "https://example.invalid/v1")
 C.set_path(cfg, "ai.api_key", "sk-dummy")
@@ -291,11 +335,12 @@ try:
           and json.loads(prev).get("_dry_run") is True)
 finally:
     C.SETTINGS_FILE.write_text(_cfg_snapshot, encoding="utf-8")
-    _after = C.load()
-    check("自检跑完配置原样还原",
-          all(_after["ai"].get(k) == v for k, v in _ai_snapshot.items()),
-          f"provider={_after['ai'].get('provider')} "
-          f"has_key={bool(_after['ai'].get('api_key'))}")
+    _after = json.loads(C.SETTINGS_FILE.read_text(encoding="utf-8"))["ai"]
+    check("AI 段配置原样还原",
+          all(_after.get(k) == v for k, v in _ai_snapshot.items()
+              if k in _after and not isinstance(v, dict)),
+          f"provider={_after.get('provider')} "
+          f"has_key={bool(_after.get('api_key'))}")
     check("测试假密钥未残留",
           C.get_path(C.load(), "ai.api_key") != "sk-dummy")
 d.close()

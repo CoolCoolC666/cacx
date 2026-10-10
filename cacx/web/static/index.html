@@ -125,6 +125,32 @@
          padding:9px 18px;font-size:13px;z-index:60;display:none}
   .toast.on{display:block}
   .toast.err{border-color:var(--err)}
+  /* 自检结果 */
+  .doc-sites{margin-bottom:10px}
+  .doc-issue{color:var(--err);font-size:12.5px;padding:5px 0 8px 18px;
+            white-space:pre-wrap}
+  .doc-data{color:var(--dim);font-size:12.5px;padding:9px 11px;
+            background:var(--panel2);border-radius:6px;margin-bottom:10px}
+  .doc-data b{color:var(--acc2)}
+  .doc-ai{background:var(--panel2);border:1px solid var(--line);
+          border-left:3px solid var(--acc);border-radius:6px;padding:12px 14px}
+  .doc-ai-hd{font-size:13px;color:var(--acc2);font-weight:600;margin-bottom:9px}
+  .doc-score{font-size:30px;font-weight:700;color:var(--acc2);line-height:1.1;
+             margin-bottom:9px}
+  .doc-score span{font-size:14px;color:var(--dim);font-weight:400}
+  .doc-line{font-size:13px;line-height:1.75;margin-bottom:5px}
+  .doc-line.dim{color:var(--dim);font-size:12.5px}
+  .doc-line b{display:inline-block;min-width:66px;color:var(--dim);
+              font-weight:600;margin-right:5px}
+  .doc-list{font-size:12.5px;line-height:1.75;margin:7px 0;
+            padding-left:11px;border-left:2px solid var(--line)}
+  .doc-list b{display:block;color:var(--dim);margin-bottom:3px}
+  .doc-list.warn{border-left-color:var(--warn)}
+  .doc-list.warn b{color:var(--warn)}
+  .doc-list.ok{border-left-color:var(--ok)}
+  .doc-list.ok b{color:var(--ok)}
+  .doc-ai-note{color:var(--warn);font-size:12.5px;padding:7px 11px;
+               background:rgba(255,180,84,.07);border-radius:6px}
 </style>
 </head>
 <body>
@@ -241,9 +267,16 @@
           <button class="btn" style="background:var(--acc);border-color:var(--acc);color:#fff"
             id="sy_go" onclick="startSync()">开始同步</button>
           <button class="btn" onclick="runDoctor()">接口自检</button>
+          <button class="btn" onclick="runDoctor(true)">🩺 自检 + AI 根因</button>
+          <button class="btn" onclick="runAdvisory()">📊 数据健康顾问</button>
           <span id="sy_state" style="color:var(--dim);font-size:12.5px"></span>
         </div>
       </div>
+    </div>
+
+    <div class="box" id="doctor_box" style="margin-top:12px;display:none">
+      <h3>自检结果 <span id="doc_verdict"></span></h3>
+      <div id="doc_body"></div>
     </div>
 
     <div class="box" style="margin-top:12px">
@@ -616,16 +649,90 @@ async function pollSync(){
   SYNC_TIMER=setTimeout(pollSync, running?1200:4000);
 }
 
-async function runDoctor(){
-  const box=$('log');
-  box.textContent='正在自检（真打两站接口，约 3-10 秒）…';
-  $('log_cursor').textContent='0';
+async function runDoctor(useAI){
+  $('doctor_box').style.display='block';
+  $('doc_verdict').innerHTML='<span style="color:var(--dim)">运行中…</span>';
+  $('doc_body').innerHTML='<div class="empty" style="padding:20px">正在真打两站接口，约 2-10 秒</div>';
   try{
-    const r=await (await fetch('/api/doctor')).json();
-    box.textContent=r.out;
-    box.scrollTop=box.scrollHeight;
-    toast(r.rc===0?'接口全部正常':'有站点需要关注', r.rc!==0);
-  }catch(e){ box.textContent='自检失败：'+e.message; toast('自检失败', true); }
+    const r=await (await fetch('/api/doctor'+(useAI?'?ai=true':''))).json();
+    renderDoctor(r);
+    toast(r.ok?'接口全部正常':'有站点需要关注', !r.ok);
+  }catch(e){
+    $('doc_verdict').innerHTML='<span style="color:var(--err)">失败</span>';
+    $('doc_body').innerHTML='<div class="empty" style="padding:20px">'+esc(e.message)+'</div>';
+  }
+}
+
+async function runAdvisory(){
+  $('doctor_box').style.display='block';
+  $('doc_verdict').innerHTML='<span style="color:var(--dim)">AI 分析中…（会真发请求，约 10-40 秒）</span>';
+  $('doc_body').innerHTML='<div class="empty" style="padding:20px">正在把数据快照交给模型评估</div>';
+  try{
+    const r=await (await fetch('/api/doctor?advisory=true')).json();
+    renderDoctor(r);
+    toast(r.ai?'AI 建议已生成':'AI 未返回结果', !r.ai);
+  }catch(e){
+    $('doc_verdict').innerHTML='<span style="color:var(--err)">失败</span>';
+    $('doc_body').innerHTML='<div class="empty" style="padding:20px">'+esc(e.message)+'</div>';
+  }
+}
+
+function renderDoctor(r){
+  $('doc_verdict').innerHTML = r.ok
+    ? '<span class="sent pos">全部正常</span>'
+    : `<span class="sent neg">${r.reports.filter(x=>!x.ok).length} 站需关注</span>`;
+  const dt=r.data||{};
+  let h=`<div class="doc-sites">${(r.reports||[]).map(x=>`
+    <div class="rank">
+      <span class="t">${x.ok?'<span style="color:var(--ok)">OK</span>':
+        '<span style="color:var(--err)">!!</span>'} ${esc(x.site_name)}</span>
+      <span class="v">${x.elapsed_ms}ms · 栏目 ${x.checked_columns||'?'}</span>
+    </div>
+    ${(x.issues||[]).length?`<div class="doc-issue">${
+      x.issues.map(i=>'· '+esc(i)).join('<br>')}</div>`:''}`).join('')}</div>`;
+
+  h+=`<div class="doc-data">
+    文章 <b>${dt.total}</b> 篇 · 总字 <b>${(dt.chars/10000).toFixed(0)}</b> 万 ·
+    覆盖 ${dt.days} 天 · 源站即空 <b>${dt.empty}</b> 篇 ·
+    站外 <b>${dt.external}</b> 条 · 耗时 ${r.elapsed_ms}ms</div>`;
+
+  if(r.ai_note){
+    h+=`<div class="doc-ai-note">${esc(r.ai_note)}</div>`;
+  }
+  if(r.ai){
+    const a=r.ai;
+    if(a._error){
+      h+=`<div class="doc-ai-note" style="color:var(--err)">AI 出错：${esc(a._error)}</div>`;
+    } else if(a['数据质量评分']!==undefined){
+      h+=`<div class="doc-ai">
+        <div class="doc-ai-hd">📊 数据健康顾问
+          <span style="color:var(--dim);font-weight:400">${esc(a._model||'')}</span></div>
+        <div class="doc-score">${a['数据质量评分']}<span>/100</span></div>
+        <div class="doc-line"><b>结论</b>${esc(a['结论']||'')}</div>
+        ${docList('数据质量观察', a['数据质量观察'])}
+        ${docList('潜在风险', a['潜在风险'], 'warn')}
+        ${docList('后续建议', a['后续建议'], 'ok')}
+        <div class="doc-line dim">需人工确认：${esc(a['需人工确认']||'否')}</div>
+      </div>`;
+    } else {
+      h+=`<div class="doc-ai">
+        <div class="doc-ai-hd">🩺 AI 根因分析
+          <span style="color:var(--dim);font-weight:400">${esc(a._model||'')}</span></div>
+        <div class="doc-line"><b>可能原因</b>${esc(a['可能原因']||'')}</div>
+        ${docList('判断依据', a['判断依据'])}
+        ${docList('修复建议', a['修复建议'], 'ok')}
+        <div class="doc-line">风险等级 <b>${esc(a['风险等级']||'未知')}</b> ·
+          需人工确认 ${esc(a['需人工确认']||'否')}</div>
+      </div>`;
+    }
+  }
+  $('doc_body').innerHTML=h;
+}
+
+function docList(title, arr, cls){
+  if(!arr || !arr.length) return '';
+  return `<div class="doc-list ${cls||''}"><b>${title}</b>`+
+    arr.map(x=>'<div>· '+esc(x)+'</div>').join('')+'</div>';
 }
 
 async function loadRuns(){
