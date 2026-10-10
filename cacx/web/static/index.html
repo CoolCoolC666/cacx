@@ -53,6 +53,16 @@
   .card .m{color:var(--dim);font-size:12px;display:flex;gap:11px;flex-wrap:wrap}
   .card .s{color:#c2c8d4;font-size:12.5px;margin-top:6px;line-height:1.6;
            border-left:2px solid var(--line);padding-left:9px}
+  .ann{cursor:pointer}
+  .ann:hover{border-color:var(--acc);background:var(--panel2)}
+  .ann-sum{color:#dfe4ec;font-size:13.5px;line-height:1.75;margin-top:8px;
+           padding:9px 11px;background:var(--panel2);border-radius:6px;
+           border-left:2px solid var(--acc)}
+  .m .dim{color:#6f7787}
+  .sent{font-size:11.5px;padding:1px 8px;border-radius:10px;flex-shrink:0}
+  .sent.pos{background:#17351f;color:var(--ok);border:1px solid #2c5a45}
+  .sent.neu{background:#232936;color:var(--dim);border:1px solid var(--line)}
+  .sent.neg{background:#3a1c1c;color:var(--err);border:1px solid #5a2c2c}
   mark{background:var(--hl);color:#1a1a1a;border-radius:2px;padding:0 2px;
        font-weight:600}
   .tag{background:#232936;border-radius:4px;padding:1px 7px;font-size:11.5px}
@@ -125,6 +135,9 @@
   <button class="btn on" id="tab_search" onclick="showTab('search')">检索</button>
   <button class="btn" id="tab_panel" onclick="showTab('panel')">数据面板</button>
   <button class="btn" id="tab_set" onclick="showTab('set')">⚙ 设置</button>
+  <button class="btn" id="tab_ai" onclick="showTab('ai')">✦ AI 摘要 <span
+    id="ai_badge" style="color:var(--dim)"></span></button>
+  <button class="btn" id="tab_sync" onclick="showTab('sync')">⇅ 数据同步</button>
 </header>
 
 <main>
@@ -188,6 +201,84 @@
         <div id="rank_ev"></div>
       </div>
     </div>
+  </section>
+
+  <!-- ============ 数据同步 ============ -->
+  <section id="v_sync" style="display:none">
+    <div class="box">
+      <h3>同步设置</h3>
+      <p style="color:var(--dim);font-size:12.5px;margin:0 0 12px;line-height:1.7">
+        只读两站的公开列表接口，不登录、不碰需要授权的内容。
+        首次全量约 20 分钟，日常增量一般 1-3 分钟。<br>
+        <b style="color:var(--warn)">增量</b>只补库里没有的；
+        <b style="color:var(--warn)">全量</b>会重抓并刷新所有文章（耗时最长）；
+        <b style="color:var(--warn)">只盘点</b>只列条数、不写库，用来「先看看有多少」。
+      </p>
+      <div class="form">
+        <label>站点
+          <select id="sy_site">
+            <option value="">全部站点</option>
+            <option value="cac">仅中国网信办</option>
+            <option value="zjwx">仅浙江网信网</option>
+          </select>
+        </label>
+        <label>模式
+          <select id="sy_mode">
+            <option value="incremental">增量（只补新增，推荐）</option>
+            <option value="list-only">只盘点（不写库）</option>
+            <option value="full">全量重抓（慢，会刷新全部）</option>
+          </select>
+        </label>
+        <label>年份（可选）
+          <select id="sy_year">
+            <option value="">全部年份（按设置页的范围）</option>
+            <option value="2024">2024</option>
+            <option value="2025">2025</option>
+            <option value="2026">2026</option>
+          </select>
+        </label>
+        <div class="row">
+          <button class="btn" style="background:var(--acc);border-color:var(--acc);color:#fff"
+            id="sy_go" onclick="startSync()">开始同步</button>
+          <button class="btn" onclick="runDoctor()">接口自检</button>
+          <span id="sy_state" style="color:var(--dim);font-size:12.5px"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="box" style="margin-top:12px">
+      <h3>实时日志
+        <span class="grow" style="flex:1"></span>
+        <button class="btn" onclick="$('log').textContent='';document.getElementById('log_cursor').textContent=0">清屏</button>
+      </h3>
+      <div id="log" style="background:#0b0d11;border:1px solid var(--line);
+           border-radius:6px;padding:11px 13px;height:250px;overflow:auto;
+           font:12.5px/1.75 Consolas,Monaco,monospace;color:#c2c8d4;
+           white-space:pre-wrap;word-break:break-all"></div>
+      <div id="log_cursor" style="display:none">0</div>
+    </div>
+
+    <div class="box" style="margin-top:12px">
+      <h3>历史批次</h3>
+      <div id="sync_runs"></div>
+    </div>
+  </section>
+
+  <!-- ============ AI 摘要 ============ -->
+  <section id="v_ai" style="display:none">
+    <div class="box" style="margin-bottom:12px">
+      <h3>生成情况</h3>
+      <div id="ai_stats" style="font-size:13px;color:var(--dim)">加载中…</div>
+      <div class="row" style="margin-top:10px">
+        <input id="ai_q" placeholder="在已生成的摘要/标题/标签里搜" style="min-width:250px">
+        <select id="ai_site"><option value="">全部站点</option></select>
+        <button class="btn" onclick="loadAnns()">查看</button>
+        <div class="grow"></div>
+        <button class="btn" onclick="exportAnns()">↓ 导出全部摘要</button>
+      </div>
+    </div>
+    <div id="ai_list" class="list"></div>
+    <div class="pager" id="ai_pager"></div>
   </section>
 
   <!-- ============ 设置 ============ -->
@@ -458,14 +549,165 @@ function reset(){
 }
 
 function showTab(t){
-  $('v_search').style.display = t==='search'?'block':'none';
-  $('v_panel').style.display  = t==='panel'?'block':'none';
-  $('v_set').style.display    = t==='set'?'block':'none';
-  $('tab_search').className='btn'+(t==='search'?' on':'');
-  $('tab_panel').className ='btn'+(t==='panel'?' on':'');
-  $('tab_set').className   ='btn'+(t==='set'?' on':'');
+  const map={search:'v_search',panel:'v_panel',set:'v_set',ai:'v_ai',sync:'v_sync'};
+  for(const k in map) $(map[k]).style.display = (k===t)?'block':'none';
+  for(const k of ['tab_search','tab_panel','tab_set','tab_ai','tab_sync']){
+    $(k).className='btn'+(k==='tab_'+t?' on':'');
+  }
   if(t==='panel') loadPanel();
   if(t==='set') loadCfg();
+  if(t==='ai'){ loadAiBadge(); loadAnns(); }
+  if(t==='sync'){ loadRuns(); pollSync(); }
+}
+
+/* ---------------- 同步页 ---------------- */
+let SYNC_TIMER=null;
+
+async function startSync(){
+  const mode=$('sy_mode').value;
+  const site=$('sy_site').value;
+  const year=$('sy_year').value;
+  // 破坏性操作先问一句，别让人手滑把两万篇重抓一遍
+  if(mode==='full' && !confirm(
+      '全量重抓会重新抓取所有文章并刷新数据库。\n'+
+      '按当前速度可能需要 20 分钟以上，期间会持续占用网络。\n\n确定继续吗？')) return;
+  $('log').textContent=''; $('log_cursor').textContent='0';
+  // 后端这个端点是普通参数（Query），所以用 query string，不是 JSON body
+  const qs=new URLSearchParams();
+  if(site) qs.set('sites',site);
+  qs.set('mode',mode);
+  if(year) qs.set('year',year);
+  try{
+    const r=await (await fetch('/api/sync?'+qs,{method:'POST'})).json();
+    if(r.error){ toast(r.detail||'启动失败', true); return; }
+    toast('同步已开始');
+    pollSync();
+  }catch(e){ toast('启动失败：'+e.message, true); }
+}
+
+async function pollSync(){
+  clearTimeout(SYNC_TIMER);
+  let cursor=parseInt($('log_cursor').textContent||'0');
+  let running=false;
+  try{
+    const s=await (await fetch('/api/sync/status?since='+cursor)).json();
+    running=s.running;
+    if(s.log_total<cursor) cursor=0;      // 日志被截断过，从头再来
+    const lines=s.logs.map(l=>
+      `${l.t}  ${l.msg}`+
+      (l.level==='error'?'  ✗':l.level==='ok'?'  ✓':'')).join('\n');
+    if(lines){ $('log').textContent += ( $('log').textContent?'\n':'' ) + lines;
+              $('log').scrollTop=$('log').scrollHeight; }
+    $('log_cursor').textContent=s.log_total;
+
+    const t=s.totals||{};
+    $('sy_state').innerHTML = s.running
+      ? `运行中… 列表 ${t.listed||0} · 新增 ${t.new||0} · 失败 ${t.failed||0}`+
+        (s.error?` · <span style="color:var(--err)">${esc(s.error)}</span>`:'')
+      : (s.finished_at
+        ? `已结束 ${s.finished_at} · 新增 <b style="color:var(--ok)">${t.new||0}</b> 篇`+
+          (t.failed?` · 失败 ${t.failed}`:'')+(s.error?' · 出错':'')
+        : '空闲');
+    $('sy_go').disabled = s.running;
+    $('sy_go').textContent = s.running ? '同步中…' : '开始同步';
+    if(!s.running && s.finished_at){ loadRuns(); loadFacets(); }
+  }catch(e){ /* 服务重启中，下轮再试 */ }
+  // s 在 try 外不可见，所以用 running 变量带出来
+  SYNC_TIMER=setTimeout(pollSync, running?1200:4000);
+}
+
+async function runDoctor(){
+  const box=$('log');
+  box.textContent='正在自检（真打两站接口，约 3-10 秒）…';
+  $('log_cursor').textContent='0';
+  try{
+    const r=await (await fetch('/api/doctor')).json();
+    box.textContent=r.out;
+    box.scrollTop=box.scrollHeight;
+    toast(r.rc===0?'接口全部正常':'有站点需要关注', r.rc!==0);
+  }catch(e){ box.textContent='自检失败：'+e.message; toast('自检失败', true); }
+}
+
+async function loadRuns(){
+  try{
+    const r=await (await fetch('/api/sync/runs?limit=12')).json();
+    if(!r.items.length){ $('sync_runs').innerHTML='<div class="empty" style="padding:20px">还没有同步记录</div>'; return; }
+    $('sync_runs').innerHTML=r.items.map(x=>`
+      <div class="rank">
+        <span class="t">${esc(x.site==='cac'?'中国网信办':'浙江网信网')} ·
+          <span style="color:var(--dim)">${esc(x.mode)}</span></span>
+        <span class="v">列表 ${x.listed} · 新增 ${x.new_articles}
+          ${x.failed?`· <span style="color:var(--err)">失败 ${x.failed}</span>`:''}
+          <span style="color:#6f7787"> ${esc((x.started_at||'').slice(5,16))}</span></span>
+      </div>`).join('');
+  }catch(e){}
+}
+
+/* ---------------- AI 摘要页 ---------------- */
+const SENTI = {positive:'正面', neutral:'中性', negative:'负面'};
+const SENTI_CLS = {positive:'sent.pos', neutral:'sent.neu', negative:'sent.neg'};
+
+async function loadAiBadge(){
+  try{
+    const s=await (await fetch('/api/annotations/stats')).json();
+    $('ai_badge').textContent = s.summarized
+      ? `${s.summarized}` : '';
+    if(!$('ai_stats').dataset.done){
+      $('ai_stats').innerHTML = `已生成 <b class="n">${s.summarized}</b> 篇，`+
+        `可生成 ${s.summarizable} 篇（有正文的），覆盖率 `+
+        `<b class="n">${s.coverage}%</b>`;
+      $('ai_stats').dataset.done='1';
+    }
+  }catch(e){ $('ai_badge').textContent=''; }
+}
+
+async function loadAnns(){
+  const q=encodeURIComponent($('ai_q').value.trim());
+  const site=$('ai_site').value;
+  const r=await (await fetch(`/api/annotations?limit=50&q=${q}&site=${site}`)).json();
+  const L=$('ai_list');
+  if(!r.items.length){
+    L.innerHTML=`<div class="empty">${
+      r.total===0
+      ? '还没有生成过摘要。<br>去「检索」页点开任意文章 → 点「✨ 生成摘要」。<br>没配 key 的话，先去「⚙ 设置」填。'
+      : '没有匹配的摘要。换个词试试。'}</div>`;
+    $('ai_pager').innerHTML='';
+    return;
+  }
+  L.innerHTML=r.items.map(it=>{
+    const p=it.parsed||{};
+    const tags=(p.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join(' ');
+    const ent=(p.entities||[]).length
+      ? `<div style="color:var(--dim);font-size:12px;margin-top:6px">涉及：${
+          esc((p.entities||[]).join('、'))}</div>` : '';
+    const sent=p.sentiment
+      ? `<span class="sent ${SENTI_CLS[p.sentiment]||''}">${
+          SENTI[p.sentiment]||esc(p.sentiment)}</span>` : '';
+    return `<div class="card ann" onclick="detail(${it.id})">
+      <div class="t">${esc(it.title)}</div>
+      <div class="m">
+        <span class="tag">${esc(it.site_name||it.site)}</span>
+        <span class="tag">${esc(it.column_name||'')}</span>
+        <span>${(it.pub_date||'').slice(0,10)}</span>
+        <span class="dim">生成于 ${esc((it.created_at||'').slice(0,16))}</span>
+        ${it.model?`<span class="dim">${esc(it.model)}</span>`:''}
+        ${sent}
+      </div>
+      <div class="ann-sum">${esc(p.summary||'（空）')}</div>
+      ${tags?`<div style="margin-top:7px">${tags}</div>`:''}
+      ${ent}
+    </div>`;
+  }).join('');
+  $('ai_pager').innerHTML=r.total>r.items.length
+    ? `<span style="color:var(--dim)">显示 ${r.items.length} / 共 ${r.total}</span>`
+    : '';
+}
+
+function exportAnns(){
+  const q=encodeURIComponent($('ai_q').value.trim());
+  const site=$('ai_site').value;
+  window.location.href=`/api/export?format=jsonl&limit=2000&with_ai=true&q=${q}&site=${site}`;
+  toast('正在导出…');
 }
 
 /* ---------------- 设置 ---------------- */

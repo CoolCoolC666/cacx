@@ -19,6 +19,11 @@ sync-latest.bat       双击 → 同步两站最新文章 → 打印统计
 
 首次运行会自动 `pip install`，之后就直接开。关闭黑色命令行窗口即停止服务。
 
+> 同步其实**不必**用 `sync-latest.bat`：服务起来后，界面上的
+> **「⇅ 数据同步」标签**就能做同样的事，还能选站点/模式/年份、
+> 看实时日志和历史批次。下面 CLI 那份保留给习惯命令行、或想写进
+> 计划任务定时跑的场景。
+
 命令行用法：
 
 ```bash
@@ -167,6 +172,25 @@ cacx config import ~/Downloads/some-tool-config.json
 - 栏目 Top 12
 - 检索行为统计：各类操作次数、跳原文最多的文章
 
+**数据同步（顶部 ⇅ 数据同步）**
+
+- 选项：站点（全部/仅 CAC/仅浙江）、模式（增量/只盘点/全量重抓）、年份
+- **实时日志**：逐条推送，跑到哪一目了然；不用对着黑窗口干等
+- **并发保护**：同一时间只允许一次同步，再点会提示「已有同步在跑」
+- **全量重抓有二次确认** —— 手滑点一下就重抓两万篇，代价太大
+- **接口自检**：界面里直接跑 doctor，真打两站网络
+- **历史批次**：列出每次同步的列表数/新增数/失败数，**失败批次也显示**
+
+**AI 摘要（顶部 ✦ AI 摘要）**
+
+- 集中查看所有已生成的摘要，不再只藏在单篇详情里
+- 每条显示：摘要正文、主题标签、情感倾向（正面绿/中性灰/负面红）、
+  涉及机构、生成模型与时间
+- 顶部显示覆盖率：已生成 / 可生成 / 百分比
+  （分母是**有正文的文章数**，源站即空的转载占位不算）
+- 支持在摘要内容、标题、标签里搜索
+- 一键导出全部摘要（CSV 带 `ai_summary`/`ai_tags`/`ai_sentiment`/`ai_entities`）
+
 **设置页（右上角 ⚙）**
 
 - AI 供应商 / 接口地址 / 模型 / 密钥，以及启用开关、tokens、超时
@@ -189,7 +213,9 @@ cacx config import ~/Downloads/some-tool-config.json
 
 接口：`/api/search` `/api/article/{id}` `/api/facets` `/api/stats`
 `/api/recent` `/api/health` `/api/export` `/api/trend` `/api/events`
-`/api/config` `/api/config/status` `/api/ai/status` `/open`，
+`/api/config` `/api/config/status` `/api/ai/status`
+`/api/annotations` `/api/annotations/stats`
+`POST /api/sync` `/api/sync/status` `/api/sync/runs` `/api/doctor` `/open`，
 交互式文档在 `/docs`。
 
 ---

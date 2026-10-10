@@ -23,6 +23,7 @@ FastAPI 检索服务
 """
 
 import json
+import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -120,28 +121,51 @@ def api_export(
     format: str = Query("csv", pattern="^(csv|jsonl)$"),
     limit: int = Query(200, ge=1, le=2000),
     with_content: bool = True,
+    with_ai: bool = False,
 ):
     """
     按当前检索条件导出并直接下载。
 
     限量 2000 条是刻意的：正文动辄数千字，一次导出上万条会把内存打满。
     要全量导出走 CLI（`cacx export --limit`），那边可以慢慢流式写文件。
+
+    with_ai=true 时优先导出「已生成摘要的文章」——这是摘要页的导出入口，
+    走的是 ai_annotations 而不是正文检索，因为用户此刻想拿的是摘要。
     """
     import csv as _csv
     import io
 
     cfg = _cfg()
     d = _db()
-    r = d.search(
-        q=q, site=site, column_name=column, year=year,
-        date_from=date_from, date_to=date_to, min_chars=min_chars,
-        sort=sort, limit=limit,
-        min_fts_chars=cfg["search"]["min_fts_chars"])
-    rows = d.fetch_for_export([it["id"] for it in r["items"]])
-    cols = ["id", "site", "site_name", "column_name", "column_code", "title",
-            "pub_date", "url", "source_text", "chars"]
-    if with_content:
-        cols.append("content_text")
+
+    if with_ai:
+        ann = d.list_annotations(task="summarize", q=q, site=site, limit=limit)
+        ids = [it["id"] for it in ann["items"]]
+        rows = d.fetch_for_export(ids)
+        # 把摘要并进对应行
+        by_id = {it["id"]: it for it in ann["items"]}
+        for r in rows:
+            p = (by_id.get(r["id"]) or {}).get("parsed") or {}
+            r["ai_summary"] = p.get("summary", "")
+            r["ai_tags"] = "|".join(p.get("tags") or [])
+            r["ai_sentiment"] = p.get("sentiment", "")
+            r["ai_entities"] = "|".join(p.get("entities") or [])
+        cols = ["id", "site", "site_name", "column_name", "column_code", "title",
+                "pub_date", "url", "source_text", "chars",
+                "ai_summary", "ai_tags", "ai_sentiment", "ai_entities"]
+        if with_content:
+            cols.append("content_text")
+    else:
+        r = d.search(
+            q=q, site=site, column_name=column, year=year,
+            date_from=date_from, date_to=date_to, min_chars=min_chars,
+            sort=sort, limit=limit,
+            min_fts_chars=cfg["search"]["min_fts_chars"])
+        rows = d.fetch_for_export([it["id"] for it in r["items"]])
+        cols = ["id", "site", "site_name", "column_name", "column_code", "title",
+                "pub_date", "url", "source_text", "chars"]
+        if with_content:
+            cols.append("content_text")
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     if format == "csv":
@@ -295,9 +319,174 @@ def api_ai_summarize(req: SummarizeReq):
     return {"committed": req.commit, "result": result}
 
 
+@app.get("/api/annotations")
+def api_annotations(
+    task: str = "summarize",
+    q: str = "",
+    site: str = "",
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """集中查看已落库的 AI 产物。摘要不再只藏在单篇详情里。"""
+    return _db().list_annotations(task=task, q=q, site=site,
+                                  limit=limit, offset=offset)
+
+
+@app.get("/api/annotations/stats")
+def api_annotations_stats():
+    return _db().annotation_stats()
+
+
 @app.get("/api/ai/status")
 def api_ai_status():
     return ai_status(_cfg())
+
+
+# ---------------------------------------------------------------- 同步
+# 同步是长任务（首次全量 ~20 分钟），绝不能跑在请求线程里，
+# 否则一个 POST /api/sync 会把整个服务卡死。
+# 用单后台线程 + 共享状态，前端轮询 /api/sync/status。
+SYNC_LOCK = threading.Lock()
+SYNC_STATE: Dict[str, Any] = {
+    "running": False, "started_at": "", "finished_at": "",
+    "mode": "", "sites": [], "year": "",
+    "logs": [], "totals": {"listed": 0, "new": 0, "failed": 0},
+    "error": "", "cancel_requested": False,
+}
+MAX_LOG = 400          # 防止长跑把内存撑爆，只留最近若干条
+
+
+def _sync_log(msg: str, **kw):
+    with SYNC_LOCK:
+        SYNC_STATE["logs"].append(
+            {"t": time.strftime("%H:%M:%S"), "msg": msg, **kw})
+        if len(SYNC_STATE["logs"]) > MAX_LOG:
+            del SYNC_STATE["logs"][:len(SYNC_STATE["logs"]) - MAX_LOG]
+
+
+def _sync_worker(cfg, site_list, mode, date_start, date_end, limit):
+    """后台线程体。异常必须吞进状态里 —— 线程里抛异常只会静默死掉，
+    界面那边会永远转圈，看起来像「点了没反应」。"""
+    from ..collector import runner as RUN
+    try:
+        RUN.sync(cfg, sites=site_list, mode=mode, limit=limit,
+                 verbose=False, date_start=date_start, date_end=date_end,
+                 on_progress=_on_sync_event)
+    except Exception as e:
+        with SYNC_LOCK:
+            SYNC_STATE["error"] = f"{type(e).__name__}: {e}"
+        _sync_log(f"!! 出错：{type(e).__name__}: {e}", level="error")
+    finally:
+        with SYNC_LOCK:
+            SYNC_STATE["running"] = False
+            SYNC_STATE["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        _sync_log("同步结束。")
+
+
+def _on_sync_event(ev: Dict[str, Any]):
+    k = ev.get("kind")
+    if k == "log":
+        _sync_log(ev.get("msg", ""),
+                  level="warn" if "！" in ev.get("msg", "") else "info")
+    elif k == "progress":
+        with SYNC_LOCK:
+            SYNC_STATE["totals"] = {"listed": ev.get("listed", 0),
+                                    "new": ev.get("new", 0),
+                                    "failed": ev.get("failed", 0)}
+    elif k == "site_done":
+        _sync_log(f"--- {ev.get('site')} 完成：列表 {ev.get('listed')}，"
+                  f"新增 {ev.get('new')}，失败 {ev.get('failed')}",
+                  level="ok")
+    elif k == "done":
+        with SYNC_LOCK:
+            SYNC_STATE["totals"] = {"listed": ev.get("listed", 0),
+                                    "new": ev.get("new", 0),
+                                    "failed": ev.get("failed", 0)}
+
+
+@app.post("/api/sync")
+def api_sync_start(
+    sites: Optional[str] = "",      # 逗号分隔，空=全部启用中的站
+    mode: str = Query("incremental", pattern="^(incremental|full|list-only)$"),
+    year: str = "",
+    from_year: str = "",
+    to_year: str = "",
+    limit: Optional[int] = Query(None, ge=1, le=100000),
+):
+    """启动一次同步。立刻返回，实际工作在后台线程。"""
+    with SYNC_LOCK:
+        if SYNC_STATE["running"]:
+            raise HTTPException(409, "已有同步在跑，先等它结束或点停止")
+        site_list = [s.strip() for s in sites.split(",") if s.strip()] or None
+        if site_list:
+            bad = [s for s in site_list if s not in ("cac", "zjwx")]
+            if bad:
+                raise HTTPException(400, f"未知站点: {bad}")
+
+        ds = de = None
+        if year:
+            ds, de = f"{int(year)}-01-01", f"{int(year)}-12-31"
+        elif from_year or to_year:
+            ds = f"{int(from_year)}-01-01" if from_year else None
+            de = f"{int(to_year)}-12-31" if to_year else None
+
+        SYNC_STATE.update({
+            "running": True, "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "finished_at": "", "mode": mode, "sites": site_list or ["全部"],
+            "year": year or f"{from_year or ''}~{to_year or ''}",
+            "logs": [], "error": "", "cancel_requested": False,
+            "totals": {"listed": 0, "new": 0, "failed": 0},
+        })
+    _sync_log(f"开始同步：模式 {mode}"
+              + (f"，年份 {year}" if year else "")
+              + (f"，站点 {','.join(site_list)}" if site_list else "，全部站点"))
+
+    # 传副本：后台线程不能引用服务里那份会被 /api/config 改写的 CFG
+    cfg_snapshot = json.loads(json.dumps(_cfg()))
+    t = threading.Thread(target=_sync_worker,
+                         args=(cfg_snapshot, site_list, mode, ds, de, limit),
+                         daemon=True)
+    t.start()
+    return {"started": True, "mode": mode, "year": year or None,
+            "sites": site_list or "all"}
+
+
+@app.get("/api/sync/status")
+def api_sync_status(since: int = Query(0, ge=0)):
+    """轮询进度。since=已收到的日志条数，只回增量，前端就不用每次重拉全部。"""
+    with SYNC_LOCK:
+        logs = SYNC_STATE["logs"][since:]
+        return {
+            "running": SYNC_STATE["running"],
+            "started_at": SYNC_STATE["started_at"],
+            "finished_at": SYNC_STATE["finished_at"],
+            "mode": SYNC_STATE["mode"],
+            "sites": SYNC_STATE["sites"],
+            "year": SYNC_STATE["year"],
+            "totals": dict(SYNC_STATE["totals"]),
+            "error": SYNC_STATE["error"],
+            "log_total": len(SYNC_STATE["logs"]),
+            "logs": logs,
+        }
+
+
+@app.get("/api/sync/runs")
+def api_sync_runs(limit: int = Query(10, ge=1, le=100)):
+    """历史同步批次"""
+    return {"items": _db().recent_sync_runs(limit)}
+
+
+@app.get("/api/doctor")
+def api_doctor():
+    """接口自检。放后台跑，因为要真打两站网络。"""
+    import subprocess
+    import sys
+    # PROJECT_ROOT 定义在 config.py，不在 cacx/__init__.py —— 从错的地方导会 ImportError
+    r = subprocess.run(
+        [sys.executable, "-m", "cacx", "doctor"],
+        cwd=str(C.PROJECT_ROOT), capture_output=True, text=True, timeout=300,
+        encoding="utf-8", errors="replace")
+    return {"rc": r.returncode, "out": (r.stdout or "") + (r.stderr or "")}
 
 
 # ---------------------------------------------------------------- 配置

@@ -30,7 +30,8 @@ def get_collector(cfg: Dict, site: str, verbose=True) -> Optional[SiteCollector]
 
 def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental",
          limit: Optional[int] = None, verbose: bool = True,
-         date_start: Optional[str] = None, date_end: Optional[str] = None
+         date_start: Optional[str] = None, date_end: Optional[str] = None,
+         on_progress=None,
          ) -> int:
     """
     mode:
@@ -41,7 +42,27 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
     date_start / date_end:
       本次运行的时间窗，覆盖配置里的 sites.*.date_start/date_end。
       命令行的 --year / --from-year / --to-year 会转成这两个参数传进来。
+
+    on_progress:
+      可选回调 on_progress(event: dict)，用于把进度喂给 Web 界面。
+      原来只有 print，网页端就只能「点了没反应，干等」。
+      注意 runner 自己另开了 Database 连接，**不会**与 Web 服务共享连接，
+      所以这里只回传消息，不碰服务里的 DB 对象。
     """
+    def emit(kind: str, **kw):
+        if on_progress is None:
+            return
+        try:
+            on_progress({"kind": kind, **kw})
+        except Exception:
+            pass   # 回调坏了不能拖垮采集
+
+    def say(msg: str, **kw):
+        """原来只有 print；网页端要的是「同一条消息两个去处」。"""
+        if verbose:
+            print(msg)
+        emit("log", msg=msg, **kw)
+
     # 逐站浅拷贝配置，避免改到调用方的 dict
     run_cfg = {**cfg, "sites": {k: dict(v) for k, v in cfg.get("sites", {}).items()}}
     for sc in run_cfg["sites"].values():
@@ -54,15 +75,16 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
     sites = sites or [s for s in COLLECTORS
                       if run_cfg.get("sites", {}).get(s, {}).get("enabled", True)]
     rc = 0
+    totals = {"listed": 0, "new": 0, "failed": 0}
     for site in sites:
         col = get_collector(run_cfg, site, verbose)
         if col is None:
-            print(f"[sync] 跳过 {site}（未启用或不支持）")
+            say(f"[sync] 跳过 {site}（未启用或不支持）")
             continue
         started = time.strftime("%Y-%m-%d %H:%M:%S")
-        if verbose:
-            print(f"\n[sync] === {col.name} ({site}) ===")
-            print(f"[sync] 时间窗 {col.date_start} ~ {col.date_end}  模式 {mode}")
+        say(f"[sync] === {col.name} ({site}) ===")
+        say(f"[sync] 时间窗 {col.date_start} ~ {col.date_end}  模式 {mode}")
+        emit("site_start", site=site, site_name=col.name)
 
         listed = 0
         listed_new = 0
@@ -71,8 +93,9 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
         for c in col.columns():
             items = col.list_articles(c["code"])
             listed += len(items)
-            if verbose:
-                print(f"  {c['name']:16} 列表 {len(items):5}")
+            say(f"  {c['name']:16} 列表 {len(items):5}")
+            emit("column", site=site, column=c["name"], n=len(items),
+                 listed=listed)
             for it in items:
                 if it["url"] in seen_urls:
                     continue
@@ -82,8 +105,7 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
                 if mode == "list-only":
                     if not d.get_by_url(site, it["url"]):
                         listed_new += 1
-                        if verbose:
-                            print(f"      + {it['date']} {it['title'][:46]}")
+                        say(f"      + {it['date']} {it['title'][:46]}")
                     continue
 
                 # 存在性只做**读**判断，不先写半成品。
@@ -96,7 +118,9 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
                 art = col.fetch_article(it["url"], it)
                 if art is None:
                     failed += 1
-                    print(f"      ! 正文抓不到（不写库）: {it['url']}")
+                    say(f"      ! 正文抓不到（不写库）: {it['url']}")
+                    emit("progress", site=site, listed=listed, new=listed_new,
+                         failed=failed)
                     continue
 
                 text = html_to_text(art["content_html"], col.base_url)
@@ -115,24 +139,31 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
                 }
                 if d.upsert_article(rec):
                     listed_new += 1
-                    if verbose:
-                        print(f"      + {it['date']} {it['title'][:46]}")
+                    say(f"      + {it['date']} {it['title'][:46]}")
+                emit("progress", site=site, listed=listed, new=listed_new,
+                     failed=failed)
                 if limit and listed >= limit:
                     break
             if limit and listed >= limit:
                 break
 
+        totals["listed"] += listed
+        totals["new"] += listed_new
+        totals["failed"] += failed
         if mode == "list-only":
-            if verbose:
-                print(f"[sync] {col.name} 窗口内列表 {listed}，其中库里没有的 {listed_new}")
+            say(f"[sync] {col.name} 窗口内列表 {listed}，其中库里没有的 {listed_new}")
+            emit("site_done", site=site, listed=listed, new=listed_new,
+                 failed=failed, mode=mode)
             continue
         d.conn.commit()
         d.rebuild_fts()
         d.record_sync(site, mode, started, listed, listed_new, failed,
                       note=f"columns={len(col.columns())}")
-        if verbose:
-            print(f"[sync] {col.name} 列表 {listed}，新增 {listed_new}，失败 {failed}")
+        say(f"[sync] {col.name} 列表 {listed}，新增 {listed_new}，失败 {failed}")
+        emit("site_done", site=site, listed=listed, new=listed_new,
+             failed=failed, mode=mode)
     d.close()
+    emit("done", **totals)
     return rc
 
 

@@ -179,6 +179,61 @@ if _index.is_file():
               "date_start_cac", "date_end_cac",
               "date_start_zjwx", "date_end_zjwx"},
           f"{len(ConfigIn.model_fields)} 个字段")
+
+    # AI 摘要集中查看：list_annotations / annotation_stats
+    import json as _json
+    _ann_n0 = d.conn.execute(
+        "SELECT COUNT(*) FROM ai_annotations WHERE task='summarize'"
+    ).fetchone()[0]
+    _a = d.search(q="网信办", limit=1)["items"][0]["id"]
+    _payload = _json.dumps({"summary": "__selftest__ 摘要正文",
+                            "tags": ["标签甲", "标签乙"],
+                            "sentiment": "neutral",
+                            "entities": ["某机构"]}, ensure_ascii=False)
+    d.save_annotation(_a, "summarize", _payload, provider="__selftest__",
+                      model="m-test")
+    _lst = d.list_annotations(task="summarize", q="__selftest__", limit=5)
+    check("摘要可按关键词检索并解析 JSON",
+          _lst["matched"] == 1 and _lst["items"][0]["parsed"]["summary"].startswith(
+              "__selftest__")
+          and _lst["items"][0]["parsed"]["tags"] == ["标签甲", "标签乙"],
+          f"matched={_lst['matched']}")
+    _st = d.annotation_stats()
+    check("AI 覆盖率统计自洽",
+          _st["summarized"] == _ann_n0 + 1
+          and _st["summarizable"] <= _st["total"]
+          and 0 <= _st["coverage"] <= 100,
+          f"{_st['summarized']}/{_st['summarizable']} = {_st['coverage']}%")
+    # 覆盖率的分母是「有正文的文章」，源站即空的条目不该算进去
+    _empty_n = d.conn.execute(
+        "SELECT COUNT(*) FROM articles WHERE COALESCE(content_empty,0)=1"
+    ).fetchone()[0]
+    check("AI 覆盖分母排除空正文文章",
+          _st["summarizable"] == _st["total"] - _empty_n,
+          f"total={_st['total']} empty={_empty_n} summarizable={_st['summarizable']}")
+    with d._lock:
+        d.conn.execute("DELETE FROM ai_annotations WHERE provider='__selftest__'")
+        d.conn.commit()
+    check("摘要测试数据已清理",
+          d.conn.execute(
+              "SELECT COUNT(*) FROM ai_annotations WHERE provider='__selftest__'"
+          ).fetchone()[0] == 0)
+
+    # 同步历史：列名必须以表结构为准，不能照着 Python 参数名写查询
+    # （record_sync 的形参叫 new，列名却是 new_articles，照参数名写会 500）
+    _runs = d.recent_sync_runs(3)
+    check("同步批次可读且列名正确",
+          isinstance(_runs, list)
+          and all(("listed" in r and "new_articles" in r and "failed" in r)
+                  for r in _runs),
+          f"{len(_runs)} 批")
+
+    # sync 的进度回调：只验签名里确实有 on_progress，不发网络请求
+    from cacx.collector import runner as RUN
+    _pnames = RUN.sync.__code__.co_varnames[
+        :RUN.sync.__code__.co_argcount]
+    check("sync 支持进度回调", "on_progress" in _pnames,
+          f"签名: {', '.join(_pnames)}")
     # 高亮逻辑跑 node 回归：实现从 index.html 抽取，改前端后不会变成假通过
     _js = Path(__file__).resolve().parent / "tests_mark.js"
     if _js.is_file():
@@ -209,9 +264,20 @@ check("从前后缀里抠 JSON",
       parse_json('好的，结果如下：{"a":1} 希望有用') == {"a": 1})
 check("解析失败回落默认值", parse_json("完全不是json", {"d": 1}) == {"d": 1})
 st = status(cfg)
-check("AI 未配置时 ready=False", st["ready"] is False, f"provider={st['provider']}")
+# 不能写死 ready=False —— 用户配好 key 之后它就该是 True，
+# 那时这条断言会永远失败，逼着人去改测试。改成断言「判定逻辑自洽」。
+_expect_ready = bool(cfg["ai"].get("provider", "none") not in ("", "none")) \
+    and bool(cfg["ai"].get("base_url"))
+check("AI 就绪状态与配置自洽", st["ready"] == _expect_ready,
+      f"provider={st['provider']} ready={st['ready']} 期望={_expect_ready}")
 check("AI 状态不泄露密钥", "sk-" not in json.dumps(st, ensure_ascii=False))
 # dry_run 不应发请求
+# ⚠ 这里会临时改写 settings.json。必须先整份快照再改、最后原样写回 ——
+# 早期版本只把 ai.* 四个字段清空，结果用户配好的真实配置被自检冲掉了。
+# 现在改成「快照 → 改 → 无条件还原」，还原的是整份文件而不是猜着填。
+_ai_snapshot = {k: cfg["ai"].get(k) for k in
+                ("provider", "base_url", "api_key", "model", "enabled")}
+_cfg_snapshot = C.SETTINGS_FILE.read_text(encoding="utf-8")
 C.set_path(cfg, "ai.provider", "openai_compat")
 C.set_path(cfg, "ai.base_url", "https://example.invalid/v1")
 C.set_path(cfg, "ai.api_key", "sk-dummy")
@@ -224,13 +290,14 @@ try:
     check("dry_run 只预览不请求", isinstance(json.loads(prev), dict)
           and json.loads(prev).get("_dry_run") is True)
 finally:
-    # 测试用的假配置必须无条件清干净，不能留在 settings.json 里
-    C.set_path(cfg, "ai.provider", "none")
-    C.set_path(cfg, "ai.api_key", "")
-    C.set_path(cfg, "ai.base_url", "")
-    C.set_path(cfg, "ai.model", "")
-    C.save(cfg)
-    check("测试假密钥已清理", C.get_path(C.load(), "ai.api_key") == "")
+    C.SETTINGS_FILE.write_text(_cfg_snapshot, encoding="utf-8")
+    _after = C.load()
+    check("自检跑完配置原样还原",
+          all(_after["ai"].get(k) == v for k, v in _ai_snapshot.items()),
+          f"provider={_after['ai'].get('provider')} "
+          f"has_key={bool(_after['ai'].get('api_key'))}")
+    check("测试假密钥未残留",
+          C.get_path(C.load(), "ai.api_key") != "sk-dummy")
 d.close()
 
 print()

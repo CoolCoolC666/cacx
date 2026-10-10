@@ -498,6 +498,88 @@ class Database:
         got = {r["id"]: dict(r) for r in rows}
         return [got[i] for i in ids if i in got]
 
+    # ---------------------------------------------------------- AI 产物
+    def list_annotations(self, task: str = "summarize", q: str = "",
+                         site: str = "", limit: int = 50,
+                         offset: int = 0) -> Dict[str, Any]:
+        """
+        列出已落库的 AI 产物（摘要/标签），用于「集中查看」。
+
+        result 存的是 JSON 文本，筛选关键词得在 Python 侧做而不是 SQL：
+        SQLite 没有内置 JSON 查询，且中文 LIKE 在长文本上会全表扫。
+        先用 SQL 把候选集按时间倒序拉出来（带分页），再筛。
+        """
+        where, args = ["x.task = ?"], [task]
+        if site:
+            where.append("a.site = ?"); args.append(site)
+        base = ("FROM ai_annotations x JOIN articles a ON a.id = x.article_id "
+                f"WHERE {' AND '.join(where)}")
+        with self._lock:
+            total = self.conn.execute(f"SELECT COUNT(*) {base}", args).fetchone()[0]
+            rows = self.conn.execute(
+                f"""SELECT x.id AS ann_id, x.provider, x.model, x.created_at,
+                           a.id, a.title, a.site, a.site_name, a.column_name,
+                           a.pub_date, a.chars, a.url, x.result
+                    {base}
+                    ORDER BY x.created_at DESC, x.id DESC
+                    LIMIT ? OFFSET ?""",
+                args + [int(limit), int(offset)]).fetchall()
+
+        items = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["parsed"] = json.loads(d.pop("result") or "{}")
+            except Exception:
+                d["parsed"] = {"summary": d.pop("result", "")}
+            items.append(d)
+
+        if q:
+            ql = q.lower()
+            items = [it for it in items
+                     if ql in (it["parsed"].get("summary") or "").lower()
+                     or ql in (it["title"] or "").lower()
+                     or any(ql in str(t).lower()
+                            for t in it["parsed"].get("tags") or [])]
+        return {"total": total, "matched": len(items), "items": items}
+
+    def annotation_stats(self) -> Dict[str, Any]:
+        """AI 覆盖率：已生成 / 总数 / 按任务分布"""
+        total = self.conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+        with self._lock:
+            by_task = [dict(r) for r in self.conn.execute(
+                "SELECT task, COUNT(*) n FROM ai_annotations GROUP BY task")]
+            with_content = self.conn.execute(
+                "SELECT COUNT(*) FROM articles "
+                "WHERE COALESCE(content_empty,0)=0").fetchone()[0]
+        done = 0
+        for r in by_task:
+            if r["task"] == "summarize":
+                done = r["n"]
+        # 分母用「有正文的文章」：源站即空的条目生成摘要没意义
+        return {
+            "total": total,
+            "summarizable": with_content,
+            "summarized": done,
+            "coverage": round(done / with_content * 100, 2) if with_content else 0.0,
+            "by_task": by_task,
+        }
+
+    def recent_sync_runs(self, n: int = 10) -> List[dict]:
+        """
+        最近的同步批次。失败批次必须看得见 —— 不然用户不知道
+        「上次同步有没有把东西抓漏」。
+
+        列名以表结构为准：sync_runs 里是 new_articles，不是 listed_new
+        （SQL 的 INSERT 列名和 Python 参数名本来就允许不一致，
+         这里曾照着参数名写查询，直接 500）。
+        """
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT site, mode, started_at, finished_at, listed, "
+                "new_articles, failed, note "
+                "FROM sync_runs ORDER BY id DESC LIMIT ?", (int(n),))]
+
     # ---------------------------------------------------------- 统计
     def facets(self) -> Dict[str, Any]:
       with self._lock:
