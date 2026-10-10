@@ -647,6 +647,102 @@ def api_config_set(req: ConfigIn):
     return {"saved": True, "changed": changed, "message": "已保存"}
 
 
+@app.get("/api/config/import/template")
+def api_import_template():
+    """空白模板，下载后填好再导入"""
+    return {"template": C.IMPORT_TEMPLATE}
+
+
+class ImportIn(BaseModel):
+    text: str                       # 粘贴的 JSON 内容
+    apply: bool = False             # False = 只预览，不写盘
+    fields: Optional[str] = "ai.api_key,ai.base_url,ai.model"
+
+
+def _scan_view(res: Dict[str, Any]) -> Dict[str, Any]:
+    """把扫描结果整理成**可安全回传**的视图。
+    绝不回传 value —— 只给掩码和来源路径。"""
+    cur = _cfg()
+    out = []
+    for target in ("ai.api_key", "ai.base_url", "ai.model"):
+        c = res["candidates"].get(target)
+        old = C.get_path(cur, target) or ""
+        if c:
+            out.append({
+                "field": target,
+                "label": {"ai.api_key": "密钥", "ai.base_url": "接口地址",
+                          "ai.model": "模型"}[target],
+                "found": True,
+                "masked": C.mask_secret(c["value"]) if target == "ai.api_key"
+                          else c["value"],
+                "from": c["from"],
+                "why": c["why"],
+                "changed": old != c["value"],
+            })
+        else:
+            out.append({
+                "field": target,
+                "label": {"ai.api_key": "密钥", "ai.base_url": "接口地址",
+                          "ai.model": "模型"}[target],
+                "found": False,
+                "masked": (C.mask_secret(old) if target == "ai.api_key" and old
+                           else old) or "",
+                "changed": False,
+            })
+    return {"items": out, "warnings": res["warnings"]}
+
+
+@app.post("/api/config/import")
+def api_import(req: ImportIn):
+    """
+    从 MCP / 其它 AI 工具的配置里导入 API 设置。
+
+    两段式：**先预览（apply=false）看清会改什么，确认后才写盘**。
+    导入配置天然容易误伤（字段名猜错、把图床 key 当 API key），
+    不给预览就等于让人盲写 settings.json。
+    """
+    global CFG
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(400, "内容为空")
+    try:
+        src = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            400, f"不是合法 JSON：第 {e.lineno} 行 {e.msg}。"
+                 f"（常见原因：从配置文件里只复制了一部分，缺外层大括号）")
+
+    # 情形 1：本身就是 cacx 配置 → 整体合并（不走字段扫描）
+    if isinstance(src, dict) and "ai" in src and isinstance(src.get("ai"), dict):
+        if req.apply:
+            cfg = C.load()
+            cfg = C._deep_merge(cfg, src)
+            C.save(cfg)
+            CFG = cfg
+        ai = src.get("ai", {})
+        return {"kind": "cacx", "applied": req.apply,
+                "will_import": sorted(k for k, v in ai.items()
+                                      if not isinstance(v, dict) and v),
+                "message": "识别为 cacx 配置，将整体合并 ai 段"
+                           + ("（已写入）" if req.apply else "（仅预览）")}
+
+    res = C.scan_credentials(src)
+    view = _scan_view(res)
+    if not req.apply:
+        return {"kind": "scan", "applied": False, **view}
+
+    fields = [f.strip() for f in (req.fields or "").split(",") if f.strip()]
+    changed, err = C.apply_candidates(res["candidates"], fields)
+    if err:
+        raise HTTPException(500, err)
+    CFG = C.load()
+    # 只报字段名，不报值 —— 值里含密钥
+    return {"kind": "scan", "applied": True, "changed": changed,
+            "message": ("已导入：" + ", ".join(changed)) if changed
+                       else "没有变化（与当前配置相同）",
+            **view}
+
+
 @app.get("/api/config/status")
 def api_config_status():
     """给设置页做「配齐了没」的自检。

@@ -333,6 +333,33 @@ try:
     prev = p.chat("s", "u", dry_run=True)
     check("dry_run 只预览不请求", isinstance(json.loads(prev), dict)
           and json.loads(prev).get("_dry_run") is True)
+
+    # 导入扫描器：识别率 + **误伤防护**。
+    # 误伤比漏抓更危险 —— 把图床 key 当 API key 写进去会静默弄坏配置，
+    # 所以两类都要测。完整用例见 tests_import.py（13 条）。
+    from cacx.config import scan_credentials
+    _mcp = {"mcpServers": {"x": {"command": "npx", "env": {
+        "MY_API_KEY": "sk-jK8mP2xQ9vL4nR7tY1uB3wZ5cF6hD8gA0sE2fG4iO6kQ",
+        "MY_BASE_URL": "https://api.minimax.cn/v1"}}}}
+    _r = scan_credentials(_mcp)
+    check("扫描器认得 MCP env 结构（含前缀的变量名）",
+          set(_r["candidates"]) == {"ai.api_key", "ai.base_url"},
+          str(sorted(_r["candidates"])))
+    _noise = {"img": {"accessKeyId": "LTAI5tx", "accessKeySecret": "abcdef123456"},
+              "cdn": "https://cdn.example.com/a.png",
+              "proxy": "http://127.0.0.1:7890",
+              "cache": {"key": "user:123"}}
+    _r2 = scan_credentials(_noise)
+    check("扫描器不误伤图床/CDN/代理/缓存键",
+          not _r2["candidates"], str(sorted(_r2["candidates"])))
+    check("误伤时给出提示而非静默失败",
+          any("没能识别出" in w for w in _r2["warnings"]))
+    # 扫描结果里带 value 是为了写盘用，但 describe/mask 必须不含明文
+    _c = _r["candidates"].get("ai.api_key", {})
+    check("扫描结果可掩码且不泄露明文",
+          _c.get("masked") and "sk-jK8mP2xQ9vL4nR7tY1uB3wZ5cF6hD8gA0sE2fG4iO6kQ"
+          != _c.get("masked") and _c["masked"].endswith("O6kQ"),
+          _c.get("masked", "")[-8:])
 finally:
     C.SETTINGS_FILE.write_text(_cfg_snapshot, encoding="utf-8")
     _after = json.loads(C.SETTINGS_FILE.read_text(encoding="utf-8"))["ai"]

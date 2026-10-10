@@ -197,58 +197,217 @@ def set_path(cfg: dict, dotted: str, value: Any):
     cur[parts[-1]] = value
 
 
+def _flatten(node, prefix="", out=None):
+    """把任意嵌套结构摊平成 {点号路径: 叶子值}"""
+    out = {} if out is None else out
+    if isinstance(node, dict):
+        for k, v in node.items():
+            p = f"{prefix}.{k}" if prefix else str(k)
+            _flatten(v, p, out)
+    elif isinstance(node, list):
+        for i, x in enumerate(node):
+            _flatten(x, f"{prefix}[{i}]", out)
+    else:
+        out[prefix] = node
+    return out
+
+
+# 明显不是 AI 配置的字段名，避免误抓
+_NOT_AI = ("proxy", "img", "css", "icon", "favicon", "avatar", "font",
+           "path", "file", "dir", "url_encode", "callback")
+# URL 值里一眼不是 API 端点的
+_NOT_URL_SUFFIX = (".png", ".jpg", ".svg", ".ico", ".css", ".woff", ".ttf")
+
+
+def _looks_like_endpoint(v: str) -> bool:
+    if not v:
+        return False
+    s = v.strip().lower()
+    if not (s.startswith("http://") or s.startswith("https://")):
+        return False
+    if any(s.endswith(x) for x in _NOT_URL_SUFFIX):
+        return False
+    # 光一个站点首页不算 API 端点，至少要带一层路径
+    tail = s.split("://", 1)[1].split("/", 1)[1] if "/" in s.split("://", 1)[1] else ""
+    return bool(tail)
+
+
+def scan_credentials(src) -> dict:
+    """
+    从任意一份 JSON 里**找出** AI 相关设置，返回候选清单（不写盘）。
+
+    支持的来源形态（实测的差异不是小事，光认扁平字段名会一个都抓不到）：
+      · cacx 自己的 settings.json          { "ai": { "api_key": ... } }
+      · 扁平工具配置                         { "api_key": ..., "base_url": ... }
+      · MCP 配置                             { "mcpServers": { "x": {
+                                            "env": { "MINIMAX_API_KEY": "..." },
+                                            "headers": { "Authorization": "Bearer ..." },
+                                            "url": "...", "args": [...] } } }
+      · 嵌套 provider                       { "llm": { "default": { "api_key": ... } } }
+
+    返回
+        {"candidates": {目标配置路径: {"value":…, "from": 来源路径,
+                                      "masked": 掩码值}},
+         "sources":    [(来源文件/段落, 命中的路径…)],
+         "warnings":   [提示…]}
+    **value 会原样带回**（调用方要写盘），但绝不进任何日志或错误信息。
+    """
+    flat = _flatten(src)
+    hits: dict = {}
+
+    def take(target, path, value, why):
+        if not isinstance(value, str) or not value.strip():
+            return
+        hits[target] = {"value": value.strip(), "from": path,
+                        "masked": mask_secret(value.strip()),
+                        "why": why}
+
+    # ---- 1) 显式字段名（后缀匹配，不要求精确相等）----
+    # 用 endswith 而不是 == ：MCP/各家工具普遍给密钥变量加前缀，
+    # 如 MY_API_KEY、OPENAI_API_KEY、DEEPSEEK_KEY，精确匹配一个都认不出。
+    for path, val in flat.items():
+        low = path.lower()
+        if any(n in low for n in _NOT_AI):
+            continue
+        leaf = low.rsplit(".", 1)[-1].split("[")[0]
+        if leaf.endswith("authorization"):
+            v = val.strip()
+            if isinstance(v, str) and v.lower().startswith("bearer "):
+                take("ai.api_key", path, v[7:], "Authorization: Bearer <token>")
+            continue
+        if leaf.endswith(("api_key", "apikey", "access_key")) or \
+           leaf.endswith(("_token", "secret", "password")):
+            # 光叫 "key" / "token" 的太容易误伤（图床、缓存），要求长度像密钥
+            if not isinstance(val, str) or len(val.strip()) < 16:
+                continue
+            if not any(n in leaf for n in ("key", "token", "secret", "password")):
+                continue
+            take("ai.api_key", path, val, f"字段名 {leaf}")
+        elif leaf.endswith(("base_url", "baseurl", "api_base", "endpoint",
+                            "api_endpoint", "server_url", "api_host")) or \
+                (leaf.endswith("url") and _looks_like_endpoint(val)):
+            if isinstance(val, str) and _looks_like_endpoint(val):
+                take("ai.base_url", path, val, f"字段名 {leaf}")
+        elif leaf.endswith(("model_name", "default_model", "chat_model")) or \
+                leaf == "model":
+            take("ai.model", path, val, f"字段名 {leaf}")
+
+    # ---- 2) MCP 特有形态：env 里的大写变量名 ----
+    #     { "env": { "MINIMAX_API_KEY": "..." } } —— 叶子名是 MINIMAX_API_KEY，
+    #     上面那轮认不出（既不等于 api_key 也不等于 key）
+    #     顶层 "env" 键也要算 —— MCP 允许 servers.<name>.env 或顶层 env，
+    #     只认 ".env." 会漏掉顶层写法。
+    for path, val in flat.items():
+        low = path.lower()
+        parts = low.split(".")
+        in_env = "env" in parts[:-1] or low == "env" or ".env." in low
+        if not in_env:
+            continue
+        if not isinstance(val, str) or len(val.strip()) < 16:
+            continue
+        name = parts[-1]
+        if any(k in name for k in ("api_key", "apikey", "token", "secret",
+                                   "access_key")):
+            if "ai.api_key" not in hits:      # 显式字段优先
+                take("ai.api_key", path, val, "env 里的密钥变量")
+        elif any(k in name for k in ("api_host", "base_url", "endpoint")):
+            if _looks_like_endpoint(val) and "ai.base_url" not in hits:
+                take("ai.base_url", path, val, "env 里的地址变量")
+
+    # ---- 3) MCP 的 args 里可能带 --api-key ----
+    for path, val in flat.items():
+        if "args" not in path.lower() or not isinstance(val, str):
+            continue
+        for tok in val.split():
+            if tok.startswith("--") and "=" in tok:
+                k, _, v = tok[2:].partition("=")
+                if "key" in k.lower() and len(v) >= 16:
+                    take("ai.api_key", path, v, f"命令行参数 --{k}")
+                elif "base" in k.lower() or "url" in k.lower():
+                    if _looks_like_endpoint(v):
+                        take("ai.base_url", path, v, f"命令行参数 --{k}")
+
+    warnings = []
+    if not hits:
+        warnings.append("没能识别出 API 设置。常见原因："
+                        "文件不是 JSON、或字段名不含 key/url/model 之类关键词。")
+    if "ai.base_url" not in hits and "ai.api_key" in hits:
+        warnings.append("只找到密钥、没有接口地址。填 base_url 才知道往哪发请求。")
+    if "ai.api_key" not in hits and "ai.base_url" in hits:
+        warnings.append("只找到接口地址、没有密钥。")
+    return {"candidates": hits, "warnings": warnings}
+
+
+def apply_candidates(cands: dict, fields=("ai.api_key", "ai.base_url",
+                                          "ai.model")) -> tuple:
+    """把扫描结果写进 settings.json。返回 (改了哪些字段, 错误信息)"""
+    cfg = load()
+    changed = []
+    for f in fields:
+        if f in cands:
+            old = get_path(cfg, f)
+            new = cands[f]["value"]
+            if old != new:
+                set_path(cfg, f, new)
+                changed.append(f)
+    if changed:
+        save(cfg)
+    return changed, None
+
+
 def import_from(external: Path) -> dict:
     """
-    从外部配置文件导入（一次性填好，不要求手抄）。
-    支持两类来源：
-      1) cacx 自身格式的 settings.json
-      2) 其他工具的原配置（自动挑出 api_key / base_url / model 等字段）
-    返回 (导入后的配置, 导入摘要)
+    从外部配置文件导入（命令行入口，保持原有返回签名）。
+    网页端请走 POST /api/config/import，能先预览再决定要不要写。
     """
     external = Path(external)
     if not external.exists():
         raise FileNotFoundError(f"配置文件不存在: {external}")
     src = json.loads(external.read_text(encoding="utf-8-sig"))
-
     cfg = load()
-    notes = []
 
-    # 情形 1：本身即 cacx 配置
+    # 情形 1：本身即 cacx 配置 → 整体合并
     if isinstance(src, dict) and "ai" in src:
         cfg = _deep_merge(cfg, src)
-        notes.append("识别为 cacx 配置，已整体合并")
-        return save(cfg), notes
+        save(cfg)
+        return SETTINGS_FILE, ["识别为 cacx 配置，已整体合并"]
 
-    # 情形 2：当作外部工具原配置，挑字段
-    flat = {}
-
-    def walk(node, prefix=""):
-        if isinstance(node, dict):
-            for k, v in node.items():
-                p = f"{prefix}.{k}" if prefix else k
-                walk(v, p)
-        elif isinstance(node, list):
-            for i, x in enumerate(node):
-                walk(x, f"{prefix}[{i}]")
-        else:
-            flat[prefix] = node
-
-    walk(src)
-    mapping = [
-        (("api_key", "apikey", "key"), "ai.api_key"),
-        (("base_url", "baseurl", "url", "endpoint"), "ai.base_url"),
-        (("model", "model_name"), "ai.model"),
-    ]
-    for needles, target in mapping:
-        for k, v in flat.items():
-            low = k.lower()
-            if isinstance(v, str) and v and any(n in low for n in needles) \
-                    and not any(s in low for s in ("proxy", "img", "css")):
-                set_path(cfg, target, v)
-                notes.append(f"{k}  ->  {target}")
-                break
-    save(cfg)
+    res = scan_credentials(src)
+    changed, _ = apply_candidates(res["candidates"])
+    notes = [f'{f}  <-  {res["candidates"][f]["from"]}'
+             f'（{res["candidates"][f]["why"]}）' for f in changed]
+    notes += res["warnings"]
     return SETTINGS_FILE, notes
+
+
+IMPORT_TEMPLATE = {
+    "_说明": "把这段模板填好另存为 xxx.json，再在网页设置页粘贴其内容或导入文件。"
+             "字段名可以照抄，也可以用你自己的（MCP 的 env/headers 结构同样认得）。",
+    "provider": "openai_compat",
+    "base_url": "https://api.example.com/v1",
+    "model": "your-model-name",
+    "api_key": "sk-xxxxxxxxxxxxxxxx",
+
+    "_MCP写法示例": {
+        "mcpServers": {
+            "your-server": {
+                "command": "npx",
+                "env": {
+                    "PROVIDER_API_KEY": "sk-xxxxxxxxxxxxxxxx",
+                    "PROVIDER_BASE_URL": "https://api.example.com/v1"
+                }
+            }
+        }
+    },
+    "_headers写法示例": {
+        "servers": {
+            "your-server": {
+                "url": "https://api.example.com/v1",
+                "headers": {"Authorization": "Bearer sk-xxxxxxxxxxxxxxxx"}
+            }
+        }
+    },
+}
 
 
 def describe(cfg: dict) -> str:

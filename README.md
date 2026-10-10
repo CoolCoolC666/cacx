@@ -221,6 +221,31 @@ cacx config import ~/Downloads/some-tool-config.json
 - 配置存 `config/settings.json`，**密钥只写入不回显**：
   保存后输入框只显示「已配置（N 字符）」，要看内容请自己打开文件
 
+**从 MCP / 其它 AI 工具导入（设置页顶部）**
+
+不用手抄 key。把 MCP 配置（`.mcp.json`、Claude Desktop 配置）或任意 AI 工具的
+配置文件内容粘贴进去，自动认出密钥、接口地址、模型名。
+
+能认得的结构：
+
+| 来源形态 | 例子 |
+| --- | --- |
+| MCP env 变量 | `mcpServers.*.env.MINIMAX_API_KEY` |
+| HTTP headers | `headers.Authorization: Bearer sk-xxx` |
+| 命令行参数 | `args: ["--api-key=sk-xxx"]` |
+| 普通字段名 | `api_key` / `base_url` / `model`（含 `MY_API_KEY` 这类前缀写法） |
+| cacx 自身配置 | 整体合并 `ai` 段 |
+
+**两段式：先预览、确认后才写盘。** 预览会逐项显示
+「识别到什么、从哪个路径来的、会改成什么」，密钥只显示掩码。
+不给预览就等于让人盲写 `settings.json`。
+
+**误伤防护**（比漏抓更重要——把图床 key 当 API key 写进去会静默弄坏配置）：
+`img` / `cdn` / `proxy` / `cache` 里的 key、`.png` 这类静态资源 URL、
+太短的 `key`（如 `user:123`）、光秃秃的站点首页，都不会被当成 API 设置。
+
+命令行也支持：`cacx config import <路径>`（同一个扫描器）。
+
 密钥的三态语义，网页上也要讲清楚：
 
 | 输入框 | 含义 |
@@ -235,7 +260,7 @@ cacx config import ~/Downloads/some-tool-config.json
 
 接口：`/api/search` `/api/article/{id}` `/api/facets` `/api/stats`
 `/api/recent` `/api/health` `/api/export` `/api/trend` `/api/events`
-`/api/config` `/api/config/status` `/api/ai/status`
+`/api/config` `/api/config/status` `/api/config/import` `/api/config/import/template` `/api/ai/status`
 `/api/annotations` `/api/annotations/stats`
 `POST /api/sync` `/api/sync/status` `/api/sync/runs`
 `/api/doctor?ai=true`（根因分析）`/api/doctor?advisory=true`（健康顾问）`/open`，

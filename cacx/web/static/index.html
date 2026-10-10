@@ -316,6 +316,45 @@
 
   <!-- ============ 设置 ============ -->
   <section id="v_set" style="display:none">
+    <div class="box" style="max-width:820px">
+      <h3>从 MCP / 其它 AI 工具导入 <span style="color:var(--dim);font-weight:400">
+        不用手抄 key</span></h3>
+      <p style="color:var(--dim);font-size:12.5px;margin:0 0 12px;line-height:1.75">
+        把 MCP 配置（<code>.mcp.json</code>、Claude Desktop 配置）或任意 AI 工具的
+        配置文件内容**粘贴到下面**，会自动认出密钥、接口地址、模型名。<br>
+        认得的结构：<code>mcpServers.*.env.XXX_API_KEY</code>、
+        <code>headers.Authorization: Bearer</code>、<code>--api-key=</code> 命令行参数、
+        以及普通的 <code>api_key/base_url/model</code>。<br>
+        <b style="color:var(--warn)">先预览、确认后才写盘</b>；密钥只写入不回显。
+      </p>
+      <div class="row" style="margin-bottom:9px">
+        <button class="btn" onclick="loadTemplate()">↓ 取一份模板</button>
+        <button class="btn" onclick="$('imp_text').value='';$('imp_out').innerHTML=''">清空</button>
+      </div>
+      <textarea id="imp_text" rows="9" spellcheck="false"
+        style="width:100%;background:#0b0d11;border:1px solid var(--line);
+               border-radius:6px;padding:10px;color:#c2c8d4;
+               font:12.5px/1.65 Consolas,Monaco,monospace;resize:vertical"
+        placeholder='粘贴配置 JSON，例如：
+{
+  "mcpServers": {
+    "minimax": {
+      "command": "npx",
+      "env": {
+        "MINIMAX_API_KEY": "sk-xxxxxxxx",
+        "MINIMAX_BASE_URL": "https://api.minimax.cn/v1"
+      }
+    }
+  }
+}'></textarea>
+      <div class="row" style="margin-top:10px">
+        <button class="btn" onclick="doImport(false)">🔍 预览识别结果</button>
+        <button class="btn" style="background:var(--acc);border-color:var(--acc);color:#fff"
+          onclick="doImport(true)">✓ 确认写入</button>
+      </div>
+      <div id="imp_out" style="margin-top:12px"></div>
+    </div>
+
     <div class="box" style="max-width:760px">
       <h3>AI 配置</h3>
       <p style="color:var(--dim);font-size:12.5px;margin:0 0 12px;line-height:1.7">
@@ -815,6 +854,68 @@ function exportAnns(){
   const site=$('ai_site').value;
   window.location.href=`/api/export?format=jsonl&limit=2000&with_ai=true&q=${q}&site=${site}`;
   toast('正在导出…');
+}
+
+async function loadTemplate(){
+  try{
+    const r=await (await fetch('/api/config/import/template')).json();
+    $('imp_text').value=JSON.stringify(r.template,null,2);
+    toast('模板已填入，改好后再点「预览识别结果」');
+  }catch(e){ toast('取模板失败：'+e.message, true); }
+}
+
+async function doImport(apply){
+  const text=$('imp_text').value.trim();
+  if(!text){ toast('先粘贴配置内容', true); return; }
+  if(apply && !confirm('确认把识别到的设置写入 config/settings.json？\n'+
+      '只会改密钥/接口地址/模型这三项，其余配置不动。')) return;
+  $('imp_out').innerHTML='<div class="empty" style="padding:16px">扫描中…</div>';
+  try{
+    const r=await (await fetch('/api/config/import',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text, apply: !!apply})
+    })).json();
+    if(r.detail){ $('imp_out').innerHTML='<div class="doc-ai-note" style="color:var(--err)">'
+      +esc(r.detail)+'</div>'; return; }
+    renderImport(r);
+    if(r.applied){ toast(r.message||'已写入'); loadCfg(); }
+  }catch(e){
+    $('imp_out').innerHTML='<div class="doc-ai-note" style="color:var(--err)">'
+      +esc(e.message)+'</div>';
+  }
+}
+
+function renderImport(r){
+  if(r.kind==='cacx'){
+    $('imp_out').innerHTML=`<div class="doc-ai">
+      <div class="doc-ai-hd">识别为 cacx 自身配置</div>
+      <div class="doc-line">${esc(r.message)}</div>
+      ${r.will_import&&r.will_import.length
+        ?`<div class="doc-list ok"><b>将导入的字段</b>${
+            r.will_import.map(x=>'<div>· '+esc(x)+'</div>').join('')}</div>`:''}
+    </div>`;
+    return;
+  }
+  const rows=(r.items||[]).map(it=>`
+    <div class="rank">
+      <span class="t">${it.found?'<span style="color:var(--ok)">✓</span>':
+        '<span style="color:var(--dim)">—</span>'} ${esc(it.label)}
+        <code>${esc(it.field)}</code></span>
+      <span class="v">${it.found
+        ?esc(it.masked)+(it.changed
+          ?' <span style="color:var(--warn)">（将改变）</span>'
+          :' <span style="color:var(--dim)">（与当前相同）</span>')
+        :'<span style="color:var(--dim)">未识别到</span>'}</span>
+    </div>
+    ${it.found?`<div class="doc-issue" style="color:var(--dim)">
+      来源：${esc(it.from)}　（${esc(it.why)}）</div>`:''}`).join('');
+  const warn=(r.warnings||[]).length
+    ?`<div class="doc-ai-note">${r.warnings.map(esc).join('<br>')}</div>`:'';
+  $('imp_out').innerHTML=`<div class="doc-ai">
+    <div class="doc-ai-hd">识别结果 ${r.applied?'（已写入）':'（预览，未写入）'}</div>
+    ${rows}
+    ${warn}
+  </div>`;
 }
 
 /* ---------------- 设置 ---------------- */
