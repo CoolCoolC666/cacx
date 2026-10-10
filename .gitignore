@@ -1,0 +1,35 @@
+# ---- 数据与产物（不入库，用脚本重建）----
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# ---- 配置：settings.json 含本地路径与密钥，只提交模板 ----
+config/settings.json
+config/*.local.json
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 抓取缓存 ----
+_cache/
+*.log
+
+# ---- 一次性临时脚本（调试用，跑完即弃）----
+_tmp_*.py
+_tmp*.py

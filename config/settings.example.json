@@ -1,0 +1,69 @@
+{
+  "app": {
+    "host": "127.0.0.1",
+    "port": 8770,
+    "open_browser": true,
+    "page_size": 20
+  },
+  "db": {
+    "path": "data/cacx.db"
+  },
+  "sites": {
+    "cac": {
+      "enabled": true,
+      "name": "中国网信办",
+      "base_url": "https://www.cac.gov.cn",
+      "api_url": "https://www.cac.gov.cn/cms/JsonList",
+      "date_start": "2024-01-01",
+      "date_end": "2026-12-31",
+      "per_page": 200
+    },
+    "zjwx": {
+      "enabled": true,
+      "name": "浙江网信网",
+      "base_url": "https://www.zjwx.gov.cn",
+      "api_url": "https://www.zjwx.gov.cn/api-gateway/jpaas-publish-server/front/page/build/unit",
+      "date_start": "2024-01-01",
+      "date_end": "2026-12-31",
+      "page_size": 15
+    }
+  },
+  "collector": {
+    "interval": 0.35,
+    "timeout": 25,
+    "retry": 3,
+    "concurrency": 1,
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+  },
+  "ai": {
+    "enabled": false,
+    "provider": "none",
+    "base_url": "",
+    "model": "",
+    "api_key": "",
+    "timeout": 60,
+    "max_tokens": 2000,
+    "tasks": {
+      "summarize": {
+        "enabled": false,
+        "provider": "",
+        "model": ""
+      },
+      "tag": {
+        "enabled": false,
+        "provider": "",
+        "model": ""
+      },
+      "doctor": {
+        "enabled": false,
+        "provider": "",
+        "model": ""
+      }
+    }
+  },
+  "search": {
+    "min_fts_chars": 3,
+    "default_sort": "date_desc"
+  },
+  "corpus_root": ""
+}

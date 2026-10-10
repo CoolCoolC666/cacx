@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cacx"
+version = "0.1.0"
+description = "网信办公开语料库工具：中国网信办/浙江网信网文章采集、检索与分析"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "cacx" }]
+keywords = ["网络舆情", "网信办", "语料", "采集", "检索"]
+
+dependencies = [
+    "requests>=2.31",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
+
+[project.optional-dependencies]
+ai = ["requests>=2.31"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+cacx = "cacx.cli.main:main"
+
+[tool.setuptools]
+packages = ["cacx", "cacx.cli", "cacx.collector", "cacx.ai", "cacx.web"]
+
+[tool.setuptools.package-data]
+"cacx.web" = ["static/*"]

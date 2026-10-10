@@ -1,0 +1,7 @@
+# 依赖
+requests>=2.31
+fastapi>=0.110
+uvicorn>=0.27
+
+# 可选：测试
+# pytest>=8.0
