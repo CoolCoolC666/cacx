@@ -300,6 +300,124 @@ def api_ai_status():
     return ai_status(_cfg())
 
 
+# ---------------------------------------------------------------- 配置
+class ConfigIn(BaseModel):
+    """只接受这些字段。白名单是刻意的：
+    开放任意路径写入等于开放任意配置项被前端改写，
+    包括 collector.user_agent 这种会影响采集行为的项。"""
+    provider: Optional[str] = None
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    clear_key: bool = False       # 显式清除密钥，与「留空=不修改」区分开
+    enabled: Optional[bool] = None
+    timeout: Optional[int] = None
+    max_tokens: Optional[int] = None
+    page_size: Optional[int] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    date_start_cac: Optional[str] = None
+    date_end_cac: Optional[str] = None
+    date_start_zjwx: Optional[str] = None
+    date_end_zjwx: Optional[str] = None
+
+
+@app.get("/api/config")
+def api_config_get():
+    """读当前配置。密钥只给「有没有 / 长度」，绝不给明文或掩码原文。"""
+    global CFG
+    cfg = C.load()
+    CFG = cfg
+    ai = cfg.get("ai", {})
+    key = ai.get("api_key", "") or ""
+    return {
+        "ai": {
+            "enabled": bool(ai.get("enabled")),
+            "provider": ai.get("provider", "none"),
+            "base_url": ai.get("base_url", ""),
+            "model": ai.get("model", ""),
+            # 只有这两个字段，绝不回显 key 本身
+            "has_key": bool(key),
+            "key_len": len(key),
+        },
+        "app": {
+            "host": cfg["app"].get("host"),
+            "port": cfg["app"].get("port"),
+            "page_size": cfg["app"].get("page_size"),
+        },
+        "sites": {
+            k: {"date_start": v.get("date_start"), "date_end": v.get("date_end"),
+                "enabled": v.get("enabled")}
+            for k, v in cfg["sites"].items()
+        },
+        "search": cfg.get("search", {}),
+        "settings_file": str(C.SETTINGS_FILE),
+    }
+
+
+@app.post("/api/config")
+def api_config_set(req: ConfigIn):
+    """写配置。空字符串的 api_key 表示「不修改」，避免前端回显为空就误清密钥。"""
+    global CFG
+    cfg = C.load()
+    changed = []
+
+    def put(path, val):
+        if val is None:
+            return
+        if C.get_path(cfg, path) != val:
+            changed.append(path)
+        C.set_path(cfg, path, val)
+
+    if req.provider is not None:
+        if req.provider not in ("none", "openai_compat", "ollama"):
+            raise HTTPException(400, "provider 只能是 none / openai_compat / ollama")
+        put("ai.provider", req.provider)
+    put("ai.base_url", req.base_url)
+    put("ai.model", req.model)
+    # 密钥的三态语义：
+    #   非空且非清除标记 → 写入新 key
+    #   空字符串          → 不修改（前端不回显，留空是常态）
+    #   清除标记          → 显式清空
+    # 用独立的 clear_key 字段承载「清除」，而不是拿哨兵值冒充 key ——
+    # 哨兵法有个真实的坑：万一哪天有合法 key 恰好以该前缀开头，
+    # 就会被无声清掉，且用户完全不知情。
+    if getattr(req, "clear_key", False):
+        put("ai.api_key", "")
+    elif req.api_key:
+        put("ai.api_key", req.api_key)
+    if req.enabled is not None:
+        put("ai.enabled", req.enabled)
+    put("ai.timeout", req.timeout)
+    put("ai.max_tokens", req.max_tokens)
+    put("app.page_size", req.page_size)
+    put("app.host", req.host)
+    put("app.port", req.port)
+    put("sites.cac.date_start", req.date_start_cac)
+    put("sites.cac.date_end", req.date_end_cac)
+    put("sites.zjwx.date_start", req.date_start_zjwx)
+    put("sites.zjwx.date_end", req.date_end_zjwx)
+
+    if not changed:
+        return {"saved": False, "changed": [], "message": "没有变化"}
+    C.save(cfg)
+    CFG = cfg          # 让服务立即用新配置
+    # 只报改了哪些字段名，不回显值 —— 值里可能含密钥
+    return {"saved": True, "changed": changed, "message": "已保存"}
+
+
+@app.get("/api/config/status")
+def api_config_status():
+    """给设置页做「配齐了没」的自检。
+    这里刻意把 ai_status() 里的掩码 key 换成布尔值：前端只需要知道
+    「有没有 key」，不需要知道末四位，避免掩码原文经接口外流。"""
+    cfg = _cfg()
+    s = ai_status(cfg)
+    s.pop("api_key", None)
+    s["has_key"] = bool(cfg.get("ai", {}).get("api_key", ""))
+    return s
+
+
 # ---------------------------------------------------------------- 页面
 @app.get("/", response_class=HTMLResponse)
 def index():

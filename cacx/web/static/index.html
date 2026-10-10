@@ -65,16 +65,24 @@
        padding:13px 15px}
   .box h3{margin:0 0 10px;font-size:13px;color:var(--acc2);font-weight:600;
           display:flex;align-items:center;gap:8px}
-  .bars{display:flex;align-items:flex-end;gap:3px;height:96px;
-        overflow-x:auto;padding-top:4px}
-  .bar-item{flex:1;min-width:5px;display:flex;flex-direction:column;
-            align-items:center;gap:3px}
+  .bars{display:flex;align-items:flex-end;gap:3px;height:130px;
+        overflow-x:auto;padding-top:4px;justify-content:center}
+  /* 柱子不能无脑 flex:1 撑满 —— 年份只有 3 根时每根会宽到几百像素。
+     给个上限，让稀疏数据看起来还是「柱状图」而不是色块。 */
+  .bar-item{flex:1 1 auto;max-width:46px;min-width:5px;
+            display:flex;flex-direction:column;align-items:center;gap:3px}
   .bar-fill{width:100%;background:linear-gradient(180deg,var(--acc),#2f5fa8);
             border-radius:2px 2px 0 0;min-height:2px;transition:.2s}
   .bar-fill:hover{background:var(--acc2)}
-  .bar-x{font-size:9px;color:var(--dim);white-space:nowrap;
-          transform:rotate(-45deg);transform-origin:center;height:22px}
-  .bar-v{font-size:9.5px;color:var(--dim)}
+  .bar-x{font-size:9.5px;color:var(--dim);white-space:nowrap;
+          height:16px;line-height:16px}
+  .bar-v{font-size:10px;color:var(--dim)}
+  .form{display:flex;flex-direction:column;gap:10px}
+  .form label{display:flex;align-items:center;gap:8px;
+              color:var(--dim);font-size:12.5px;flex-wrap:wrap}
+  .form label.inline{gap:6px}
+  .form input[type=text],.form input[type=password],.form input[type=number],
+  .form input[type=date]{min-width:210px}
   .rank{display:flex;justify-content:space-between;font-size:12.5px;
         padding:3px 0;border-bottom:1px dashed var(--line)}
   .rank:last-child{border-bottom:none}
@@ -116,6 +124,7 @@
   <div class="grow"></div>
   <button class="btn on" id="tab_search" onclick="showTab('search')">检索</button>
   <button class="btn" id="tab_panel" onclick="showTab('panel')">数据面板</button>
+  <button class="btn" id="tab_set" onclick="showTab('set')">⚙ 设置</button>
 </header>
 
 <main>
@@ -177,6 +186,85 @@
       <div class="box">
         <h3>检索行为（近 30 天）</h3>
         <div id="rank_ev"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 设置 ============ -->
+  <section id="v_set" style="display:none">
+    <div class="box" style="max-width:760px">
+      <h3>AI 配置</h3>
+      <p style="color:var(--dim);font-size:12.5px;margin:0 0 12px;line-height:1.7">
+        配置保存在本项目的 <code>config/settings.json</code>，不动任何第三方工具的原配置。<br>
+        密钥只写入、不回显 —— 存好后这里只显示「已配置」，要看内容请去改文件。
+      </p>
+      <div class="form">
+        <label>供应商
+          <select id="cfg_provider">
+            <option value="none">不使用（关闭 AI）</option>
+            <option value="openai_compat">OpenAI 兼容接口（云端）</option>
+            <option value="ollama">Ollama（本地，不花钱）</option>
+          </select>
+        </label>
+        <label>接口地址
+          <input id="cfg_base_url" placeholder="https://api.example.com/v1">
+        </label>
+        <label>模型
+          <input id="cfg_model" placeholder="例如 gpt-4o-mini / qwen2.5:7b">
+        </label>
+        <label>密钥
+          <input id="cfg_api_key" type="password" placeholder="粘贴 key；留空 = 不修改">
+        </label>
+        <label class="inline">
+          <input type="checkbox" id="cfg_enabled"> 启用 AI（不勾也能预览，但真生成会被拒）
+        </label>
+        <div class="row">
+          <button class="btn" onclick="clearKey()">清除已存密钥</button>
+          <button class="btn" id="btn_test" onclick="testAI()">测试连接</button>
+        </div>
+        <div class="row">
+          <span style="color:var(--dim);font-size:12.5px">每篇最多</span>
+          <input type="number" id="cfg_max_tokens" style="width:100px">
+          <span style="color:var(--dim);font-size:12.5px">tokens</span>
+          <span style="color:var(--dim);font-size:12.5px;margin-left:14px">超时</span>
+          <input type="number" id="cfg_timeout" style="width:90px">
+          <span style="color:var(--dim);font-size:12.5px">秒</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="box" style="max-width:760px;margin-top:12px">
+      <h3>采集范围</h3>
+      <p style="color:var(--dim);font-size:12.5px;margin:0 0 10px">
+        决定 <code>sync</code> 默认抓哪些年份。改完要重跑 <code>sync</code> 才生效。
+      </p>
+      <div class="form">
+        <label>中国网信办 起止
+          <input type="date" id="cfg_cac_from" style="width:150px">
+          <input type="date" id="cfg_cac_to" style="width:150px">
+        </label>
+        <label>浙江网信网 起止
+          <input type="date" id="cfg_zj_from" style="width:150px">
+          <input type="date" id="cfg_zj_to" style="width:150px">
+        </label>
+      </div>
+    </div>
+
+    <div class="box" style="max-width:760px;margin-top:12px">
+      <h3>服务</h3>
+      <div class="form">
+        <label>每页条数
+          <input type="number" id="cfg_page_size" style="width:90px">
+        </label>
+        <label class="inline" style="color:var(--dim);font-size:12.5px">
+          端口改动需重启服务才生效
+        </label>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" style="background:var(--acc);border-color:var(--acc);color:#fff"
+          onclick="saveCfg()">保存设置</button>
+        <button class="btn" onclick="loadCfg()">重新载入</button>
+        <span id="cfg_path" style="color:var(--dim);font-size:12px"></span>
       </div>
     </div>
   </section>
@@ -372,20 +460,113 @@ function reset(){
 function showTab(t){
   $('v_search').style.display = t==='search'?'block':'none';
   $('v_panel').style.display  = t==='panel'?'block':'none';
+  $('v_set').style.display    = t==='set'?'block':'none';
   $('tab_search').className='btn'+(t==='search'?' on':'');
   $('tab_panel').className ='btn'+(t==='panel'?' on':'');
+  $('tab_set').className   ='btn'+(t==='set'?' on':'');
   if(t==='panel') loadPanel();
+  if(t==='set') loadCfg();
 }
 
-function drawBars(el, rows, minRows){
+/* ---------------- 设置 ---------------- */
+async function loadCfg(){
+  const c=await (await fetch('/api/config')).json();
+  const a=c.ai||{};
+  $('cfg_provider').value = a.provider || 'none';
+  $('cfg_base_url').value = a.base_url || '';
+  $('cfg_model').value    = a.model || '';
+  $('cfg_enabled').checked = !!a.enabled;
+  // 密钥不回显：只提示状态，输入框留空表示不修改
+  $('cfg_api_key').value = '';
+  $('cfg_api_key').placeholder = a.has_key
+    ? `已配置（${a.key_len} 字符）—— 留空则不修改`
+    : '粘贴 key；留空 = 不修改';
+  $('cfg_cac_from').value = (c.sites?.cac?.date_start)||'';
+  $('cfg_cac_to').value   = (c.sites?.cac?.date_end)||'';
+  $('cfg_zj_from').value  = (c.sites?.zjwx?.date_start)||'';
+  $('cfg_zj_to').value    = (c.sites?.zjwx?.date_end)||'';
+  $('cfg_page_size').value= c.app?.page_size ?? 20;
+  $('cfg_path').textContent = '文件：' + (c.settings_file||'');
+  // max_tokens / timeout 不在 GET 里（避免暴露内部默认值），先留空由用户填
+  $('cfg_max_tokens').value='';
+  $('cfg_timeout').value='';
+}
+
+function collectCfg(){
+  const body={};
+  body.provider=$('cfg_provider').value;
+  body.base_url=$('cfg_base_url').value.trim();
+  body.model=$('cfg_model').value.trim();
+  body.enabled=$('cfg_enabled').checked;
+  // 留空 = 不修改（后端对空字符串特殊处理）
+  if($('cfg_api_key').value.trim()) body.api_key=$('cfg_api_key').value.trim();
+  const mt=$('cfg_max_tokens').value, to=$('cfg_timeout').value;
+  if(mt) body.max_tokens=parseInt(mt);
+  if(to) body.timeout=parseInt(to);
+  const ps=$('cfg_page_size').value; if(ps) body.page_size=parseInt(ps);
+  if($('cfg_cac_from').value) body.date_start_cac=$('cfg_cac_from').value;
+  if($('cfg_cac_to').value)   body.date_end_cac=$('cfg_cac_to').value;
+  if($('cfg_zj_from').value)  body.date_start_zjwx=$('cfg_zj_from').value;
+  if($('cfg_zj_to').value)    body.date_end_zjwx=$('cfg_zj_to').value;
+  return body;
+}
+
+async function saveCfg(){
+  try{
+    const r=await (await fetch('/api/config',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(collectCfg())
+    })).json();
+    if(!r.saved){ toast('没有需要保存的改动'); return; }
+    toast('已保存：'+r.changed.join(', '));
+    $('cfg_api_key').value='';
+    loadCfg();
+  }catch(e){ toast('保存失败：'+e.message, true); }
+}
+
+async function clearKey(){
+  if(!confirm('确定清除已保存的 API 密钥？\n这不会删除其它设置。')) return;
+  try{
+    const r=await (await fetch('/api/config',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({clear_key:true})
+    })).json();
+    toast(r.saved?'密钥已清除':'没有变化');
+    loadCfg();
+  }catch(e){ toast('清除失败：'+e.message, true); }
+}
+
+async function testAI(){
+  // 先保存再测，否则测的是旧配置
+  await saveCfg();
+  const btn=$('btn_test'); btn.textContent='测试中…';
+  try{
+    const s=await (await fetch('/api/config/status')).json();
+    btn.textContent='测试连接';
+    // ready 只说明「provider 和地址齐了」，不等于「key 有效、模型可用」。
+    // 说清楚是哪一环缺，别让人以为测通了。
+    const miss=[];
+    if(!s.provider || s.provider==='none') miss.push('未选供应商');
+    if(!s.base_url) miss.push('缺接口地址');
+    if(s.provider==='openai_compat' && !s.has_key) miss.push('缺密钥');
+    if(!s.model) miss.push('缺模型名');
+    if(miss.length) toast('还不能用：'+miss.join('、'), true);
+    else toast(`配置齐了：${s.provider} / ${s.model}（是否真能调用请在文章页点「生成摘要」验证）`);
+  }catch(e){ btn.textContent='测试连接'; toast('测试失败：'+e.message, true); }
+}
+
+function drawBars(el, rows){
   if(!rows.length){ el.innerHTML='<div class="empty" style="padding:20px">无数据</div>'; return; }
   const max=Math.max(...rows.map(r=>r.n))||1;
+  // 容器高 130px，减去数值行(14) 与横轴行(16) 与间距(6)，剩约 94px 可用
+  const MAXH=94;
   el.innerHTML=rows.map(r=>{
-    const h=Math.max(2, Math.round(r.n/max*88));
-    return `<div class="bar-item" title="${r.k}: ${r.n} 篇 / ${(r.c/10000).toFixed(1)} 万字">
+    const h=Math.max(2, Math.round(r.n/max*MAXH));
+    const short=r.k.length>7 ? r.k.slice(2).replace('-','/') : r.k;
+    return `<div class="bar-item" title="${esc(r.k)}: ${r.n} 篇 / ${((r.c||0)/10000).toFixed(1)} 万字">
       <div class="bar-v">${r.n}</div>
       <div class="bar-fill" style="height:${h}px"></div>
-      <div class="bar-x">${r.k}</div></div>`;
+      <div class="bar-x">${esc(short)}</div></div>`;
   }).join('');
   el.scrollLeft = el.scrollWidth;
 }

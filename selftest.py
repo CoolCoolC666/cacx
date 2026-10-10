@@ -162,6 +162,23 @@ if _index.is_file():
     check("前端调用的接口后端都存在", not _missing,
           f"检查 {len(_paths)} 个前缀" +
           (f"，缺 {sorted(_missing)}" if _missing else "，全部命中"))
+
+    # 配置接口的安全底线：读配置绝不能把密钥吐出来
+    from cacx.web.app import ConfigIn, api_config_get
+    _view = api_config_get()
+    _view_json = json.dumps(_view, ensure_ascii=False)
+    check("配置接口不回显密钥",
+          "api_key" not in _view_json
+          and "has_key" in _view_json and "key_len" in _view_json,
+          f"has_key={_view['ai']['has_key']}")
+    check("配置写接口只接受白名单字段",
+          set(ConfigIn.model_fields) == {
+              "provider", "base_url", "model", "api_key", "clear_key",
+              "enabled", "timeout", "max_tokens", "page_size",
+              "host", "port",
+              "date_start_cac", "date_end_cac",
+              "date_start_zjwx", "date_end_zjwx"},
+          f"{len(ConfigIn.model_fields)} 个字段")
     # 高亮逻辑跑 node 回归：实现从 index.html 抽取，改前端后不会变成假通过
     _js = Path(__file__).resolve().parent / "tests_mark.js"
     if _js.is_file():

@@ -167,9 +167,30 @@ cacx config import ~/Downloads/some-tool-config.json
 - 栏目 Top 12
 - 检索行为统计：各类操作次数、跳原文最多的文章
 
+**设置页（右上角 ⚙）**
+
+- AI 供应商 / 接口地址 / 模型 / 密钥，以及启用开关、tokens、超时
+- 「测试连接」会逐项报**缺哪一环**，不会只给一个模糊的"就绪/未就绪"
+- 采集日期范围（两站各自）、每页条数
+- 配置存 `config/settings.json`，**密钥只写入不回显**：
+  保存后输入框只显示「已配置（N 字符）」，要看内容请自己打开文件
+
+密钥的三态语义，网页上也要讲清楚：
+
+| 输入框 | 含义 |
+| --- | --- |
+| 留空 | **不修改**已存的 key |
+| 填了新 key | 覆盖 |
+| 点「清除已存密钥」 | 显式清空 |
+
+> 留空不等于清空，是刻意的：前端不回显 key，正常情况下每次打开
+> 设置页那个框都是空的，若把空当成清除，用户只是看了一眼就存一次，
+> 密钥就没了。
+
 接口：`/api/search` `/api/article/{id}` `/api/facets` `/api/stats`
 `/api/recent` `/api/health` `/api/export` `/api/trend` `/api/events`
-`/api/ai/status` `/open`，交互式文档在 `/docs`。
+`/api/config` `/api/config/status` `/api/ai/status` `/open`，
+交互式文档在 `/docs`。
 
 ---
 
