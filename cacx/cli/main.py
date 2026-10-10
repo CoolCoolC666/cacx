@@ -223,6 +223,99 @@ def cmd_doctor(args):
     return doctor(cfg, site=args.site, use_ai=not args.no_ai)
 
 
+# ---------------------------------------------------------------- 站点管理
+def cmd_site(args):
+    """自定义站点：推断 → 试抓 → 保存。配置写在 config/sites.d/<code>.json"""
+    import json as _json
+    from .. import sites as S
+    from ..collector import probe as P
+    cfg = C.load()
+    act = args.action
+
+    if act == "list":
+        allspec = S.all_sites(cfg)
+        if not allspec:
+            print("还没有任何站点")
+            return 0
+        print(f"{'代码':<22}{'类型':<8}{'栏目':<6}{'名称'}")
+        print("-" * 66)
+        for code, s in allspec.items():
+            kind = "内置" if s.get("builtin") else (s.get("kind") or "html")
+            flag = ""
+            if s.get("_broken"):
+                flag = f"  [配置损坏: {s.get('_error')}]"
+            elif not s.get("enabled", True):
+                flag = "  [已停用]"
+            print(f"{code:<22}{kind:<8}{len(s.get('columns') or []):<6}"
+                  f"{s.get('name') or code}{flag}")
+        return 0
+
+    if act in ("add", "probe"):
+        url = args.url
+        if not url:
+            print("请给网址：cacx site add https://www.example.gov.cn/")
+            return 2
+        print(f"[1/3] 正在打开 {url} 并推断采集规则 …")
+        res = P.draft_from_url(cfg, url, name=args.name or "",
+                               use_ai=not args.no_ai)
+        for ev in res["evidence"]:
+            print(f"      · {ev}")
+        for iss in res["issues"]:
+            print(f"      ! {iss}")
+        draft = res["draft"]
+        if not draft:
+            print("推断失败，没有产出可用配置。")
+            return 1
+        code = args.code or S.unique_code(url, draft.get("name", ""))
+        draft["code"] = code
+
+        print(f"[2/3] 试抓验证（只读，不入库、不写配置）…")
+        rep = P.probe_site(cfg, draft)
+        for c in rep.get("columns", []):
+            print(f"      · 栏目「{c.get('name')}」抓到 {c.get('listed', 0)} 条")
+            for s in (c.get("samples") or [])[:3]:
+                print(f"          {s.get('date',''):<12}{s.get('title','')[:40]}")
+            if c.get("error"):
+                print(f"          ! {c['error']}")
+        art = rep.get("article")
+        if art:
+            print(f"      · 正文样本：{art['title'][:40]} "
+                  f"[{art['pub_date'] or '无日期'}] {art['chars']} 字")
+            print(f"          {art['preview'][:120]}")
+        for iss in rep.get("issues", []):
+            print(f"      ! {iss}")
+
+        if act == "probe":
+            print("\n（--probe 模式，未保存。要保存请去掉该参数）")
+            print(_json.dumps(draft, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.force or rep.get("ok"):
+            path = S.save_custom(draft)
+            print(f"[3/3] 已保存 → {path}")
+            print(f"      网站点「数据同步」即可采集该站点。")
+        else:
+            print("\n[3/3] 试抓没通过，已**放弃保存**。")
+            print("      修好上面的问题后重试，或加 --force 强行保存。")
+            print(_json.dumps(draft, ensure_ascii=False, indent=2))
+            return 1
+        return 0
+
+    if act == "remove":
+        ok = S.delete_custom(args.code)
+        print(("已删除站点配置 " if ok else "找不到站点配置 ") + args.code)
+        print("提示：库里已入库的文章不会被删除，需要的话另行处理。")
+        return 0 if ok else 1
+
+    if act in ("enable", "disable"):
+        ok = S.set_enabled(args.code, act == "enable")
+        print(f"{'已启用' if ok else '操作失败'} {args.code}")
+        return 0 if ok else 1
+
+    print("未知子命令")
+    return 2
+
+
 # ---------------------------------------------------------------- export
 def cmd_export(args):
     """把检索结果导出到本地文件（CSV / JSONL）"""
@@ -411,8 +504,8 @@ def build_parser():
     sp.add_argument("--path", help="import/export 的文件路径")
     sp.set_defaults(func=cmd_config)
 
-    sp = sub.add_parser("sync", help="增量同步两站文章")
-    sp.add_argument("--site", action="append", choices=["cac", "zjwx"],
+    sp = sub.add_parser("sync", help="增量同步文章（内置两站 + 你添加的站点）")
+    sp.add_argument("--site", action="append",
                     help="可重复；不填则同步全部启用的站")
     sp.add_argument("--mode", default="incremental",
                     choices=["incremental", "full", "list-only"],
@@ -425,9 +518,40 @@ def build_parser():
     sp.set_defaults(func=cmd_sync)
 
     sp = sub.add_parser("doctor", help="接口自检（站点是否改版）")
-    sp.add_argument("--site", action="append", choices=["cac", "zjwx"])
+    # 站点代码是动态的（用户可以自己加站），不能用 choices 写死
+    sp.add_argument("--site", action="append", help="只查指定站点，可重复")
     sp.add_argument("--no-ai", action="store_true", help="不用 AI，仅规则检查")
     sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser("site", help="站点管理：添加 / 试抓 / 删除自定义站点")
+    ssub = sp.add_subparsers(dest="action", required=True)
+    ssub.add_parser("list", help="列出全部站点").set_defaults(func=cmd_site)
+
+    spa = ssub.add_parser("add", help="输网址 → 推断规则 → 试抓验证 → 保存")
+    spa.add_argument("url", help="站点或栏目列表页地址")
+    spa.add_argument("--name", help="站点中文名（不给就从网页标题推断）")
+    spa.add_argument("--code", help="站点代码（不给就按域名自动生成）")
+    spa.add_argument("--no-ai", action="store_true", help="不用 AI，纯启发式推断")
+    spa.add_argument("--force", action="store_true", help="试抓没过也强行保存")
+    spa.set_defaults(func=cmd_site)
+
+    spp = ssub.add_parser("probe", help="只推断+试抓并打印配置，不保存")
+    spp.add_argument("url")
+    spp.add_argument("--name", default="")
+    spp.add_argument("--code", default="")
+    spp.add_argument("--no-ai", action="store_true")
+    spp.set_defaults(func=cmd_site)
+
+    spr = ssub.add_parser("remove", help="删除自定义站点配置（不动已入库文章）")
+    spr.add_argument("code")
+    spr.set_defaults(func=cmd_site)
+
+    spe = ssub.add_parser("enable", help="启用自定义站点")
+    spe.add_argument("code")
+    spe.set_defaults(func=cmd_site)
+    spd = ssub.add_parser("disable", help="停用自定义站点（同步时跳过）")
+    spd.add_argument("code")
+    spd.set_defaults(func=cmd_site)
 
     sp = sub.add_parser("export", help="把检索结果导出到本地文件")
     sp.add_argument("query", nargs="?", default="")

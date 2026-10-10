@@ -139,6 +139,52 @@ def absolutize(src: str, base_url: str) -> str:
     return src
 
 
+# requests 对 `Content-Type: text/html`（没有 charset）会**擅自**把
+# r.encoding 设成 ISO-8859-1，于是每一个中文字符都变成「Ã¥â»¨」
+# 这种乱码。国内政务站有大量这种不声明 charset 的页面，
+# 而这里不会报任何错 —— 乱码会一路写进数据库，直到人真去读才发现。
+# 所以编码判定必须自己来。
+_DEFAULT_ENCODINGS = {"iso-8859-1", "latin-1", "latin1", "ascii"}
+
+
+def decode_response(r) -> str:
+    """拿到响应正文（str），编码判定顺序：
+        1) 响应头里**真的**声明了 charset（不是 requests 的默认猜测）→ 用它
+        2) 内容能严格按 UTF-8 解码 → utf-8
+        3) 能严格按 gb18030 解码 → gb18030（GBK/GB2312 的超集）
+        4) 兜底用 requests 的 apparent_encoding
+    """
+    enc = (r.encoding or "").lower().strip()
+    if enc and enc not in _DEFAULT_ENCODINGS:
+        try:
+            return r.content.decode(enc, errors="replace")
+        except (LookupError, TypeError):
+            pass
+    for cand in ("utf-8", "gb18030"):
+        try:
+            text = r.content.decode(cand)          # strict，失败就换下一个
+        except (UnicodeDecodeError, LookupError):
+            continue
+        # 全是 ASCII 时两种编码结果一样，不必再试
+        return text
+    return r.text
+
+
+def charset_note(r) -> str:
+    """一句话说明这个响应的编码是怎么定的，给试抓报告用（排查乱码时最有用）"""
+    declared = (r.encoding or "").lower().strip()
+    if declared and declared not in _DEFAULT_ENCODINGS:
+        return f"响应头声明 {declared}"
+    for cand in ("utf-8", "gb18030"):
+        try:
+            r.content.decode(cand)
+            return ("按内容严格解码判定为 " + cand +
+                    "（响应头未声明 charset）")
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return "编码无法确定，已按 apparent_encoding 尽力解码"
+
+
 def clean_title(t: str) -> str:
     return re.sub(r"\s+", " ", html_mod.unescape(
         re.sub(r"<[^>]*>", "", t or ""))).strip()

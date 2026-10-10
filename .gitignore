@@ -39,3 +39,5 @@ _probe.py
 # 正式版是同名的英文名 .bat，见 README「一键启动」
 启动cacx.bat
 同步最新文章.bat
+# ---- 自定义站点配置（json 模式下 headers 里可能带鉴权 token，同 settings.json 处理）----
+config/sites.d/*.json

@@ -11,21 +11,51 @@ import time
 from typing import Dict, List, Optional
 
 from .. import db as D
+from .. import sites as S
 from .base import SiteCollector, html_to_text
 from .cac import CacCollector
+from .generic import build as build_generic
 from .zjwx import ZjwxCollector
 
-COLLECTORS = {"cac": CacCollector, "zjwx": ZjwxCollector}
+# 内置站点：采集逻辑是代码，不是配置能表达的。
+# 自定义站点走 GenericCollector，由 config/sites.d/*.json 驱动。
+BUILTIN_COLLECTORS = {"cac": CacCollector, "zjwx": ZjwxCollector}
+COLLECTORS = BUILTIN_COLLECTORS        # 兼容旧引用，实际请用 site_codes()
+
+
+def site_codes(cfg: Dict, only_enabled: bool = True) -> List[str]:
+    """当前配置下**所有**可采集的站点（内置 + 自定义）"""
+    return S.enabled_codes(cfg) if only_enabled else \
+        [c for c, v in S.all_sites(cfg).items()
+         if not v.get("_broken") and not v.get("_shadowed")]
 
 
 def get_collector(cfg: Dict, site: str, verbose=True) -> Optional[SiteCollector]:
+    """
+    按站点代码造采集器。
+    内置站点用专用类；自定义站点用 GenericCollector（配置驱动）。
+    返回 None 表示「未启用 / 不存在 / 配置损坏」，调用方要显式登记，
+    不能当作「这个站没东西」。
+    """
     sc = cfg.get("sites", {}).get(site, {})
-    if not sc.get("enabled", True):
+    spec = S.all_sites(cfg).get(site) or sc
+    if not spec:
         return None
-    cls = COLLECTORS.get(site)
-    if cls is None:
+    if spec.get("_broken"):
+        if verbose:
+            print(f"[warn] 站点 {site} 配置损坏: {spec.get('_error')}")
         return None
-    return cls(sc, cfg.get("collector", {}), verbose=verbose)
+    if not spec.get("enabled", True):
+        return None
+    cls = BUILTIN_COLLECTORS.get(site)
+    if cls is not None:
+        return cls(sc or spec, cfg.get("collector", {}), verbose=verbose)
+    try:
+        return build_generic(spec, cfg.get("collector", {}), verbose=verbose)
+    except Exception as e:
+        if verbose:
+            print(f"[warn] 站点 {site} 配置无法使用: {type(e).__name__}: {e}")
+        return None
 
 
 def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental",
@@ -72,8 +102,10 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
             sc["date_end"] = date_end
 
     d = D.open_db(run_cfg)
-    sites = sites or [s for s in COLLECTORS
-                      if run_cfg.get("sites", {}).get(s, {}).get("enabled", True)]
+    # 默认站点表是**动态**的：用户在网页上加了新站点，
+    # 不重启服务、不改这里，下一次 sync 就该带上它。
+    # 早前这里写死 [s for s in COLLECTORS]，等于新站点永远采不到。
+    sites = sites or site_codes(run_cfg)
     rc = 0
     totals = {"listed": 0, "new": 0, "failed": 0}
     for site in sites:
@@ -171,7 +203,7 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
 def doctor(cfg: Dict, site: Optional[str] = None, use_ai: bool = True) -> int:
     """接口自检。规则层永远跑；use_ai=True 且 AI 已配置时再补一层 AI 诊断。"""
     d = D.open_db(cfg)
-    sites = site or list(COLLECTORS)
+    sites = site or site_codes(cfg)
     reports = []
     print("=" * 68)
     print("接口自检 doctor")
