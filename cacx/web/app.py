@@ -20,7 +20,9 @@ FastAPI 检索服务
     POST /api/purge/preview    批量删除：影响面预览（只读，返 confirm_token）
     POST /api/purge/execute    批量删除：真删（需 yes=true + 正确的 token）
 
-    GET  /api/ai/failures      跨重启的 AI 失败清单（限流/超时/配置类）
+    GET  /api/ai/failures      跨重启的 AI 失败清单（**实时对账**，只列仍无摘要的）
+    POST /api/ai/failures/clear 清空失败留痕（默认只清已补上的；all=true 清全部）
+    POST /api/ai/annotations/manual 人工补录摘要（模型被内容审查拦下时用）
     POST /api/ai/retry-failed  只重跑「可重试」的失败项，不重跑整批
 
 约定
@@ -619,10 +621,14 @@ def _batch_worker(job_id: str, cfg_snapshot: Dict[str, Any], req: BatchReq):
                            f"属于可重试 —— 用「仅重试失败项」即可补跑。"})
             fatal = summary["fail"] - summary["retriable"]
             if fatal > 0:
+                # ⚠ 原来的提示语把所有不可重试错误都说成「如 api_key、模型名」，
+                # 实测误导：422 内容审查（供应商安全策略拦截）也落在这一类，
+                # 照着去改 api_key 纯属白折腾。改为只陈述事实 + 指路分类。
                 job["logs"].append({
                     "t": time.strftime("%H:%M:%S"),
-                    "msg": f"⚠ {fatal} 篇因配置/请求问题失败"
-                           f"（如 api_key、模型名），重试无用，请先改配置。"})
+                    "msg": f"⚠ {fatal} 篇失败且重试无效（内容审查拦截 / 鉴权 / "
+                           f"配置等）。失败清单里已按类别标注，每类都写明了"
+                           f"该做什么 —— 请照类别处理，不要一律去改配置。"})
     except Exception as e:
         with BATCH_LOCK:
             job["error"] = f"{type(e).__name__}: {e}"
@@ -640,6 +646,8 @@ def _batch_worker(job_id: str, cfg_snapshot: Dict[str, Any], req: BatchReq):
 @app.get("/api/ai/failures")
 def api_ai_failures(task: str = "summarize",
                     retryable_only: bool = False,
+                    date_from: str = "", date_to: str = "",
+                    include_resolved: bool = False,
                     limit: int = Query(200, ge=1, le=1000)):
     """
     跨重启的失败清单。
@@ -648,18 +656,106 @@ def api_ai_failures(task: str = "summarize",
     刚才那批跑了多少、哪几篇失败、有没有中断，全都没了。
     失败留痕写在库里，所以重启后仍能回答「上次那批还欠哪几篇」，
     并据此只补跑它们 —— 而不是把整批重跑一遍再烧一次配额。
+
+    默认**实时对账**：只返回「至今仍无摘要」的那些。
+    date_from/date_to 与批量面板同一套选区口径 ——
+    两边口径不一致时，界面上的数字和「补跑」真会跑到的篇数对不上。
     """
     d = _db()
     rows = d.list_ai_failures(task=task, retryable_only=retryable_only,
-                              limit=limit)
-    return {"items": rows, "count": len(rows),
-            "retryable": sum(1 for r in rows if r.get("retryable"))}
+                              limit=limit, date_from=date_from,
+                              date_to=date_to,
+                              only_orphans=not include_resolved)
+    stats = d.ai_failure_stats(task=task, date_from=date_from, date_to=date_to)
+    out = []
+    for r in rows:
+        k = D.Database.classify_failure(r.get("error", ""), bool(r.get("retryable")))
+        r["kind"] = k
+        r["hint"] = D.Database.FAILURE_HINTS.get(k, "")
+        out.append(r)
+    return {"items": out, "count": len(out), "stats": stats,
+            # 保留这两个顶层字段：外部脚本/旧前端可能还在读它们。
+            # retryable 是「当前返回的这批里，有几条属可自动重试」——
+            # 与 stats.retryable（待补跑中的可重试数）同口径，保留不冲突。
+            "retryable": sum(1 for r in out if r.get("retryable")),
+            "hints": D.Database.FAILURE_HINTS}
+
+
+class ClearFailuresIn(BaseModel):
+    # 默认只清「已经补上摘要」的那些 —— 安全的默认档。
+    # all=True 会连真正还没补跑的一起清掉，必须前端二次确认。
+    all: bool = False
+    task: str = "summarize"
+    ids: Optional[List[int]] = None
+
+
+@app.post("/api/ai/failures/clear")
+def api_ai_failures_clear(req: ClearFailuresIn):
+    """
+    清空失败清单，返回实际删掉的条数（逐项回报，不静默）。
+
+    只删 ai_failures 的留痕行，**不动 ai_annotations** ——
+    失败清单纯粹是「历史记账」，删它不会丢任何摘要。
+    """
+    d = _db()
+    before = d.ai_failure_stats(task=req.task)
+    n = d.clear_ai_failures(task=req.task, only_stale=not req.all,
+                            article_ids=req.ids)
+    after = d.ai_failure_stats(task=req.task)
+    return {"deleted": n, "before": before, "after": after,
+            "scope": "all" if req.all else "resolved_only",
+            "note": "只清理失败留痕，未删除任何已生成的摘要。"}
+
+
+class ManualAnnIn(BaseModel):
+    """人工补录：给供应商内容审查拦下、或用户自己写了摘要的篇目。"""
+    article_id: int
+    task: str = "summarize"
+    summary: str
+    tags: Optional[List[str]] = None
+    sentiment: str = "neutral"
+    entities: Optional[List[str]] = None
+    note: str = ""
+
+
+@app.post("/api/ai/annotations/manual")
+def api_ai_annotation_manual(req: ManualAnnIn):
+    """
+    人工补录摘要。provider 记为 manual，与模型生成的可区分。
+
+    适用场景：模型因内容安全策略拒绝（422 content_blocked），
+    重试一万次也一样。**本接口不调用任何模型**，纯写入。
+    """
+    if not req.summary.strip():
+        raise HTTPException(400, {"message": "摘要内容不能为空", "refused": True})
+    d = _db()
+    art = d.get_article(req.article_id, with_html=False)
+    if not art:
+        raise HTTPException(404, {"message": f"文章 {req.article_id} 不存在",
+                                  "refused": True})
+    if art.get("content_empty"):
+        raise HTTPException(400, {
+            "message": "该文章正文为空，补录摘要没有意义", "refused": True})
+    d.manual_annotation(
+        req.article_id, req.task,
+        {"summary": req.summary.strip(),
+         "tags": req.tags or [],
+         "sentiment": req.sentiment or "neutral",
+         "entities": req.entities or [],
+         "manual_note": req.note},
+        provider="manual", model="human")
+    return {"saved": True, "article_id": req.article_id,
+            "title": art.get("title", ""),
+            "cleared_failure": True,
+            "note": "已写入并清除该篇的失败留痕；provider 记为 manual。"}
 
 
 class RetryFailedIn(BaseModel):
     dry_run: bool = True
     concurrency: int = 3
     rate: float = 0.0
+    # 保留字段名与语义，但它现在只影响「挑哪些篇」，
+    # 不再决定界面上那个按钮的数字 —— 那个数字由实时对账算。
     retryable_only: bool = True
     limit: int = Query(100, ge=1, le=1000)
 
@@ -669,8 +765,11 @@ def api_ai_retry_failed(req: RetryFailedIn):
     """只重跑失败清单里的文章 —— 中断续跑的正确姿势。
 
     retryable_only=True 时只挑「值得重试」的（429/超时/5xx）。
-    鉴权失败、模型名错误这类重试一万次也一样，直接跳过，
+    内容审查拦截、鉴权失败、模型名错误这类重试一万次也一样，直接跳过，
     否则每次点「重试」都是白烧一轮额度还依然失败。
+
+    ⚠ 这里不再按 retryable 标记来算「还欠几篇」—— 那个数字一律来自实时对账
+    （没摘要才算欠）。原先按历史标记算，实测出现 58 篇 vs 实际 1 篇的离谱差异。
     """
     cfg = _cfg()
     d = _db()
@@ -682,17 +781,19 @@ def api_ai_retry_failed(req: RetryFailedIn):
         a = d.get_article(r["article_id"], with_html=False)
         if a:
             arts.append(a)
+    stats = d.ai_failure_stats(task="summarize")
     if not arts:
         raise HTTPException(400, {
-            "message": "没有可重试的失败项"
-                       + ("（可重试清单为空；若是配置类失败，"
-                          "请先改 api_key / 模型名再试）" if req.retryable_only
-                          else ""),
-            "refused": True})
+            "message": (f"没有可重试的失败项（共 {stats['pending']} 篇待补跑，"
+                        f"其中可自动重试 {stats['retryable']} 篇）。"
+                        "若是内容审查拦截，请用人工补录；"
+                        "若是鉴权/模型名问题，请先改配置。"),
+            "refused": True, "stats": stats})
     return {"selected": len(arts),
             "article_ids": [a["id"] for a in arts],
             "preview": [{"id": a["id"], "title": a.get("title")}
                         for a in arts[:20]],
+            "stats": stats,
             "dry_run": req.dry_run,
             "note": "把 article_ids 交给批量摘要接口的 ids 参数即可只跑这些"}
 

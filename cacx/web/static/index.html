@@ -439,13 +439,21 @@
 
       <div id="bg_failbox" style="display:none;margin-top:12px">
         <div class="row" style="margin-bottom:6px">
-          <span style="font-size:12.5px;color:#d98">⚠ 失败清单（跨服务重启保留）</span>
+          <span style="font-size:12.5px;color:#d98">⚠ 失败清单（实时对账 · 跨服务重启保留）</span>
           <div class="grow"></div>
           <button class="btn" style="padding:2px 9px;font-size:11.5px"
             onclick="loadFailures()">刷新</button>
           <button class="btn" id="bg_retry" style="padding:2px 9px;font-size:11.5px"
-            onclick="retryFailed()">⟳ 仅重试可重试项</button>
+            onclick="retryFailed()">⟳ 补跑待办</button>
+          <button class="btn" id="bg_clear_stale" style="padding:2px 9px;font-size:11.5px"
+            onclick="clearFailures(false)"
+            title="只清掉「已经有摘要」的那些历史记账，不动任何摘要">清空已过时</button>
+          <button class="btn" id="bg_clear_all" style="padding:2px 9px;font-size:11.5px"
+            onclick="clearFailures(true)"
+            title="连真正还没补跑的记录一起清掉">清空全部</button>
         </div>
+        <div id="bg_fail_stats" style="font-size:12px;color:var(--dim);
+             margin-bottom:5px"></div>
         <div id="bg_fail_list" style="font-size:12px;max-height:220px;overflow:auto"></div>
       </div>
 
@@ -900,36 +908,131 @@ async function backfillOne(id){
 
 /* 失败清单：写在库里，所以**服务重启后仍然可见** ——
    批次进度（BATCH_JOBS）是内存 dict，一重启就没了。
-   没有这个清单，用户重启后就再也想不起来「上次那批还欠哪几篇」，
-   只能把整批重跑一遍 —— 已成功的虽会被 resume 跳过，
-   但那批没跑完的等待与排查成本全是白付。 */
+
+   ⚠ 但**列表本身是实时对账出来的**，不是把表里的历史记录直接摊开：
+   表里的行是「某时刻失败过」，而摘要可能从任何路径补上 ——
+   本程序重跑、批量导入、外部工具回填…只有 save_annotation 那条路会自动清除。
+   实测踩过：MiniMax 20:07 限流写了 65 条，之后从豆包导入这 65 条摘要，
+   导入不走 save_annotation，于是 66 条里 65 条成了僵尸，
+   界面上「可重试 58」而实际只欠 1 篇。
+   判据只能是「这篇现在有没有摘要」。 */
 let BG_RETRY_IDS = [];
+let BG_FAIL_STATS = null;
+
+const FAIL_KIND = {
+  rate_limit:      {label:'限流',       color:'var(--warn)', ok:1},
+  content_blocked: {label:'内容审查',   color:'var(--err)',  ok:0},
+  auth:            {label:'鉴权',       color:'var(--err)',  ok:0},
+  network:         {label:'网络/超时',  color:'var(--warn)', ok:1},
+  bad_model:       {label:'模型名',     color:'var(--err)',  ok:0},
+  not_configured:  {label:'未配置',     color:'var(--err)',  ok:0},
+  server:          {label:'服务端',     color:'var(--warn)', ok:1},
+  retriable:       {label:'临时故障',   color:'var(--warn)', ok:1},
+  other:           {label:'其它',       color:'var(--dim)',  ok:0},
+};
 
 async function loadFailures(){
   try{
-    const r=await (await fetch('/api/ai/failures?task=summarize&limit=200')).json();
+    // 日期口径跟批量面板对齐（bg_from/bg_to），否则两处数字对不上
+    const qs=new URLSearchParams({task:'summarize',limit:'200'});
+    const f=$('bg_from')?.value, t=$('bg_to')?.value;
+    if(f) qs.set('date_from',f);
+    if(t) qs.set('date_to',t);
+    const r=await (await fetch('/api/ai/failures?'+qs)).json();
     const box=$('bg_failbox');
-    if(!r.items.length){ box.style.display='none'; BG_RETRY_IDS=[]; return; }
+    const st=r.stats||{};
+    BG_FAIL_STATS=st;
+    // 清空按钮的可用性跟着实时数字走，不跟着历史记录走
+    $('bg_clear_stale').disabled = !(st.stale>0);
+    $('bg_clear_all').disabled   = !(st.total_rows>0);
+    if(!r.items.length && !(st.stale>0)){
+      box.style.display='none'; BG_RETRY_IDS=[]; return;
+    }
     box.style.display='block';
-    const retryable=r.items.filter(x=>x.retryable);
-    BG_RETRY_IDS=retryable.map(x=>x.article_id);
+    // 按钮只留「真能自动补跑」的；内容审查那类点了也是白烧额度，
+    // 提示语里说清「要去人工补录」。
+    const auto=r.items.filter(x=>FAIL_KIND[x.kind]?.ok);
+    BG_RETRY_IDS=auto.map(x=>x.article_id);
     const btn=$('bg_retry');
-    btn.disabled = retryable.length===0;
-    btn.textContent = retryable.length
-      ? `⟳ 仅重试可重试项（${retryable.length}）` : '（无可重试项）';
-    $('bg_fail_list').innerHTML =
-      `<div style="color:var(--dim);margin-bottom:5px">共 ${r.items.length} 条，`
-      +`其中 ${retryable.length} 条可重试（限流/超时/服务端故障）；`
-      +`其余是配置或请求问题，重试无用，请先改 ai 配置。</div>`
-      + r.items.map(x=>{
-        const c = x.retryable? 'var(--warn)' : 'var(--err)';
-        return `<div style="padding:4px 0;border-top:1px solid var(--line)">`
-          +`<span style="color:${c}">[${x.retryable?'可重试':'不可重试'}]</span> `
-          +`${esc(x.title||x.article_id)}`
-          +`<div style="color:var(--dim);font-size:11.5px">${esc(x.error||'')}`
-          +`　${esc(x.created_at||'')}</div></div>`;
-      }).join('');
+    btn.disabled = auto.length===0;
+    btn.textContent = auto.length
+      ? `⟳ 补跑待办（${auto.length}）`
+      : '（无自动补跑项）';
+    btn.title = auto.length
+      ? '这些是限流/超时/服务端故障，重试有机会成功'
+      : '剩余的是内容审查/鉴权类，重试无用，需人工处理';
+
+    const kindTxt = Object.entries(st.kinds||{})
+      .map(([k,n])=>`${FAIL_KIND[k]?.label||k} ${n}`).join(' · ');
+    $('bg_fail_stats').innerHTML =
+      `待补跑 <b style="color:var(--err)">${st.pending||0}</b> 篇`
+      + (kindTxt?`（${kindTxt}）`:'')
+      + `　·　可自动重试 <b>${st.retryable||0}</b> 篇`
+      + `　·　历史记账共 ${st.total_rows||0} 条`
+      + (st.stale?`　·　其中 <b style="color:var(--ok)">${st.stale}</b> 条已经补上摘要（不显示在下面）`:'');
+
+    $('bg_fail_list').innerHTML = r.items.map(x=>{
+      const k=FAIL_KIND[x.kind]||FAIL_KIND.other;
+      const aid=x.article_id;
+      const man = (k.ok===0 && x.kind==='content_blocked')
+        ? ` <button class="btn" style="padding:1px 7px;font-size:11px"
+             onclick="manualAnn(${aid})">✍ 人工补录</button>` : '';
+      return `<div style="padding:4px 0;border-top:1px solid var(--line)">`
+        +`<span style="color:${k.color}">[${k.label}]</span> `
+        +`<span style="color:var(--dim);font-size:11.5px">#${aid}</span> `
+        +`${esc(x.title||'')}${man}`
+        +`<div style="color:var(--dim);font-size:11.5px">${esc(x.hint||'')}`
+        +`<br>${esc((x.error||'').slice(0,160))}`
+        +`　${esc(x.created_at||'')}</div></div>`;
+    }).join('');
   }catch(e){ /* 服务未起就静默 */ }
+}
+
+/* 清空失败记账。两档，破坏性逐级递增：
+   · 清空已过时 = 只删「已经有摘要」的那些，纯 housekeeping
+   · 清空全部   = 连真正还欠着的记录一起删，需要二次确认
+   两者都**不删除任何摘要** —— 失败清单只是历史记账。 */
+async function clearFailures(all){
+  const st=BG_FAIL_STATS||{};
+  if(!all){
+    if(!confirm(`将清掉 ${st.stale||0} 条「已经补上摘要」的历史失败记录。\n\n`
+      +`这是纯记账清理，不会删除任何已生成的摘要。\n确定继续？`)) return;
+  }else{
+    if(!confirm(`⚠ 将清空整个失败清单，共 ${st.total_rows||0} 条记录，`
+      +`其中 ${st.pending||0} 篇其实还没有摘要。\n\n`
+      +`清空后这些文章会重新出现在「增量」待跑列表里，`
+      +`但你将看不到它们曾经失败过、为什么失败。\n\n`
+      +`不会删除任何已生成的摘要。确定继续？`)) return;
+    if(!confirm(`再次确认：清空全部 ${st.total_rows||0} 条失败记录？`)) return;
+  }
+  try{
+    const r=await (await fetch('/api/ai/failures/clear',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({all:!!all, task:'summarize'})
+    })).json();
+    toast(`已清理 ${r.deleted} 条失败记录（未删除任何摘要）`);
+    loadFailures(); loadAiBadge();
+  }catch(e){ toast('清理失败：'+e.message, true); }
+}
+
+/* 人工补录摘要：给供应商内容审查拦下的篇目。
+   **不调用任何模型**，纯写入 —— 重试一万次也一样，不如你自己写一段。 */
+function manualAnn(id){
+  const s=prompt(`为 #${id} 人工补录摘要。\n\n`
+    +`这篇是模型生成时被供应商的内容安全策略拦下的，重试无用。\n`
+    +`在这里写摘要，会直接入库（provider 记为 manual），不会调用任何模型。\n\n`
+    +`留空取消。`);
+  if(!s || !s.trim()) return;
+  (async()=>{
+    try{
+      const r=await (await fetch('/api/ai/annotations/manual',{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({article_id:id, task:'summarize', summary:s.trim()})
+      })).json();
+      toast('已补录：'+esc(r.title||('#'+id)));
+      loadFailures(); loadAiBadge(); loadAnns();
+    }catch(e){ toast('补录失败：'+e.message, true); }
+  })();
 }
 
 /* 只重跑可重试的失败项，不动整批。
@@ -942,11 +1045,25 @@ async function retryFailed(){
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({dry_run:true, retryable_only:true, limit:200})
     })).json();
-    if(r.refused){ toast(r.detail?.message || r.message || '没有可重试项', true); return; }
-    if(!confirm(`将只重跑 ${r.selected} 篇「可重试」的失败文章。\n`
-      +'（其余失败项属配置问题，不会重试）\n\n先预览，确认后再点开始生成。')) return;
+    if(r.refused){
+      const d=r.detail||{};
+      toast(d.message || r.message || '没有可自动补跑项', true);
+      return;
+    }
+    const st=r.stats||{};
+    // 说清楚「还有多少篇是这条按钮处理不了的」，以及该走哪条路 ——
+    // 否则用户点完发现清单还在，以为按钮坏了。
+    const left=(st.pending||0)-(st.retryable||0);
+    const extra = left>0
+      ? `\n\n另有 ${left} 篇是内容审查/鉴权类，重试无用：\n`
+        +`· 内容审查 → 用清单里的「✍ 人工补录」自己写一段\n`
+        +`· 鉴权/模型名 → 先到设置页改好再回来`
+      : '';
+    if(!confirm(`将只补跑 ${r.selected} 篇「可自动重试」的失败文章`
+      +`（限流/超时/服务端故障）。${extra}`
+      +`\n\n先预览，确认后再点开始生成。`)) return;
     BG_PENDING_IDS = r.article_ids;
-    $('bg_state').textContent = '已选定 '+r.selected+' 篇失败项，请点「预览」确认';
+    $('bg_state').textContent = '已选定 '+r.selected+' 篇，请点「预览」确认';
     $('bg_state').style.color='var(--warn)';
     document.querySelector('#v_ai').scrollIntoView({behavior:'smooth'});
   }catch(e){ toast('重试失败：'+e.message, true); }

@@ -305,6 +305,48 @@ class Database:
         return dict(r) if r else None
 
     # ---------------------------------------------------------- AI 失败留痕
+    @staticmethod
+    def classify_failure(error: str, retryable: bool) -> str:
+        """
+        把错误归成人能行动的类别。
+
+        为什么必须做：原来的提示语是「因配置/请求问题失败（如 api_key、
+        模型名），重试无用，请先改配置」—— 它把**所有**不可重试的错误
+        一锅端说成配置问题。实测误伤：422 内容审查（供应商侧安全策略拦截）
+        同样落在这一类，照着提示去改 api_key 纯属白折腾。
+
+        类别与建议一一对应，不给猜测。
+        """
+        e = (error or "").lower()
+        if "429" in e or "rate limit" in e or "速率限制" in error:
+            return "rate_limit"          # 限流：等一会重试就行
+        if "sensitive" in e or "422" in e or "unprocessable" in e:
+            return "content_blocked"      # 内容审查：重试无用，只能人工补录
+        if "401" in e or "403" in e or "unauthorized" in e or "invalid api key" in e:
+            return "auth"                # 密钥/鉴权：去改配置
+        if "timeout" in e or "timed out" in e or "connection" in e:
+            return "network"             # 网络/超时：多半可重试
+        if "model" in e and "not found" in e:
+            return "bad_model"
+        if "未配置" in error or "ai not configured" in e:
+            return "not_configured"
+        if "500" in e or "502" in e or "503" in e:
+            return "server"
+        return "retriable" if retryable else "other"
+
+    #: 各类别在界面上给用户的说明（key 与 classify_failure 的返回值一一对应）
+    FAILURE_HINTS = {
+        "rate_limit": "供应商限流，等一会儿重试即可，不用改配置。",
+        "content_blocked": "供应商内容安全策略拦截，重试无用。需要的话请人工补录摘要。",
+        "auth": "密钥或鉴权有问题，请到设置页检查 api_key。",
+        "network": "网络或超时问题，多半可直接重试。",
+        "bad_model": "模型名不存在或无权限，请在设置页检查。",
+        "not_configured": "AI 未配置，请先在设置页填好供应商、地址、模型与密钥。",
+        "server": "供应商服务端错误，稍后重试。",
+        "retriable": "临时故障，可重试。",
+        "other": "其它错误，请查看下方原文。",
+    }
+
     def record_ai_failure(self, article_id: int, task: str, error: str,
                           retryable: bool = False, attempts: int = 1,
                           batch_id: str = ""):
@@ -332,17 +374,146 @@ class Database:
                 (int(article_id), task))
 
     def list_ai_failures(self, task: str = "", retryable_only: bool = False,
-                         limit: int = 200) -> List[dict]:
-        sql = ("SELECT f.*, a.title, a.site, a.url FROM ai_failures f "
-               "LEFT JOIN articles a ON a.id = f.article_id WHERE 1=1")
+                         limit: int = 200,
+                         date_from: str = "", date_to: str = "",
+                         only_orphans: bool = True) -> List[dict]:
+        """
+        失败清单。
+
+        only_orphans=True（默认）时**实时对账**：只返回「仍需补跑」的项 ——
+        即失败了、文章还在库、且该文章**至今没有**成功摘要。
+        这么做的原因：表里的记录是**历史**，而摘要可能从任何路径补上
+        （本程序重跑、批量导入、外部工具回填…）。逐次核对成本高、
+        且一旦有路径绕过清理就永远显示「还没修好」，与事实相反。
+        实测踩过：MiniMax 20:07 限流写了 65 条，之后豆包导入了这 65 条摘要，
+        导入不走 save_annotation，失败记录就全成了僵尸（66 条里 65 条是）。
+        以「有没有摘要」为准，是唯一与事实一致的判据。
+
+        date_from/date_to：把清单口径与批量面板对齐（同一套选区），
+        否则界面上的数字和「补跑」真正会跑到的篇数对不上。
+        """
+        sql = ("SELECT f.*, a.title, a.site, a.url, a.pub_date, a.chars,"
+               "       COALESCE(a.content_empty,0) AS content_empty "
+               "FROM ai_failures f "
+               "JOIN articles a ON a.id = f.article_id WHERE 1=1")
         args: List[Any] = []
         if task:
             sql += " AND f.task = ?"; args.append(task)
+        if only_orphans:
+            sql += (" AND NOT EXISTS (SELECT 1 FROM ai_annotations n "
+                    "WHERE n.article_id=f.article_id AND n.task=f.task)")
+        if date_from:
+            sql += " AND a.pub_date >= ?"; args.append(date_from)
+        if date_to:
+            sql += " AND a.pub_date <= ?"; args.append(date_to)
+        sql += " AND COALESCE(a.content_empty,0)=0"
         if retryable_only:
             sql += " AND f.retryable = 1"
         sql += " ORDER BY f.created_at DESC LIMIT ?"
         args.append(int(limit))
         return [dict(r) for r in self.conn.execute(sql, args)]
+
+    def ai_failure_stats(self, task: str = "summarize",
+                         date_from: str = "", date_to: str = "") -> dict:
+        """
+        失败清单的分类统计。口径与 list_ai_failures 对齐，
+        界面上每个数字都能对上「点下去会发生什么」。
+        """
+        wheres = ["f.task=?"]
+        args: List[Any] = [task]
+        if date_from:
+            wheres.append("a.pub_date >= ?"); args.append(date_from)
+        if date_to:
+            wheres.append("a.pub_date <= ?"); args.append(date_to)
+        W = " AND ".join(wheres)
+        JOIN = ("FROM ai_failures f JOIN articles a ON a.id=f.article_id "
+                f"WHERE {W} AND COALESCE(a.content_empty,0)=0")
+        ORPHAN = (f" AND NOT EXISTS (SELECT 1 FROM ai_annotations n "
+                  f"WHERE n.article_id=f.article_id AND n.task=f.task)")
+
+        def one(sql):
+            return self.conn.execute(sql, list(args)).fetchone()[0]
+
+        pending = one(f"SELECT COUNT(*) {JOIN}{ORPHAN}")
+        retryable = one(f"SELECT COUNT(*) {JOIN}{ORPHAN} AND f.retryable=1")
+        # 已过时 = 表里有、但摘要已存在。清空按钮的计数以它为准。
+        stale = one(f"""SELECT COUNT(*) FROM ai_failures f
+                    JOIN ai_annotations n ON n.article_id=f.article_id
+                                         AND n.task=f.task
+                    WHERE {W}""")
+        total_rows = one(f"SELECT COUNT(*) {JOIN}")
+        # 分类在 Python 侧算：不为此给表加列（SQLite 加列要迁移，
+        # 而分类规则会随供应商变化而调整，改代码比改表便宜）。
+        kinds: Dict[str, int] = {}
+        for r in self.conn.execute(
+                f"SELECT f.error, f.retryable {JOIN}{ORPHAN}", list(args)):
+            k = self.classify_failure(r[0], bool(r[1]))
+            kinds[k] = kinds.get(k, 0) + 1
+        return {"pending": pending, "retryable": retryable,
+                "stale": stale, "total_rows": total_rows, "kinds": kinds}
+
+    def clear_ai_failures(self, task: str = "", only_stale: bool = True,
+                          article_ids: Optional[List[int]] = None,
+                          date_from: str = "", date_to: str = "") -> int:
+        """
+        清空失败清单。返回实际删除条数（逐项回报，不静默）。
+
+        only_stale=True（默认）只清「已经有摘要」的那些 —— 安全的默认档。
+        only_stale=False 清全部（含真正还没补跑的），需要调用方二次确认。
+        article_ids 非空时只清这几篇（精确到篇）。
+        """
+        sql = ["DELETE FROM ai_failures WHERE 1=1"]
+        args: List[Any] = []
+        if task:
+            sql.append("AND task=?"); args.append(task)
+        if only_stale:
+            sql.append("AND EXISTS (SELECT 1 FROM ai_annotations n "
+                       "WHERE n.article_id=ai_failures.article_id "
+                       "AND n.task=ai_failures.task)")
+        if article_ids:
+            ids = [int(i) for i in article_ids]
+            sql.append(f"AND article_id IN ({','.join('?' * len(ids))})")
+            args.extend(ids)
+        if date_from or date_to:
+            sql.append("AND article_id IN (SELECT id FROM articles WHERE 1=1")
+            if date_from:
+                sql.append("AND pub_date >= ?"); args.append(date_from)
+            if date_to:
+                sql.append("AND pub_date <= ?"); args.append(date_to)
+            sql.append(")")
+        with self._lock:
+            cur = self.conn.execute(" ".join(sql), args)
+            self.conn.commit()
+            return cur.rowcount
+
+    def manual_annotation(self, article_id: int, task: str,
+                          result: Dict[str, Any],
+                          provider: str = "manual",
+                          model: str = "") -> int:
+        """
+        人工补录 AI 产物（供应商内容审查拦下、或用户自己写了摘要的情形）。
+
+        为什么不复用 save_annotation：那条路径会自动盖掉 provider/model 与
+        时间戳，而这个入口必须**如实**记下「这是人工补的」，否则数据面板上
+        分不清哪些摘要来自模型、哪些来自人。
+        """
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO ai_annotations
+                   (article_id,task,provider,model,result,created_at)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(article_id,task) DO UPDATE SET
+                     result=excluded.result, provider=excluded.provider,
+                     model=excluded.model, created_at=excluded.created_at""",
+                (int(article_id), task, provider, model,
+                 result if isinstance(result, str)
+                 else json.dumps(result, ensure_ascii=False),
+                 time.strftime("%Y-%m-%d %H:%M:%S")))
+            self.conn.execute(
+                "DELETE FROM ai_failures WHERE article_id=? AND task=?",
+                (int(article_id), task))
+            self.conn.commit()
+            return 1
 
     # ---------------------------------------------------------- 检索
     @staticmethod
