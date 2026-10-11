@@ -89,6 +89,42 @@ API = "https://www.zjwx.gov.cn/api-gateway/jpaas-publish-server/front/page/build
 REFERER = "https://www.zjwx.gov.cn/col/col1694583/index.html"
 
 
+# ⚠ 浙江 jpaas 的**真实**返回结构（2026-10-11 实测抓取，与上面 JPAAS_PAGE 不同）：
+#
+#   1) count 标在**独立空 div** 上，与真正的列表是**并列**关系、不是父子：
+#          <div class="pagination" count="331"></div>       后代 li = 0
+#          <ul class="section2_gsxw_list"><li>×10</li></ul>  真正的列表
+#      早先 diagnose 只在「带 count 的容器」里找 li，在这个结构上取到空 div
+#      → n=0 → 把完全可采集的接口误判成「没找到列表项」。
+#      上面的 JPAAS_PAGE 把 count 和 li 写在同一个 ul 里，是**臆想结构**，
+#      所以没能抓到这个 bug —— 两个夹具都要留着。
+#   2) 页面上有两个 15 条的**无 class 导航 ul** 和一个 10 条的
+#      ul.section2_gsxw_list。纯比 li 数会选中导航 → item='ul li' 命中 25 条，
+#      混进 15 条推荐位（§6.4 的坑）。必须有「带稳定 class/id 优先」的判据。
+JPAAS_REAL_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+<div class="l w820 mb20"><ul>
+  <li><a href="/col/col1673565/art/n1.html">推荐位一</a></li>
+  <li><a href="/col/col1673565/art/n2.html">推荐位二</a></li>
+</ul></div>
+<div class="page-content"><ul>
+  <li><a href="/col/col1673565/art/m1.html">推荐位三</a></li>
+  <li><a href="/col/col1673565/art/m2.html">推荐位四</a></li>
+</ul></div>
+<div class="pagination" count="331" pageNo="1"></div>
+<div class="section2_gsxw"><ul class="section2_gsxw_list">
+  <li class="cf"><a class="bt-left"
+     href="/col/col1694583/art/2026/art_333c7b6b.html">曲解政策 捏造灾情 虚假摆拍</a>
+     <span class="bt-right">2026-10-10</span></li>
+  <li class="cf"><a class="bt-left"
+     href="/col/col1694583/art/2026/art_169c81cc.html">中央网信办召开网络直播规范发展工作会议</a>
+     <span class="bt-right">2026-10-08</span></li>
+  <li class="cf"><a class="bt-left"
+     href="/col/col1694583/art/2026/art_4b67312b.html">关于发布3款已备案信息的公告</a>
+     <span class="bt-right">2026-09-30</span></li>
+</ul></div>
+</body></html>"""
+
+
 def _run_probe(provider, **kw):
     """
     打桩 requests.Session.request 后调 probe_api。
@@ -294,6 +330,106 @@ def test_no_side_effect():
           f"before={before_db} after={after_db}")
 
 
+# ---------------------------------------------------------------- 真实结构：P1/P2/P3
+def test_jpaas_real_structure():
+    """
+    用**实测抓取的真实结构**（JPAAS_REAL_PAGE）复现并钉死三个修过的 bug。
+
+    起因：原夹具把 count 与 li 写在同一个 ul 里，是臆想结构，
+    于是漏掉了「count 在独立空 div 上」这个真实坑 ——
+    diagnose 在浙江站上把可采集接口误判成「没找到列表项」。
+    """
+    import cacx.diagnose as D
+
+    def provider(method, url, reqkw):
+        return _json_resp({"success": True, "data": {"html": JPAAS_REAL_PAGE}})
+
+    r = _run_probe(provider, referer=REFERER)
+
+    # --- P1：count 空壳不得导致误判 ---
+    check("真实结构下不误判为不可采集", r["ok"] is True, str(r.get("issues")))
+    check("count 从独立 div 读出总数", r["count"] == 331, str(r["count"]))
+    check("识别为接口", r["kind"] == "api", str(r.get("kind")))
+
+    # --- 选择器精度：不能是裸 ul li（会吃进 15 条导航推荐位）---
+    sg = r["suggested"]
+    check("item 选择器带 class 上下文",
+          sg.get("item") == "ul.section2_gsxw_list li", str(sg.get("item")))
+    check("item 不是裸 li（否则混进推荐位）",
+          sg.get("item", "").strip() != "ul li", str(sg.get("item")))
+    check("标题选择器取到 a.bt-left", sg.get("title") == "a.bt-left",
+          str(sg.get("title")))
+    check("日期选择器取到 span.bt-right", sg.get("date") == "span.bt-right",
+          str(sg.get("date")))
+
+    # 建议的选择器必须真能选出 3 条，且不多不少
+    from bs4 import BeautifulSoup as _BS
+    soup = _BS(JPAAS_REAL_PAGE, "html.parser")
+    check("建议的 item 选择器命中 3 条",
+          len(soup.select(sg["item"])) == 3, str(len(soup.select(sg["item"]))))
+
+    # --- P3：传了 referer 才算测过 ---
+    check("传了 referer 时 referer_tested=True",
+          r["referer_tested"] is True, str(r.get("referer_tested")))
+
+
+def test_html_page_not_api():
+    """
+    P2：HTML 页面不是接口。
+
+    栏目列表页里当然能选出真文章，但它是**网页**不是**接口**。
+    早先直接透传 infer_list_rule 的结论，栏目页返回 ok=true、count=10，
+    看起来「可采集」——AI 工具会据此把栏目页 URL 填进 api_url，
+    结果只抓到首屏十几条、翻不了页。这个偏乐观的结论对
+    「查漏补缺」类 AI 是有害的，必须降档并给出可执行的下一步。
+    """
+    import cacx.diagnose as D
+
+    page = ("<html><head><title>工作动态</title></head><body>"
+            "<ul class='section2_gsxw_list'>"
+            "<li><a class='bt-left' href='/col/col1694583/art/2026/a1.html'>文章一</a>"
+            "<span class='bt-right'>2026-10-10</span></li>"
+            "<li><a class='bt-left' href='/col/col1694583/art/2026/a2.html'>文章二</a>"
+            "<span class='bt-right'>2026-10-08</span></li>"
+            "<li><a class='bt-left' href='/col/col1694583/art/2026/a3.html'>文章三</a>"
+            "<span class='bt-right'>2026-10-01</span></li>"
+            "</ul></body></html>")
+
+    def provider(method, url, reqkw):
+        return FakeResp(page, content_type="text/html; charset=utf-8")
+
+    with mock.patch.object(D.requests.Session, "request") as m:
+        m.side_effect = lambda method, url, **kw: provider(method, url, kw)
+        r = D.probe_api(REFERER)
+
+    check("栏目页不报 ok=true", r["ok"] is False, f"ok={r['ok']}")
+    check("栏目页 kind=html_page", r["kind"] == "html_page", str(r.get("kind")))
+    check("is_json=False", r["is_json"] is False)
+    # 不要求 count>0：页面能不能被 rules 认成列表是另一回事，
+    # 这里钉的是「绝不能因为页面上有列表就报 ok=true」。
+    txt = " ".join(r["issues"])
+    check("明确警告不要填进 api_url", "api_url" in txt, txt[:200])
+    check("给出下一步建议（找接口线索）",
+          "build/unit" in txt or "接口" in txt, txt[:200])
+
+
+def test_referer_not_tested_is_explicit():
+    """P3：没传 referer 时必须明说「未测」，不能让人读成「不需要」"""
+    import cacx.diagnose as D
+
+    def provider(method, url, reqkw):
+        return _json_resp({"success": True, "data": {"html": JPAAS_REAL_PAGE}})
+
+    r = _run_probe(provider)                   # 注意：不传 referer
+    check("未传 referer 时 referer_tested=False",
+          r["referer_tested"] is False, str(r.get("referer_tested")))
+    check("未传时 referer_required 也是 False", r["referer_required"] is False)
+    txt = " ".join(r["issues"])
+    check("明说本次未测 Referer", "未测" in txt, txt[:200])
+    check("说明这不等于不需要", "不代表" in txt or "只代表" in txt, txt[:200])
+    check("给了补测方法", "--referer" in txt, txt[:200])
+
+
 # ---------------------------------------------------------------- main
 def main():
     print("=" * 62)
@@ -303,7 +439,9 @@ def main():
                test_error_page_masquerade,
                test_json_wraps_html_and_count_attr, test_plain_json_array,
                test_negative_static_js, test_negative_nav_page,
-               test_negative_plain_content, test_no_side_effect):
+               test_negative_plain_content, test_no_side_effect,
+               test_jpaas_real_structure, test_html_page_not_api,
+               test_referer_not_tested_is_explicit):
         try:
             fn()
         except Exception:

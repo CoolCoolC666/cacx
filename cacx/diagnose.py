@@ -261,10 +261,19 @@ def _pick_list_container(soup):
     for bad in soup.select("nav, header, footer, aside"):
         bad.decompose()
 
-    # 优先带 count 属性的容器：jpaas 用它标总条数，它几乎一定是主列表。
-    containers = soup.find_all(attrs={"count": True})
-    if not containers:
-        containers = soup.find_all(["ul", "ol"])
+    # 容器候选：带 count 属性的排前面，但**不要因此放弃其他候选**。
+    #
+    # ⚠ 浙江 jpaas 实测踩过的坑：带 count 的容器与真正的列表是**并列**关系，
+    #   不是父子：
+    #       <div class="pagination" count="331"></div>   ← 空壳，后代 li = 0
+    #       <ul class="section2_gsxw_list"><li>×10</li></ul>   ← 真正的列表
+    #   早先写成「只取带 count 的容器」，在这个站上直接取到空 div → n=0 →
+    #   把一个完全可采集的接口误判成「没找到列表项」。
+    #   所以 count 只当**加分项**，最终以「li 最多」为准。
+    marked = soup.find_all(attrs={"count": True})
+    marked_ids = {id(x) for x in marked}
+    candidates = list(marked) + [x for x in soup.find_all(["ul", "ol"])
+                                 if id(x) not in marked_ids]
 
     def _real_li(c):
         n = 0
@@ -275,13 +284,44 @@ def _pick_list_container(soup):
                 n += 1
         return n
 
-    best, best_n = None, 0
-    for c in containers:
+    def _has_stable_sel(c):
+        """容器有没有稳定标识（class/id）—— 主列表几乎总有，导航 ul 通常没有。"""
+        eid = c.get("id")
+        if eid and re.match(r"^[A-Za-z][\w-]*$", str(eid)):
+            return True
+        return any(isinstance(x, str) and re.match(r"^[A-Za-z][\w-]*$", x)
+                   for x in (c.get("class") or []))
+
+    best, best_n, best_marked = None, 0, False
+    for c in candidates:
         n = _real_li(c)
-        if n > best_n:
-            best, best_n = c, n
+        if n <= 0:
+            continue
+        has_count = id(c) in marked_ids
+        stab = _has_stable_sel(c)
+        # 排序优先级（从高到低）：
+        #   1. 带 count 的        —— jpaas 用它标总数，信息量最大
+        #   2. 有稳定 class/id 的 —— 主列表的特征，导航 ul 一般没有
+        #   3. li 数更多          —— 兜底
+        #
+        # ⚠ 为什么不能只看 li 数：浙江整页里有两个 15 条的**导航** ul 和一个
+        #   10 条的 ul.section2_gsxw_list（真正的列表）。纯比数量会选中导航，
+        #   于是 item=ul li 命中 25 条、混进 15 条推荐位 —— 正是 §6.4 的坑。
+        #   有稳定 class 的那个才是主列表，10 条 < 15 条也不能选导航。
+        rank = (2 if has_count else 0) + (1 if stab else 0)
+        cur_rank = ((2 if best_marked else 0)
+                    + (1 if best is not None and _has_stable_sel(best) else 0))
+        if best is None or rank > cur_rank or (rank == cur_rank and n > best_n):
+            best, best_n, best_marked = c, n, has_count
 
     if best is None or best_n < 2:
+        # 带 count 却一个 li 都没有，多半就是浙江那种「空壳 count 容器」。
+        # 明确说出来，比笼统一句「没找到列表项」有用得多。
+        if marked:
+            issues.append(
+                "页面里有 count 属性容器，但它内部没有任何列表项 —— "
+                "常见于 jpaas 这类把「总条数」标在独立空 div 上的建站平台"
+                "（真正的列表是并列的另一个 ul/ol）")
         return "", "", "", 0
 
     item_sel = _container_sel(best)
@@ -344,6 +384,18 @@ def probe_api(url: str, method: str = "GET",
         "list_path_guess": "",
         "count": 0,
         "referer_required": False,
+        # P3：不传 referer 时 referer_required 恒为 False，AI 会误读成
+        # 「该接口不需要 Referer」。用这个字段区分「测过、结论是不需要」
+        # 与「压根没测」——三态里少一个，调用方就会做错决策。
+        "referer_tested": False,
+        # P2：让调用方（尤其是 AI）**不必读 issues 文字**就能判断
+        # 「这到底是不是数据接口」。口径：
+        #   api        —— 返回了结构化数据，listed 才是真条目数
+        #   html_page  —— 是网页（栏目页/导航页），不是接口
+        #   static     —— 静态资源
+        #   error_page —— 业务错误/错误文案伪装成成功
+        #   unknown    —— 拿不准
+        "kind": "unknown",
         "sample": "",
         "issues": [],
         "suggested": {
@@ -408,16 +460,31 @@ def probe_api(url: str, method: str = "GET",
 
     usable = False
     if result["is_json"]:
+        result["kind"] = "api"
         if isinstance(data, dict):
             result["json_top_keys"] = [str(k) for k in data.keys()]
         usable = _analyze_json(result, data, issues)
+        if not usable:
+            # 业务错误伪装成功：HTTP 200 + JSON，但内容是错误文案
+            result["kind"] = "error_page"
     else:
+        # P2：HTML 页面**不是接口**。栏目列表页/导航页里当然能选出真文章，
+        # 但它们不能照抄成站点配置里的 api_url —— 建站平台要的往往是它背后的
+        # 那个 JSON 接口（本项目 jpaas 就是这种）。所以这类一律 ok=false，
+        # 但要明确说「你可以拿这个页面去反查接口」，而不是笼统报错。
+        #
+        # ⚠ 早先这里直接透传 rules.infer_list_rule 的结论，于是栏目页返回
+        #   ok=true、count=10，看上去「可采集」——AI 工具会据此建站配置，
+        #   结果抓不到翻页（mode:none）。对「查漏补缺」类 AI 来说，
+        #   这个偏乐观的结论是有害的。
+        result["kind"] = "html_page"
         usable = _analyze_html(result, text, url, issues)
 
     # ---- 坑 #1：Referer 依赖。只在调用方给了 referer 时才做对比 ——
     # 因为要「先带给定 referer 打一次、再不带打一次」，没给 referer 就没有
     # 对照组，无法判定。对比的是**业务成败**而非状态码（坑 #2 同源）。
     if referer:
+        result["referer_tested"] = True
         r2 = _do(session, method, url, headers, params, body, "")
         if r2 is not None:
             f1, f2 = _business_failed(r1), _business_failed(r2)
@@ -438,6 +505,21 @@ def probe_api(url: str, method: str = "GET",
     result["ok"] = (result["http_status"] == 200
                     and usable
                     and not any("success" in i for i in issues))
+
+    # P2 收口：HTML 页面即便选出了文章列表也不算「接口可用」。
+    # 页面上有列表，只说明**背后有接口**，不代表这个 URL 本身可用。
+    # 判断这一条时先看 kind，别把「能选出文章」和「这是接口」混为一谈。
+    if result["kind"] == "html_page":
+        result["ok"] = False
+        _html_page_advice(result, issues)
+
+    # P3 收口：没传 referer 就明说「本次未测」，别让 referer_required=False
+    # 被读成「该接口不需要 Referer」——jpaas 恰恰要 Referer，这是反例。
+    if not result["referer_tested"] and result["kind"] == "api":
+        issues.append(
+            "本次未测 Referer 依赖（未传 referer 参数）：referer_required=false "
+            "只代表「没测」，不代表「不需要」。jpaas / 政务站常见必须带 Referer，"
+            "建议补测：--referer <栏目页URL>")
     return result
 
 
@@ -570,3 +652,24 @@ def _analyze_html(result: Dict[str, Any], text: str, url: str, issues) -> bool:
                   "或列表由 JS 异步加载）—— 不应直接当列表采集；"
                   "若这是 JS 加载的站，请改找它的 JSON 接口")
     return False
+
+
+def _html_page_advice(result: Dict[str, Any], issues):
+    """
+    HTML 页面（不是接口）额外补几句**可执行**的下一步。
+
+    为什么单独写：调用方多半是 AI，它需要知道「接下来该干什么」，
+    而不是一句「这不是接口」。国内党政站几乎都是 JS 渲染，
+    页面上能选出文章列表，恰恰说明**背后有接口**——
+    这时最有用的提示是「去页面源码/脚本里找 api 调用」。
+    """
+    issues.append(
+        "这是 HTML 页面，不是数据接口 —— **不要**把本页 URL 填进站点配置的 "
+        "api_url：栏目页靠 JS 加载列表，直接配会抓不到翻页（mode=none），"
+        "只拿到首屏那十几条")
+    issues.append(
+        "下一步建议：① 看页面源码里有没有 /api/、ajax、fetch、axios、"
+        "jpaas、build/unit 等接口线索；② 若是省级网信网，"
+        "多属 jpaas 建站平台，可直接试 "
+        "<host>/api-gateway/jpaas-publish-server/front/page/build/unit；"
+        "③ 拿到接口 URL 后再用本工具复测，kind 应变成 api")
