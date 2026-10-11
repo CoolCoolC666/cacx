@@ -3,5 +3,12 @@ requests>=2.31
 fastapi>=0.110
 uvicorn>=0.27
 
+# HTML 解析：通用采集器(generic.py)与接口诊断(diagnose.py)都依赖；
+# start-cacx.bat 的首启自检也检查它
+beautifulsoup4>=4.12
+
+# MCP server（stdio，官方 mcp SDK；2.x 起 FastMCP 改名 MCPServer）
+mcp>=2.3
+
 # 可选：测试
 # pytest>=8.0

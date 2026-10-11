@@ -36,6 +36,25 @@ def _fmt_article(it: dict, idx: int = 0) -> str:
             f"       {it.get('chars',0):>6} 字  {it.get('url','')}")
 
 
+def _parse_kv_pairs(pairs) -> dict:
+    """
+    把「k=v」形式的可重复参数解析成 dict。
+    为什么容忍没有等号的条目而不是报错：诊断命令是给「随手粘个 URL 就想看一眼」
+    的场景用的，用户敲错一个参数不该让整条诊断都跑不出来 —— 跳过坏条目、
+    照常把接口诊断完，坏参数最多不出现在请求里。
+    """
+    out = {}
+    for p in pairs or []:
+        p = str(p).strip()
+        if not p or "=" not in p:
+            continue
+        k, v = p.split("=", 1)
+        k = k.strip()
+        if k:
+            out[k] = v.strip()
+    return out
+
+
 # ---------------------------------------------------------------- init
 def cmd_init(args):
     C.ensure_dirs()
@@ -223,6 +242,66 @@ def cmd_doctor(args):
     return doctor(cfg, site=args.site, use_ai=not args.no_ai)
 
 
+# ---------------------------------------------------------------- api-check
+def cmd_api_check(args):
+    """
+    对任意接口 URL 做只读诊断。
+    为什么单独有这个命令：site probe / doctor 都要先把 URL 包成站点配置，
+    而对接新站时第一个问题恰恰是「这个地址到底能不能用、返回了什么」——
+    diagnose.probe_api 就是为了绕开这个前置包装存在的。本命令只是它的
+    人可读外壳，纯转发，绝不写库、不写配置。
+    """
+    from ..diagnose import probe_api
+    res = probe_api(
+        args.url,
+        method=(args.method or "GET").upper(),
+        headers=_parse_kv_pairs(args.header),
+        params=_parse_kv_pairs(args.param),
+        referer=args.referer or "",
+    )
+    if args.json:
+        # --json 是给脚本消费的：原样吐完整 dict，不做任何裁剪/加工，
+        # 否则下游拿不到 suggested 就没法粘配置了。
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0
+
+    print("=" * 66)
+    print(f"API 接口诊断  {res['suggested']['method']}  {res['suggested']['api_url']}")
+    print("=" * 66)
+    verdict = "可用" if res["ok"] else "不可用 / 需人工确认"
+    print(f"结论        {verdict}")
+    print(f"HTTP 状态   {res['http_status'] or '(未连通)'}")
+    print(f"耗时        {res['elapsed_ms']} ms")
+    print(f"Content-Type {res['content_type'] or '(无)'}")
+    if res["charset_declared"] or res["charset_used"]:
+        print(f"编码        声明={res['charset_declared'] or '(无)'} "
+              f"实际={res['charset_used'] or '(未知)'}")
+    print(f"是 JSON     {'是' if res['is_json'] else '否'}")
+    if res["json_top_keys"]:
+        print(f"顶层键      {', '.join(res['json_top_keys'])}")
+    if res["list_path_guess"]:
+        print(f"列表路径    {res['list_path_guess']}  (count={res['count']})")
+    if res["referer_required"]:
+        print("Referer     必需 —— 去掉后响应变了，站点配置里必须带 referer")
+    if res["sample"]:
+        print("-" * 66)
+        print("响应样本(前300字):")
+        print(res["sample"])
+    print("-" * 66)
+    if res["issues"]:
+        print("问题:")
+        for i in res["issues"]:
+            print(f"  ! {i}")
+    else:
+        print("问题: (无)")
+    print("-" * 66)
+    print("可直接贴进站点配置的 suggested:")
+    # suggested 里只有 api_url/method/referer/list_path/params/选择器，
+    # 不含任何鉴权头 —— 用户用 --header 传的 Cookie/Authorization 不会被回显出来
+    print(json.dumps(res["suggested"], ensure_ascii=False, indent=2))
+    return 0
+
+
 # ---------------------------------------------------------------- 非文章条目查询
 def cmd_links(args):
     """
@@ -406,27 +485,82 @@ def cmd_export(args):
 
 
 # ---------------------------------------------------------------- ai
-def _pick_articles(cfg, d, args):
-    """按参数选出要处理的文章"""
+def _resolve_sites(cfg, args) -> list:
+    """
+    解析 summarize 的 --site：从「单值」改成 action="append" 可重复，
+    写法照 sync（build_parser 里 sp.add_argument("--site", action="append", ...)）。
+
+    为什么单独抽一层：'--site all' 与显式站点混用的口径（以 all 为准并提示）
+    要在选文章之前定死，不然选文章和落 record_sync 两处各算一遍就会漂移。
+    返回空 list = 调用方旧行为（检索不按站过滤）。
+    """
+    raw = list(getattr(args, "site", None) or [])
+    if "all" in raw:
+        rest = [s for s in raw if s != "all"]
+        if rest:
+            print(f"提示：--site all 与 {rest} 混用，以 all 为准"
+                  f"（全部启用站点：{len(rest)} 被忽略）")
+        from .. import sites as S
+        return list(S.enabled_codes(cfg))
+    return raw
+
+
+def _pick_articles(cfg, d, args, site_list):
+    """
+    按参数选出要处理的文章。
+
+    limit 口径（多站点时的取舍，写在这里免得以后翻代码猜）：
+      · --all-missing：每站各取 limit 条再合并 —— 缺失摘要的文章通常按时间
+        倒序排，逐站各留 limit 篇比全局 limit 更公平（不会被单一大站占满）。
+      · 条件检索：db.search 只支持单 site 参数，只能逐站各打 limit 条、
+        合并去重后再按 pub_day 倒序截到 limit。即「每站候选上限 = limit」，
+        最终总量仍被 limit 截断，不会因为多站点悄悄把 AI 配额翻 N 倍。
+      · 单站 / 不指定站：行为与改造前完全一致。
+    """
     if args.id:
         a = d.get_article(args.id)
         return [a] if a else []
     if args.recent:
         return d.recent_articles(args.recent)
     if args.all_missing:
-        ids = [r["id"] for r in d.conn.execute(
-            "SELECT a.id FROM articles a LEFT JOIN ai_annotations x "
-            "ON x.article_id=a.id AND x.task='summarize' "
-            "WHERE x.id IS NULL ORDER BY a.pub_day DESC LIMIT ?",
-            (args.limit,)).fetchall()]
+        sql = ("SELECT a.id FROM articles a LEFT JOIN ai_annotations x "
+               "ON x.article_id=a.id AND x.task='summarize' "
+               "WHERE x.id IS NULL")
+        params: list = []
+        if site_list:
+            # search 封装不支持多站，这里补一段裸 SQL 的 IN 过滤；
+            # 站点代码来自 sites.enabled_codes / 用户手填，用占位符传值防注入
+            sql += (" AND a.site IN ("
+                    + ",".join("?" for _ in site_list) + ")")
+            params.extend(site_list)
+        sql += " ORDER BY a.pub_day DESC LIMIT ?"
+        params.append(args.limit)
+        with d._lock:
+            ids = [r["id"] for r in d.conn.execute(sql, params).fetchall()]
         return [d.get_article(i) for i in ids]
     # 按条件检索
-    r = d.search(q=args.query or "", site=args.site or "",
-                 column_name=args.column or "", year=args.year or "",
-                 date_from=args.date_from or "", date_to=args.date_to or "",
-                 sort="date_desc", limit=args.limit,
-                 min_fts_chars=cfg["search"]["min_fts_chars"])
-    return [d.get_article(i["id"]) for i in r["items"]]
+    if not site_list:
+        r = d.search(q=args.query or "", site="",
+                     column_name=args.column or "", year=args.year or "",
+                     date_from=args.date_from or "", date_to=args.date_to or "",
+                     sort="date_desc", limit=args.limit,
+                     min_fts_chars=cfg["search"]["min_fts_chars"])
+        return [d.get_article(i["id"]) for i in r["items"]]
+    seen, merged = set(), []
+    for s in site_list:
+        r = d.search(q=args.query or "", site=s,
+                     column_name=args.column or "", year=args.year or "",
+                     date_from=args.date_from or "", date_to=args.date_to or "",
+                     sort="date_desc", limit=args.limit,
+                     min_fts_chars=cfg["search"]["min_fts_chars"])
+        for it in r["items"]:
+            if it["id"] in seen:
+                continue
+            seen.add(it["id"])
+            merged.append(it)
+    merged.sort(key=lambda it: it.get("pub_day") or "", reverse=True)
+    merged = merged[:args.limit]
+    return [d.get_article(i["id"]) for i in merged]
 
 
 def cmd_ai(args):
@@ -460,50 +594,112 @@ def cmd_ai(args):
         return 0
 
     # summarize
+    # 选文章这步移到 run_batch 之外：选文章要试条件/多站点合并，跑批只是
+    # 「拿一批文章跑完交汇总」——两件事分开，Web 端才能直接复用 run_batch。
+    site_list = _resolve_sites(cfg, args)
     d = D.open_db(cfg)
-    arts = _pick_articles(cfg, d, args)
+    arts = _pick_articles(cfg, d, args, site_list)
     if not arts:
         print("没有选到文章。试试 --query / --recent / --year / --limit")
         d.close()
         return 1
 
-    mode = "真生成并落库" if args.commit else "预览（不外发请求，不写库）"
+    dry = not args.commit
+    mode = "真生成并落库" if not dry else "预览（不外发请求，不写库）"
     print("=" * 60)
     print(f"AI 摘要 — {mode}")
-    print(f"选中 {len(arts)} 篇")
+    if site_list:
+        print(f"站点       {', '.join(site_list)}")
+    print(f"选中 {len(arts)} 篇"
+          + (f"（并发 {args.concurrency}"
+             + (f"，限速 {args.rate}/s" if args.rate > 0 else "")
+             + (f"，resume" if args.resume else "") + "）"))
     print("=" * 60)
 
-    if not args.commit:
-        try:
-            preview = AIM.summarize(cfg, arts[0], dry_run=True)
-            print("预览请求体:")
-            print(json.dumps(preview, ensure_ascii=False, indent=2)[:900])
-            print("\n（以上为将要发送的内容。加 --commit 才会真调用并写库）")
-            d.close()
-            return 0
-        except Exception as e:
-            print(f"预览失败: {e}")
+    # 真跑前先探一下 AI 是否就绪：build 返回 None（provider=none 等）时
+    # run_batch 会把每篇都记成 failure，用户看到的是一片「失败 N 篇」却不知道
+    # 根因是没配 AI。这里提前挡掉，给出可操作的配置指引。
+    if not dry:
+        from ..ai.base import build as _ai_build
+        if _ai_build(cfg, task="summarize") is None:
+            print("AI 未配置：请先配好 ai.provider / ai.base_url / ai.api_key / ai.model")
+            print("  例: cacx config set ai.provider openai_compat")
             d.close()
             return 1
 
-    ok = fail = 0
-    for i, a in enumerate(arts, 1):
-        try:
-            res = AIM.summarize(cfg, a, dry_run=False)
-            d.save_annotation(a["id"], "summarize", res,
-                              provider=cfg["ai"]["provider"],
-                              model=cfg["ai"]["model"])
-            ok += 1
-            tags = "、".join((res.get("tags") or [])[:5]) if isinstance(res, dict) else ""
-            print(f"  [{i}/{len(arts)}] OK  {a['title'][:36]}  [{tags}]")
-        except Exception as e:
-            fail += 1
-            print(f"  [{i}/{len(arts)}] 失败 {type(e).__name__}: {str(e)[:80]}")
-            if args.stop_on_error:
-                break
-    print(f"\n成功 {ok}  失败 {fail}")
+    started = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _on_progress(ev: dict):
+        # 进度回调只是打屏；run_batch 内部已吞掉回调异常，这里不需要再包
+        print(f"  [{ev.get('done',0)}/{ev.get('total',0)}] "
+              f"ok={ev.get('ok',0)} fail={ev.get('fail',0)} "
+              f"skip={ev.get('skipped',0)}  {str(ev.get('title',''))[:36]}")
+
+    try:
+        from ..ai.batch import run_batch
+        summary = run_batch(
+            cfg, d, arts, dry_run=dry,
+            concurrency=args.concurrency, rate=args.rate,
+            resume=args.resume, stop_on_error=args.stop_on_error,
+            on_progress=_on_progress)
+    except AIM.AIError as e:
+        # 兜底：万一以后 run_batch 改成把 AIError 往外抛，这里也能给出
+        # 和旧版一样清晰的提示而不是 traceback
+        print(f"AI 调用失败: {e}")
+        d.close()
+        return 1
+
+    if dry:
+        # 预览模式：run_batch 只对第一篇取一次请求体，不并发不写库
+        preview = summary.get("preview")
+        if preview is None:
+            err = (summary["failures"][0]["error"] if summary["failures"]
+                   else "未知错误")
+            print(f"预览失败: {err}")
+            if "AIError" in err:
+                print("（多半是 AI 没配置好；先 cacx ai status 看状态）")
+            d.close()
+            return 1
+        print("预览请求体:")
+        print(json.dumps(preview, ensure_ascii=False, indent=2)[:900])
+        print("\n（以上为将要发送的内容。加 --commit 才会真调用并写库；"
+              "dry-run 铁律：预览模式绝不外发请求）")
+        # dry_run 预览不落 record_sync：那是同步批次的台账，预览没有产生任何
+        # 实际工作，落一条「成功 0」的记录只会污染历史
+        d.close()
+        return 0
+
+    # 收尾汇总
+    print(f"\n成功 {summary['ok']}  失败 {summary['fail']}  "
+          f"跳过 {summary['skipped']}  共 {summary['total']}")
+    failures = summary.get("failures") or []
+    if failures:
+        if args.export_failures:
+            out = Path(args.export_failures)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with out.open("w", encoding="utf-8") as f:
+                for fl in failures:
+                    f.write(json.dumps(
+                        {k: fl.get(k) for k in ("id", "title", "url", "error")},
+                        ensure_ascii=False) + "\n")
+            print(f"失败清单 {len(failures)} 条已写出 → {out}")
+        else:
+            print("失败明细（前 10 条；要完整清单加 --export-failures）:")
+            for fl in failures[:10]:
+                print(f"  - [{fl.get('id')}] {str(fl.get('title'))[:40]}")
+                print(f"      {fl.get('error')}")
+
+    # 进度持久化：真跑（commit）成功收尾时落一条 sync_runs，mode='summarize'。
+    # 与 collector 同步批次同一张表，doctor/历史页一处看全 —— 不新建表是因为
+    # 这条记录的语义就是「一次批次跑了多少、成败几何」，和同步批次同构。
+    site_tag = ",".join(site_list) if site_list else "all"
+    d.record_sync(
+        site=site_tag, mode="summarize", started=started,
+        listed=summary["total"], new=summary["ok"], failed=summary["fail"],
+        note=(f"skipped={summary['skipped']} concurrency={args.concurrency} "
+              f"rate={args.rate} resume={args.resume}"))
     d.close()
-    return 0 if fail == 0 else 2
+    return 0 if summary["fail"] == 0 else 2
 
 
 # ---------------------------------------------------------------- parser
@@ -564,6 +760,19 @@ def build_parser():
     sp.add_argument("--site", action="append", help="只查指定站点，可重复")
     sp.add_argument("--no-ai", action="store_true", help="不用 AI，仅规则检查")
     sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser("api-check",
+                        help="对任意接口 URL 做只读诊断（不写库不写配置）")
+    sp.add_argument("url", help="接口地址，可省略 http(s):// 前缀")
+    sp.add_argument("--method", default="GET", choices=["GET", "POST"])
+    sp.add_argument("--referer", default="",
+                    help="指定后会自动对比带/不带 Referer 两种响应")
+    sp.add_argument("--header", action="append", default=[], metavar="k=v",
+                    help="可重复，如 --header Cookie=abc（不会被回显进报告）")
+    sp.add_argument("--param", action="append", default=[], metavar="k=v",
+                    help="可重复，URL query / 表单参数")
+    sp.add_argument("--json", action="store_true", help="输出完整 JSON")
+    sp.set_defaults(func=cmd_api_check)
 
     sp = sub.add_parser("links", help="列出被跳过的非文章条目（专题页/站外/公众号/脏数据）")
     sp.add_argument("--kind", help="只看某一类: index_page/external/wechat/dirty")
@@ -631,7 +840,11 @@ def build_parser():
     spsum.add_argument("--all-missing", action="store_true",
                        help="所有还没生成过摘要的文章")
     spsum.add_argument("query", nargs="?", default="", help="按关键词选")
-    spsum.add_argument("--site")
+    # action="append" 照 sync 的写法（见本文件 sync 子命令的 --site）：
+    # 可重复传多个站点；特殊值 all = sites.enabled_codes(cfg) 全部启用站点；
+    # 不填 = 检索不按站过滤（旧行为）
+    spsum.add_argument("--site", action="append",
+                       help="可重复；--site all = 全部启用站点；不填=不按站过滤")
     spsum.add_argument("--column")
     spsum.add_argument("--year")
     spsum.add_argument("--date-from")
@@ -640,6 +853,14 @@ def build_parser():
     spsum.add_argument("--commit", action="store_true",
                        help="真调用并写库（不加则只预览，不外发请求）")
     spsum.add_argument("--stop-on-error", action="store_true")
+    spsum.add_argument("--resume", action="store_true",
+                       help="跳过已有 summarize annotation 的文章（断点续跑）")
+    spsum.add_argument("--rate", type=float, default=0.0,
+                       help="每秒最多 AI 调用次数（0=不限速，避免触发供应商限流）")
+    spsum.add_argument("--concurrency", type=int, default=3,
+                       help="并发数（默认 3；落库仍串行）")
+    spsum.add_argument("--export-failures", metavar="PATH",
+                       help="收尾把失败清单写成 JSONL（每行 id,title,url,error）")
     spsum.set_defaults(func=cmd_ai)
 
     sp = sub.add_parser("serve", help="启动 Web 检索服务")

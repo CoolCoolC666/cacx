@@ -25,6 +25,7 @@ FastAPI 检索服务
 import json
 import threading
 import time
+import uuid
 import webbrowser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -345,6 +346,194 @@ def api_annotations_stats():
 @app.get("/api/ai/status")
 def api_ai_status():
     return ai_status(_cfg())
+
+
+# ---------------------------------------------------------------- 接口诊断
+@app.get("/api/api-check")
+def api_api_check(
+    url: str = "",
+    method: str = "GET",
+    referer: str = "",
+    header: List[str] = Query(default=[]),
+    param: List[str] = Query(default=[]),
+):
+    """
+    对任意接口 URL 做只读诊断（与 CLI `cacx api-check` 同一个后端
+    cacx.diagnose.probe_api）。
+
+    纯只读：不写库、不写配置。安全性说明：probe_api 不读 settings.json，
+    返回的 suggested 只有 api_url/method/referer/list_path/选择器，
+    调用方用 header= 传的鉴权头（Cookie/Authorization）不会被回显进响应。
+    """
+    if not url.strip():
+        raise HTTPException(400, "缺少 url")
+
+    def _kv(pairs):
+        # k=v 形式的可重复 query 参数；坏条目跳过而不是 400 —— 诊断是
+        # 「随手粘个地址看一眼」的场景，敲错一个参数不该挡住整次诊断
+        out = {}
+        for p in pairs or []:
+            p = str(p).strip()
+            if "=" not in p:
+                continue
+            k, v = p.split("=", 1)
+            k = k.strip()
+            if k:
+                out[k] = v.strip()
+        return out
+
+    from ..diagnose import probe_api
+    try:
+        return probe_api(url, method=method, referer=referer,
+                         headers=_kv(header), params=_kv(param))
+    except Exception as e:
+        # 照 /api/sites/probe 的风格：接口本身返回失败由 probe_api 记进
+        # issues；这里只有「诊断器自己炸了」才算 502
+        raise HTTPException(502, f"诊断失败：{type(e).__name__}: {e}")
+
+
+# ---------------------------------------------------------------- 批量摘要
+# 与 /api/sync 同一个模式：批量 AI 是长任务（每篇一次网络往返），绝不能跑在
+# 请求线程里，否则一个 POST 就把整个服务卡死。后台线程 + job 状态字典 + 前端
+# 轮询。不复用 SYNC_STATE：摘要批次与同步批次互相独立，混用一份状态会让两个
+# 页面的进度条互相串味。
+BATCH_LOCK = threading.Lock()
+BATCH_JOBS: Dict[str, dict] = {}
+
+
+class BatchReq(BaseModel):
+    """批量摘要请求体。dry_run 默认 True 是铁律：误触按钮也烧不掉配额。"""
+    sites: List[str] = []           # 空 = 全部启用站点
+    date_from: str = ""
+    date_to: str = ""
+    column: str = ""
+    limit: int = 10
+    concurrency: int = 3
+    rate: float = 0.0
+    resume: bool = False
+    stop_on_error: bool = False
+    dry_run: bool = True
+
+
+def _select_batch_articles(d, cfg: Dict[str, Any], req: BatchReq):
+    """
+    按站点逐站 search 再合并（db.search 只支持单 site 参数）。
+    limit 口径：每站各取 limit 条，合并去重后不二次截断 —— 站点数量天然有限，
+    这样每个站在批次里都有同等候选名额，不会被单一大站挤光。
+    """
+    from .. import sites as S
+    sites_list = req.sites or list(S.enabled_codes(cfg))
+    seen, merged = set(), []
+    for s in sites_list:
+        r = d.search(q="", site=s, column_name=req.column,
+                     date_from=req.date_from, date_to=req.date_to,
+                     sort="date_desc", limit=req.limit,
+                     min_fts_chars=cfg["search"]["min_fts_chars"])
+        for it in r["items"]:
+            if it["id"] in seen:
+                continue
+            seen.add(it["id"])
+            merged.append(it)
+    return sites_list, merged
+
+
+def _batch_worker(job_id: str, cfg_snapshot: Dict[str, Any], req: BatchReq):
+    """
+    后台线程体。必须自己 open_db：SQLite 是单连接 + 锁，跨线程共用主连接
+    并发写必炸（docs/工程留痕.md §3.3 压测结论），绝不复用服务主连接 DB。
+    异常吞进 job['error']：线程里抛异常只会静默死掉，界面会永远转圈。
+    """
+    job = BATCH_JOBS[job_id]
+    d = None
+    try:
+        d = D.open_db(cfg_snapshot)
+        sites_list, merged = _select_batch_articles(d, cfg_snapshot, req)
+        arts = [d.get_article(it["id"]) for it in merged]
+        with BATCH_LOCK:
+            job["sites"] = sites_list
+            job["progress"]["total"] = len(arts)
+            job["logs"].append({"t": time.strftime("%H:%M:%S"),
+                                "msg": f"选定 {len(arts)} 篇，开始"})
+
+        from ..ai.batch import run_batch as _run_batch
+
+        def _on_ev(ev):
+            with BATCH_LOCK:
+                job["progress"].update({
+                    "done": ev.get("done", 0), "ok": ev.get("ok", 0),
+                    "fail": ev.get("fail", 0), "skipped": ev.get("skipped", 0),
+                    "total": ev.get("total", len(arts))})
+                job["logs"].append({
+                    "t": time.strftime("%H:%M:%S"),
+                    "msg": f"[{ev.get('done', 0)}/{ev.get('total', 0)}] "
+                           f"{str(ev.get('title', ''))[:40]}"})
+                # 与同步日志同款封顶，长跑把内存撑爆
+                if len(job["logs"]) > 400:
+                    del job["logs"][:len(job["logs"]) - 400]
+
+        summary = _run_batch(cfg_snapshot, d, arts, dry_run=req.dry_run,
+                             concurrency=req.concurrency, rate=req.rate,
+                             resume=req.resume, stop_on_error=req.stop_on_error,
+                             on_progress=_on_ev)
+        with BATCH_LOCK:
+            job["summary"] = summary
+    except Exception as e:
+        with BATCH_LOCK:
+            job["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        if d is not None:
+            try:
+                d.close()
+            except Exception:
+                pass
+        with BATCH_LOCK:
+            job["running"] = False
+            job["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+@app.post("/api/ai/summarize-batch")
+def api_ai_summarize_batch(req: BatchReq):
+    """启动一次批量摘要。立刻返回 job_id，实际工作在后台线程。"""
+    cfg = _cfg()
+    d = _db()
+    # 预检放请求线程：要在响应里就给出 400（一篇都选不到时）。这里只用主
+    # 连接做一次只读 search（读也持锁，和 /api/search 一样安全）；后台线程
+    # 会用自己的连接再选一遍，不共享游标。
+    try:
+        sites_list, merged = _select_batch_articles(d, cfg, req)
+    except Exception as e:
+        raise HTTPException(500, f"选文章失败: {type(e).__name__}: {e}")
+    if not merged:
+        raise HTTPException(400, "没有可选到文章（换站点/时间范围，或调大 limit）")
+
+    job_id = uuid.uuid4().hex
+    with BATCH_LOCK:
+        BATCH_JOBS[job_id] = {
+            "running": True,
+            "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "finished_at": "",
+            "progress": {"done": 0, "ok": 0, "fail": 0,
+                         "skipped": 0, "total": len(merged)},
+            "summary": None, "error": "", "logs": [],
+            "dry_run": req.dry_run, "sites": sites_list,
+        }
+    # 传副本：后台线程不能引用会被 /api/config 改写的 CFG（与 _sync_worker 同因）
+    cfg_snapshot = json.loads(json.dumps(cfg))
+    t = threading.Thread(target=_batch_worker,
+                         args=(job_id, cfg_snapshot, req), daemon=True)
+    t.start()
+    return {"job_id": job_id, "started": True, "total": len(merged),
+            "dry_run": req.dry_run}
+
+
+@app.get("/api/ai/summarize-batch/{job_id}")
+def api_ai_summarize_batch_status(job_id: str):
+    """轮询批次进度。job 不存在 404。"""
+    with BATCH_LOCK:
+        job = BATCH_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "任务不存在")
+        return dict(job)
 
 
 # ---------------------------------------------------------------- 同步
