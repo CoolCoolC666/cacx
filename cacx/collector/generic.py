@@ -256,22 +256,10 @@ class GenericCollector(SiteCollector):
             items = soup.select(item_sel)
             if not items:
                 break
-            n_page = 0
-            for el in items:
-                got = self._parse_item(el, col, base)
-                if not got:
-                    continue
-                u, title, dt = got
-                if not u or u in seen:
-                    continue
-                seen.add(u)
-                if dt and not self.in_window(dt[:10]):
-                    if prev_oldest is not None and dt[:10] < prev_oldest:
-                        prev_oldest = dt[:10]
-                    continue
-                prev_oldest = dt[:10] if dt else prev_oldest
-                out.append(self._mk(col, u, title, dt, col.get("code")))
-                n_page += 1
+            rows, oldest = self._harvest(col, items, base, seen)
+            out.extend(rows)
+            if oldest:
+                prev_oldest = oldest
 
             # 单页就够了 / 已翻够 / 确认到底
             if mode == "none" or not out:
@@ -289,6 +277,36 @@ class GenericCollector(SiteCollector):
                     break
         # 一旦发现页面顺序不单调，就别再指望早停（本次已在上面保守处理）
         return out
+
+    def _harvest(self, col, items, base, seen) -> List[Dict]:
+        """
+        把一组条目元素解析成记录。HTML 模式与 JSON 模式共用。
+
+        之所以抽出来：浙江省网信那一套「jpaas 建站平台」的接口，
+        返回的 JSON 里 data.html 装的是**一段 HTML**，不是对象数组。
+        所以 json 模式也得能用 item/title/date 这套 CSS 选择器，
+        否则这类站（很可能覆盖大多数省网信）一个都加不进来。
+        """
+        out, oldest = [], ""
+        for el in items:
+            got = self._parse_item(el, col, base)
+            if not got:
+                continue
+            u, title, dt = got
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            if dt:
+                d = dt[:10]
+                # 「见过的最旧日期」必须在入库过滤**之前**统计：
+                # 早停靠的就是窗口外那些行。放进 out 之后再算，最小值
+                # 永远 >= date_start，早停条件恒不成立，会白翻到 max_pages。
+                if not oldest or d < oldest:
+                    oldest = d
+                if not self.in_window(d):
+                    continue
+            out.append(self._mk(col, u, title, dt, col.get("code")))
+        return out, oldest
 
     def _parse_item(self, el, col, base) -> Optional[tuple]:
         link_el = _pick(el, col.get("link", "a"))
@@ -331,6 +349,14 @@ class GenericCollector(SiteCollector):
                 params[k] = str(v).replace("{page}", str(page)).replace(
                     "{size}", str(size))
             headers = col.get("headers") or None
+            # Referer 不是可选项：jpaas 建站平台的列表接口会校验它，
+            # 不带就直接 success=false（实测浙江网信）。默认用 base_url 兜底。
+            referer = col.get("referer") or self.base_url + "/"
+            # referer 里允许 {code}：jpaas 的列表接口按栏目校验 Referer，
+            # 形如 https://host/col/col1694583/index.html，
+            # 而栏目 id 就是本栏目的 code，必须能跟着变。
+            if "{code}" in referer:
+                referer = referer.replace("{code}", str(col.get("code", "")))
             try:
                 if method == "POST":
                     body = pg.get("json_body")
@@ -343,7 +369,8 @@ class GenericCollector(SiteCollector):
                     else:
                         r = self.fetcher.post(api, data=params, headers=headers)
                 else:
-                    r = self.fetcher.get(api, params=params, headers=headers)
+                    r = self.fetcher.get(api, params=params, headers=headers,
+                                         referer=referer)
             except TypeError:
                 # 源站只吃裸 GET 时不要因为多传了 headers 就整条挂掉
                 r = self.fetcher.get(api, params=params)
@@ -355,6 +382,29 @@ class GenericCollector(SiteCollector):
                 self.log(f"    [warn] 接口返回的不是 JSON: {api}")
                 break
             lst = dig(data, col.get("list_path", ""), None)
+            if lst is None:
+                break
+
+            # 字段里装的是 **HTML 片段**（jpaas 建站平台就是这样：
+            # {"success":true,"data":{"html":"<ul>...</ul> count=\"N\""}})
+            # 这种站的列表不是对象数组，用 fields 那套映射根本没得用，
+            # 必须回退到 CSS 选择器解析 —— 所以这里分流而不是报错。
+            if isinstance(lst, str) and lst.strip():
+                soup = BeautifulSoup(lst, "html.parser")
+                items = soup.select(col.get("item", ""))
+                if not items:
+                    break
+                out.extend(self._harvest(col, items, self.base_url, seen)[0])
+                total = self._count_from_html(lst)
+                try:
+                    if total and len(out) >= int(total):
+                        break
+                except (TypeError, ValueError):
+                    pass
+                if len(items) < size:
+                    break
+                continue
+
             if not isinstance(lst, list) or not lst:
                 break
             for it in lst:
@@ -386,6 +436,15 @@ class GenericCollector(SiteCollector):
         return out
 
     # ------------------------------------------------------------ 正文
+    @staticmethod
+    def _count_from_html(fragment: str) -> int:
+        """
+        jpaas 那套接口把总条数塞在 HTML 的属性里：
+        <ul count="1299" pageNo="1" ...>。取不到就返回 0（按页数兜底）。
+        """
+        m = re.search(r'count\s*=\s*"?(\d+)', fragment or "")
+        return int(m.group(1)) if m else 0
+
     def fetch_article(self, url: str, fallback: Dict) -> Optional[Dict]:
         r = self.fetcher.get(url, referer=self.base_url + "/")
         if r is None:

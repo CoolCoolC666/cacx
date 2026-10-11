@@ -266,6 +266,84 @@ def test_runner_diversion():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- 5b. 翻页早停
+def test_early_stop():
+    """
+    早停靠的是「见到的最旧日期」，而不是「入库行的最旧日期」。
+
+    这两者差一个窗口过滤：一旦只统计入库行，最小值必然 >= date_start，
+    早停条件恒不成立，翻页会一路走到 max_pages。不漏数据，但白翻几十页
+    请求，对源站不友好、跑起来也慢。这个曾经真实退化过一次，故钉死。
+    """
+    from cacx.collector.generic import GenericCollector
+
+    col = {"code": "main", "name": "要闻",
+           "item": "ul li", "title": "a", "link": "a", "date": "span"}
+
+    # URL 必须带页码：翻页的语义就是每页给一批**没出现过**的条目，
+    # 若各页 URL 相同，第二页会被 seen 去重挡在日期统计之前，
+    # 测的就不是早停而是去重了。
+    def page(day, n=3, pg=1):
+        items = "".join(
+            f'<li><a href="/a/{pg}_{i}.htm">标题{pg}-{i}</a>'
+            f'<span>{day}</span></li>' for i in range(n))
+        return f"<html><body><ul>{items}</ul></body></html>"
+
+    # 第 1 页全在窗口内，第 2 页已越过窗口下界 -> 应在第 2 页停下
+    PAGES = {"https://x.gov.cn/list_1.htm": page("2026-06-01", 3, 1),
+             "https://x.gov.cn/list_2.htm": page("2026-01-01", 3, 2)}
+    for i in range(3, 9):
+        PAGES[f"https://x.gov.cn/list_{i}.htm"] = page("2025-01-01", 3, i)
+
+    class FakeResp:
+        def __init__(self, t):
+            self.text, self.content, self.encoding = t, t.encode(), "utf-8"
+            self.status_code = 200
+            self.apparent_encoding = "utf-8"
+            self.headers = {"Content-Type": "text/html; charset=utf-8"}
+
+    class FakeFetcher:
+        def __init__(self):
+            self.hits = []
+
+        def get(self, url, **kw):
+            self.hits.append(url)
+            return FakeResp(PAGES[url]) if url in PAGES else None
+
+    gc = GenericCollector.__new__(GenericCollector)
+    gc.base_url = "https://x.gov.cn"
+    gc.fetcher = FakeFetcher()
+    gc.log = lambda *a, **k: None
+    gc.cfg_site = {"code": "x", "name": "桩站", "topic_prefixes": ()}
+    gc.date_start, gc.date_end = "2026-01-15", "2099-12-31"
+    gc.in_window = lambda d: bool(d) and gc.date_start <= d <= gc.date_end
+
+    col = dict(col, list_url="https://x.gov.cn/list_1.htm",
+               pagination={"mode": "url", "url": "https://x.gov.cn/list_{page}.htm",
+                           "start_page": 1, "max_pages": 8})
+    rows = gc._list_html(col)
+
+    check("窗口内条目全部入库", len(rows) == 3, f"rows={len(rows)}")
+    check("越界后即停，不翻满 8 页",
+          len(gc.fetcher.hits) == 2, f"hits={len(gc.fetcher.hits)}")
+    check("窗口外的不入库",
+          all(r["date"] >= "2026-01-15" for r in rows),
+          str([r["date"] for r in rows]))
+
+    # 反向：窗口内行与窗口外行同页时，最旧日期应取到窗口外那个
+    PAGES["https://x.gov.cn/list_1.htm"] = (
+        '<html><body><ul>'
+        '<li><a href="/a/1.htm">新</a><span>2026-06-01</span></li>'
+        '<li><a href="/a/2.htm">旧</a><span>2020-01-01</span></li>'
+        '</ul></body></html>')
+    PAGES["https://x.gov.cn/list_2.htm"] = page("2026-01-01", 3, 2)
+    gc.fetcher.hits.clear()
+    rows = gc._list_html(col)
+    check("同页混排：只收窗口内 1 条", len(rows) == 1, f"rows={len(rows)}")
+    check("同页混排：见到旧条目后当场停，不多翻一页",
+          len(gc.fetcher.hits) == 1, f"hits={len(gc.fetcher.hits)}")
+
+
 # ---------------------------------------------------------------- 6. 解码
 def test_decode():
     """requests 对无 charset 的响应会按 ISO-8859-1 解码，中文会静默变乱码"""
@@ -382,8 +460,8 @@ def main():
     print("通用采集链路回归测试")
     print("=" * 62)
     for fn in (test_classify, test_dates, test_dig, test_sites_registry,
-               test_runner_diversion, test_decode, test_list_inference,
-               test_api_candidates, test_generic_build):
+               test_runner_diversion, test_early_stop, test_decode,
+               test_list_inference, test_api_candidates, test_generic_build):
         try:
             fn()
         except Exception:
