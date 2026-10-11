@@ -19,6 +19,7 @@ from html.parser import HTMLParser
 from typing import Dict, List, Optional
 
 from .base import SiteCollector, clean_title
+from .classify import classify
 
 # 14 个栏目。A0937「网信政务总」是聚合导航页(totalRec 15394)，
 # 其内容已被下列 12 个子栏目完全覆盖(合计 16318)，故不采。
@@ -161,12 +162,18 @@ class CacCollector(SiteCollector):
                     u = "https:" + u
                 elif u.startswith("/"):
                     u = self.base_url + u
+                # 列表阶段就分好类：专题页/站外/脏数据不是「正文抓不到」，
+                # 混在一起会让失败数失真，还白烧满 retry 的退避重试。
+                kind, reason = classify(u, self.base_url,
+                                        self.cfg_site.get("topic_prefixes", ()))
                 out.append({
                     "url": u,
                     "title": (it.get("topic") or "").strip(),
                     "date": pt,
                     "column_code": column_code,
                     "column_name": name,
+                    "kind": kind,
+                    "skip_reason": reason,
                     "description": (it.get("description") or "").strip(),
                     "coverurl": (it.get("coverurl") or "").strip(),
                 })

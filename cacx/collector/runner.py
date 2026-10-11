@@ -14,8 +14,17 @@ from .. import db as D
 from .. import sites as S
 from .base import SiteCollector, html_to_text
 from .cac import CacCollector
+from .classify import KIND_LABEL, describe_line
 from .generic import build as build_generic
 from .zjwx import ZjwxCollector
+
+
+def _host_of(url: str) -> str:
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url).netloc or ""
+    except Exception:
+        return ""
 
 # 内置站点：采集逻辑是代码，不是配置能表达的。
 # 自定义站点走 GenericCollector，由 config/sites.d/*.json 驱动。
@@ -121,6 +130,8 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
         listed = 0
         listed_new = 0
         failed = 0
+        skipped: Dict[str, int] = {}      # 非文章条目，单独计数，不算失败
+        skip_samples: Dict[str, List[str]] = {}
         seen_urls = set()
         for c in col.columns():
             items = col.list_articles(c["code"])
@@ -132,6 +143,50 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
                 if it["url"] in seen_urls:
                     continue
                 seen_urls.add(it["url"])
+
+                # ---- 非文章条目分流 ----
+                # 专题页/站外链接/公众号/脏数据在列表阶段就能判定，
+                # 让它们去跑正文只会白烧 3 次退避重试，还会把失败数撑爆，
+                # 真正的失败（比如旧稿下线）反而被淹没。登记后跳过。
+                kind = it.get("kind") or "article"
+                if kind != "article":
+                    skipped[kind] = skipped.get(kind, 0) + 1
+                    samples = skip_samples.setdefault(kind, [])
+                    if len(samples) < 3:
+                        samples.append(f"{it.get('title','')[:26]} "
+                                       f"{it.get('skip_reason','')}")
+                    if kind == "dirty":
+                        # 空 URL / javascript: 没有可登记的地址，
+                        # 但仍然要留痕 —— 用合成键存下来，
+                        # 否则源站的脏数据就彻底消失了，没人会知道它存在过。
+                        synth = it.get("url") or (
+                            f"empty:{site}:{it.get('column_code','')}:"
+                            f"{it.get('title','')[:40]}")
+                        d.upsert_external({
+                            "site": site, "title": it.get("title", ""),
+                            "pub_date": it.get("date", ""),
+                            "column_code": it.get("column_code", ""),
+                            "column_name": it.get("column_name", ""),
+                            "list_url": synth, "target_host": "",
+                            "is_own_site": 1, "fail_kind": "dirty",
+                            "reason": it.get("skip_reason", ""),
+                        })
+                        continue
+                    if kind in ("external", "wechat", "index_page"):
+                        # 全部登记，不静默丢弃 —— 「被跳过」必须可查。
+                        # is_own_site 用来看得清：专题页是本站的，站外不是。
+                        d.upsert_external({
+                            "site": site, "title": it.get("title", ""),
+                            "pub_date": it.get("date", ""),
+                            "column_code": it.get("column_code", ""),
+                            "column_name": it.get("column_name", ""),
+                            "list_url": it.get("url", ""),
+                            "target_host": _host_of(it.get("url", "")),
+                            "is_own_site": 1 if kind == "index_page" else 0,
+                            "fail_kind": kind,
+                            "reason": it.get("skip_reason", ""),
+                        })
+                    continue
 
                 # list-only 是**纯只读盘点**：只报增量，不碰数据库。
                 if mode == "list-only":
@@ -158,10 +213,12 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
                 text = html_to_text(art["content_html"], col.base_url)
                 rec = {
                     "site": site, "site_name": col.name,
-                    "column_code": it["column_code"],
+                    # 全部用 .get()：写入路径上一个 KeyError 会让整次同步中断，
+                    # 而这只是一个可选字段。缺了就退回栏目名，不丢条目。
+                    "column_code": it.get("column_code", ""),
                     "column_name": it.get("column_name") or col.name,
-                    "title": art.get("title") or it["title"],
-                    "pub_date": art.get("pub_date") or it["date"],
+                    "title": art.get("title") or it.get("title", ""),
+                    "pub_date": art.get("pub_date") or it.get("date", ""),
                     "url": it["url"],
                     "source_text": art.get("source_text", ""),
                     "content_text": text,
@@ -178,22 +235,43 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
                     break
             if limit and listed >= limit:
                 break
+            # 栏目收尾：把该栏目本次的净增/失败回给界面，
+            # 否则前端只知道「这个栏目跑完了」，不知道它到底出了多少
+            emit("column_done", site=site, column=c["name"],
+                 new=listed_new, failed=failed,
+                 skipped=sum(skipped.values()))
 
         totals["listed"] += listed
         totals["new"] += listed_new
         totals["failed"] += failed
+        totals["skipped"] = totals.get("skipped", 0) + sum(skipped.values())
+        for k, v in skipped.items():
+            totals["skip_kinds"] = totals.get("skip_kinds", {})
+            totals["skip_kinds"][k] = totals["skip_kinds"].get(k, 0) + v
         if mode == "list-only":
-            say(f"[sync] {col.name} 窗口内列表 {listed}，其中库里没有的 {listed_new}")
+            skip_txt = ("，跳过 " + describe_line(skipped)) if skipped else ""
+            say(f"[sync] {col.name} 窗口内列表 {listed}，"
+                f"其中库里没有的 {listed_new}{skip_txt}")
             emit("site_done", site=site, listed=listed, new=listed_new,
-                 failed=failed, mode=mode)
+                 failed=failed, skipped=sum(skipped.values()),
+                 skip_kinds=dict(skipped), mode=mode)
             continue
         d.conn.commit()
         d.rebuild_fts()
         d.record_sync(site, mode, started, listed, listed_new, failed,
                       note=f"columns={len(col.columns())}")
-        say(f"[sync] {col.name} 列表 {listed}，新增 {listed_new}，失败 {failed}")
+        skip_txt = ""
+        if skipped:
+            skip_txt = "，跳过 " + describe_line(skipped)
+            for k, samples in skip_samples.items():
+                for s in samples[:1]:
+                    self_note = f"        · {KIND_LABEL.get(k, k)}示例: {s}"
+                    say(self_note)
+        say(f"[sync] {col.name} 列表 {listed}，新增 {listed_new}，"
+            f"失败 {failed}{skip_txt}")
         emit("site_done", site=site, listed=listed, new=listed_new,
-             failed=failed, mode=mode)
+             failed=failed, skipped=sum(skipped.values()),
+             skip_kinds=dict(skipped), mode=mode)
     d.close()
     emit("done", **totals)
     return rc

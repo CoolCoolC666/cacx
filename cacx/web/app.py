@@ -220,8 +220,12 @@ def api_trend(site: str = "", granularity: str = "month"):
 
 
 @app.get("/api/facets")
-def api_facets():
-    return _db().facets()
+def api_facets(site: str = ""):
+    """
+    分面。site 非空时只返回该站栏目 —— 栏目下拉靠它跟随站点联动。
+    不带参数时行为与从前完全一致（向后兼容）。
+    """
+    return _db().facets_by_site(site)
 
 
 @app.get("/api/stats")
@@ -352,6 +356,7 @@ SYNC_STATE: Dict[str, Any] = {
     "running": False, "started_at": "", "finished_at": "",
     "mode": "", "sites": [], "year": "",
     "logs": [], "totals": {"listed": 0, "new": 0, "failed": 0},
+    "columns": [], "skipped": 0, "skip_kinds": {},
     "error": "", "cancel_requested": False,
 }
 MAX_LOG = 400          # 防止长跑把内存撑爆，只留最近若干条
@@ -394,9 +399,39 @@ def _on_sync_event(ev: Dict[str, Any]):
             SYNC_STATE["totals"] = {"listed": ev.get("listed", 0),
                                     "new": ev.get("new", 0),
                                     "failed": ev.get("failed", 0)}
+    elif k == "site_start":
+        with SYNC_LOCK:
+            SYNC_STATE["columns"] = []
+    elif k == "column":
+        # 栏目级进度：同步时能看到「卡在哪个栏目上」，
+        # 而不是只看到一个转圈的总数
+        with SYNC_LOCK:
+            SYNC_STATE["columns"].append({
+                "site": ev.get("site", ""),
+                "name": ev.get("column", ""),
+                "listed": ev.get("n", 0),
+                "state": "running",
+            })
+    elif k == "column_done":
+        with SYNC_LOCK:
+            for c in reversed(SYNC_STATE["columns"]):
+                if (c["site"] == ev.get("site")
+                        and c["name"] == ev.get("column")):
+                    c["state"] = "done"
+                    c["new"] = ev.get("new", 0)
+                    c["failed"] = ev.get("failed", 0)
+                    break
     elif k == "site_done":
+        with SYNC_LOCK:
+            for c in SYNC_STATE["columns"]:
+                if c["site"] == ev.get("site") and c["state"] == "running":
+                    c["state"] = "done"
+            SYNC_STATE["skipped"] = ev.get("skipped", 0)
+            SYNC_STATE["skip_kinds"] = ev.get("skip_kinds", {})
         _sync_log(f"--- {ev.get('site')} 完成：列表 {ev.get('listed')}，"
-                  f"新增 {ev.get('new')}，失败 {ev.get('failed')}",
+                  f"新增 {ev.get('new')}，失败 {ev.get('failed')}"
+                  + (f"，跳过 {ev.get('skipped')}"
+                     if ev.get("skipped") else ""),
                   level="ok")
     elif k == "done":
         with SYNC_LOCK:
@@ -420,7 +455,11 @@ def api_sync_start(
             raise HTTPException(409, "已有同步在跑，先等它结束或点停止")
         site_list = [s.strip() for s in sites.split(",") if s.strip()] or None
         if site_list:
-            bad = [s for s in site_list if s not in ("cac", "zjwx")]
+            # 站点表是动态的（用户可以自己加站），不能写死 cac|zjwx，
+            # 否则新站点点了同步直接被 400 挡回去
+            from .. import sites as S
+            known = set(S.all_sites(_cfg()).keys())
+            bad = [s for s in site_list if s not in known]
             if bad:
                 raise HTTPException(400, f"未知站点: {bad}")
 
@@ -465,6 +504,9 @@ def api_sync_status(since: int = Query(0, ge=0)):
             "sites": SYNC_STATE["sites"],
             "year": SYNC_STATE["year"],
             "totals": dict(SYNC_STATE["totals"]),
+            "columns": list(SYNC_STATE["columns"]),
+            "skipped": SYNC_STATE["skipped"],
+            "skip_kinds": dict(SYNC_STATE["skip_kinds"]),
             "error": SYNC_STATE["error"],
             "log_total": len(SYNC_STATE["logs"]),
             "logs": logs,
@@ -539,6 +581,110 @@ def api_doctor(ai: bool = False, advisory: bool = False):
         except Exception as e:
             out["ai_note"] = f"AI 调用失败: {type(e).__name__}: {e}"
     return out
+
+
+# ---------------------------------------------------------------- 站点管理
+class ProbeIn(BaseModel):
+    """输网址 → 推断规则（不落盘）"""
+    url: str = ""
+    name: str = ""
+    use_ai: bool = True
+
+
+class ProbeRunIn(BaseModel):
+    """用候选配置真抓一次（不落盘、不入库）"""
+    draft: Dict[str, Any] = {}
+    max_columns: int = 5
+
+
+class SiteSaveIn(BaseModel):
+    """保存站点配置。只写 config/sites.d/<code>.json，不碰 settings.json。"""
+    draft: Dict[str, Any] = {}
+    force: bool = False
+
+
+@app.get("/api/sites")
+def api_sites():
+    """站点清单：内置 + 自定义，附各自已入库篇数"""
+    from .. import sites as S
+    cfg = _cfg()
+    d = _db()
+    counts = {}
+    with d._lock:
+        for r in d.conn.execute(
+                "SELECT site, COUNT(*) n, COALESCE(SUM(chars),0) c, "
+                "COUNT(DISTINCT column_name) nc FROM articles "
+                "GROUP BY site"):
+            counts[r["site"]] = {"n": r["n"], "chars": r["c"],
+                                 "n_columns": r["nc"]}
+    return {"items": S.describe(cfg, counts),
+            "dir": str(S.CUSTOM_DIR)}
+
+
+@app.post("/api/sites/probe")
+def api_sites_probe(req: ProbeIn):
+    """
+    推断规则，不保存。返回草稿 + 证据 + 问题清单。
+    这是**第一段**：先看它推了什么，再决定要不要真抓。
+    """
+    from ..collector import probe as P
+    if not req.url.strip():
+        raise HTTPException(400, "请填写网址")
+    try:
+        return P.draft_from_url(_cfg(), req.url, name=req.name,
+                                use_ai=req.use_ai)
+    except Exception as e:
+        raise HTTPException(502, f"推断失败：{type(e).__name__}: {e}")
+
+
+@app.post("/api/sites/probe-run")
+def api_sites_probe_run(req: ProbeRunIn):
+    """
+    用候选配置真抓一次。**这是第二段**：给用户看样本。
+    全程只读：不写数据库、不写配置文件。
+    """
+    from ..collector import probe as P
+    draft = dict(req.draft or {})
+    if not draft:
+        raise HTTPException(400, "没有待验证的配置草稿")
+    try:
+        return P.probe_site(_cfg(), draft, max_columns=max(1, req.max_columns))
+    except Exception as e:
+        raise HTTPException(502, f"试抓失败：{type(e).__name__}: {e}")
+
+
+@app.post("/api/sites")
+def api_sites_save(req: SiteSaveIn):
+    """确认保存。只写 sites.d/<code>.json。"""
+    from .. import sites as S
+    draft = dict(req.draft or {})
+    issues = S.validate(draft)
+    if issues and not req.force:
+        raise HTTPException(400, {"message": "配置校验没过", "issues": issues})
+    try:
+        path = S.save_custom(draft)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"saved": True, "file": str(path), "code": draft.get("code"),
+            "forced": bool(req.force and issues),
+            "issues": issues}
+
+
+@app.delete("/api/sites/{code}")
+def api_sites_delete(code: str):
+    """删除自定义站点配置。**不动已入库的文章** —— 那是另一件事。"""
+    from .. import sites as S
+    if code in (C.load().get("sites") or {}):
+        raise HTTPException(400, "内置站点不可删除，请到设置页停用或改采集范围")
+    ok = S.delete_custom(code)
+    return {"deleted": ok, "code": code,
+            "note": "已入库的文章保留在库里，只是不会再同步"}
+
+
+@app.post("/api/sites/{code}/enabled")
+def api_sites_toggle(code: str, enabled: bool = True):
+    from .. import sites as S
+    return {"ok": S.set_enabled(code, enabled), "code": code, "enabled": enabled}
 
 
 # ---------------------------------------------------------------- 配置

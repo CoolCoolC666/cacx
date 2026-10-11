@@ -25,6 +25,7 @@ from html.parser import HTMLParser
 from typing import Dict, List, Optional
 
 from .base import SiteCollector, absolutize, clean_title
+from .classify import classify
 
 # (ColId, 站点自称栏目名)
 COLUMNS = [
@@ -168,12 +169,17 @@ class ZjwxCollector(SiteCollector):
                 day = m.group("date").strip()
                 if self.date_start <= day <= self.date_end:
                     in_page += 1
+                    u = self.base_url + m.group("url")
+                    kind, reason = classify(u, self.base_url,
+                                            self.cfg_site.get("topic_prefixes", ()))
                     out.append({
-                        "url": self.base_url + m.group("url"),
+                        "url": u,
                         "title": clean_title(m.group("title")),
                         "date": day,
                         "column_code": column_code,
                         "column_name": name,
+                        "kind": kind,
+                        "skip_reason": reason,
                     })
             # 列表按日期倒序：整页没有一条落在窗口内，且存在早于起始日的条目，
             # 说明后面的只会更旧 —— 安全收工，不必翻完整个存量。

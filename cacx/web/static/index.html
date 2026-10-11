@@ -81,6 +81,13 @@
      给个上限，让稀疏数据看起来还是「柱状图」而不是色块。 */
   .bar-item{flex:1 1 auto;max-width:46px;min-width:5px;
             display:flex;flex-direction:column;align-items:center;gap:3px}
+  /* 密集模式（按月 36 根时）：不能再按 max-width:46px 撑，
+     36×46=1656px 远超容器宽度，会撑出横向滚动条把整张图挤成一条。
+     改成定宽 + 只显示部分横轴标签。 */
+  .bars.dense{justify-content:flex-start;gap:2px}
+  .bars.dense .bar-item{flex:0 0 24px;max-width:24px;min-width:24px}
+  .bars.dense .bar-x{font-size:9px;transform:rotate(-60deg);
+                      transform-origin:center;height:26px;line-height:26px}
   .bar-fill{width:100%;background:linear-gradient(180deg,var(--acc),#2f5fa8);
             border-radius:2px 2px 0 0;min-height:2px;transition:.2s}
   .bar-fill:hover{background:var(--acc2)}
@@ -91,6 +98,16 @@
   .form label{display:flex;align-items:center;gap:8px;
               color:var(--dim);font-size:12.5px;flex-wrap:wrap}
   .form label.inline{gap:6px}
+  /* 同步中的栏目进度：一眼看出卡在哪个栏目 */
+  .colprog{display:flex;flex-wrap:wrap;gap:6px}
+  .colprog-item{display:flex;align-items:center;gap:6px;font-size:12px;
+    padding:4px 9px;border-radius:14px;border:1px solid var(--line);
+    background:var(--panel2);color:var(--dim)}
+  .colprog-item.on{border-color:var(--acc);color:var(--fg)}
+  .colprog-item.on .n::after{content:'›';margin-left:5px;color:var(--acc)}
+  .colprog-item.bad{border-color:var(--warn)}
+  .colprog-item .e{color:var(--warn)}
+  .colprog-item .spin{color:var(--acc)}
   .form input[type=text],.form input[type=password],.form input[type=number],
   .form input[type=date]{min-width:210px}
   .rank{display:flex;justify-content:space-between;font-size:12.5px;
@@ -171,8 +188,12 @@
   <section id="v_search">
     <div class="searchbar">
       <input id="q" placeholder="输入关键词，空格分词。≥3字走 FTS5 索引，1~2字自动降级扫描">
-      <select id="site"><option value="">全部站点</option></select>
-      <select id="column"><option value="">全部栏目</option></select>
+      <select id="site" onchange="onSiteChange()"><option value="">全部站点</option></select>
+      <input id="column" list="column_opts" placeholder="全部栏目" autocomplete="off"
+             style="width:190px"
+             oninput="renderColumnHints()" onchange="go(1)"
+             onkeydown="if(event.key==='Enter')go(1)">
+      <datalist id="column_opts"></datalist>
       <select id="year"><option value="">全部年份</option></select>
       <select id="sort">
         <option value="date_desc">按日期 ↓</option>
@@ -244,8 +265,6 @@
         <label>站点
           <select id="sy_site">
             <option value="">全部站点</option>
-            <option value="cac">仅中国网信办</option>
-            <option value="zjwx">仅浙江网信网</option>
           </select>
         </label>
         <label>模式
@@ -271,6 +290,7 @@
           <button class="btn" onclick="runAdvisory()">📊 数据健康顾问</button>
           <span id="sy_state" style="color:var(--dim);font-size:12.5px"></span>
         </div>
+        <div id="sy_cols" style="margin-top:10px"></div>
       </div>
     </div>
 
@@ -482,15 +502,53 @@ function params(){
   const p=new URLSearchParams();
   const add=(k,v)=>{ if(v!=='' && v!=null) p.set(k,v); };
   add('q',$('q').value.trim()); add('site',$('site').value);
-  add('column',$('column').value); add('year',$('year').value);
+  add('column',$('column').value.trim()); add('year',$('year').value);
   add('sort',$('sort').value); add('date_from',$('date_from').value);
   add('date_to',$('date_to').value); add('min_chars',$('min_chars').value);
   if($('skip_empty').checked) p.set('skip_empty','true');
   return p;
 }
 
+let COLUMN_OPTIONS=[];   // [{name,label,n}] 当前站点下的栏目
+let FACETS_ALL=null;
+
+/* 栏目下拉：跟着站点联动。
+   原先是 <select> 一次塞 27 个栏目，切站点也不变 ——
+   选了浙江网信网，栏目里还挂着国信的，纯噪音。
+   现在切成「输入即时过滤 + datalist」：
+     · 切站点 → 只异步加载该站栏目
+     · 打「网信」两个字 → 立刻筛出「网信要闻/网信发布」
+     · 条数直接带在候选里，筛选前就知道哪个栏目量大 */
+async function onSiteChange(){
+  $('column').value='';
+  await loadColumns();
+  go(1);
+}
+
+async function loadColumns(){
+  const site=$('site').value;
+  const f=await (await fetch('/api/facets'+(site?'?site='+encodeURIComponent(site):''))).json();
+  COLUMN_OPTIONS=f.columns.map(c=>{
+    const tag=c.site==='cac'?'国':(c.site==='zjwx'?'浙':c.site.slice(0,2));
+    return {name:c.column_name, label:`${c.column_name} (${c.n})`, tag, n:c.n};
+  });
+  renderColumnHints($('column').value);
+}
+
+/* 输入即时过滤：把候选按输入词筛一遍再喂 datalist。
+   datalist 原生支持子串匹配，但候选里带条数前缀会影响观感，
+   这里保持 value 为纯栏目名、显示文本带条数。 */
+function renderColumnHints(keep){
+  const q=($('column').value||'').trim();
+  let opts=COLUMN_OPTIONS;
+  if(q) opts=opts.filter(o=>o.name.includes(q));
+  $('column_opts').innerHTML=opts.map(o=>
+    `<option value="${esc(o.name)}">${esc(o.label)}</option>`).join('');
+}
+
 async function loadFacets(){
   const f=await (await fetch('/api/facets')).json();
+  FACETS_ALL=f;
   $('stat').innerHTML=`<b>${f.total.toLocaleString()}</b> 篇文章 · `+
     `<b>${(f.chars/10000).toFixed(0)}</b> 万字 · ${f.days} 天 · `+
     `${f.external} 条站外`;
@@ -499,12 +557,7 @@ async function loadFacets(){
     o.value=s.site; o.textContent=`${s.site_name||s.site} (${s.n})`;
     $('site').appendChild(o);
   }
-  for(const c of f.columns){
-    const o=document.createElement('option');
-    o.value=c.column_name;
-    o.textContent=`${c.site==='cac'?'国':'浙'}·${c.column_name} (${c.n})`;
-    $('column').appendChild(o);
-  }
+  await loadColumns();
   for(const y of f.years){
     const o=document.createElement('option');
     o.value=y.year; o.textContent=`${y.year} (${y.n})`;
@@ -629,7 +682,7 @@ function showTab(t){
   if(t==='panel') loadPanel();
   if(t==='set') loadCfg();
   if(t==='ai'){ loadAiBadge(); loadAnns(); }
-  if(t==='sync'){ loadRuns(); pollSync(); }
+  if(t==='sync'){ loadSyncSites(); loadRuns(); pollSync(); }
 }
 
 /* ---------------- 同步页 ---------------- */
@@ -657,6 +710,26 @@ async function startSync(){
   }catch(e){ toast('启动失败：'+e.message, true); }
 }
 
+async function loadSyncSites(){
+  // 站点下拉必须来自注册表而不是写死两项：
+  // 用户加了新站点却在同步页选不到，等于「加了也不能用」。
+  // 来自 /api/sites（注册表）而不是 /api/facets（数据库）——
+  // 新站点还没抓到任何文章时，facets 里根本没有它。
+  try{
+    const r=await (await fetch('/api/sites')).json();
+    const sel=$('sy_site'); const cur=sel.value;
+    sel.innerHTML='<option value="">全部站点</option>';
+    for(const s of r.items){
+      if(!s.enabled) continue;
+      const o=document.createElement('option');
+      o.value=s.code;
+      o.textContent=s.name+(s.n?` (${s.n})`:'')+(s.builtin?'':' ★自定义');
+      sel.appendChild(o);
+    }
+    sel.value=cur;
+  }catch(e){ /* 服务未起，静默降级 */ }
+}
+
 async function pollSync(){
   clearTimeout(SYNC_TIMER);
   let cursor=parseInt($('log_cursor').textContent||'0');
@@ -673,19 +746,38 @@ async function pollSync(){
     $('log_cursor').textContent=s.log_total;
 
     const t=s.totals||{};
+    const skipTxt = s.skipped ? ` · 跳过 ${s.skipped}` : '';
     $('sy_state').innerHTML = s.running
-      ? `运行中… 列表 ${t.listed||0} · 新增 ${t.new||0} · 失败 ${t.failed||0}`+
+      ? `运行中… 列表 ${t.listed||0} · 新增 ${t.new||0} · 失败 ${t.failed||0}${skipTxt}`+
         (s.error?` · <span style="color:var(--err)">${esc(s.error)}</span>`:'')
       : (s.finished_at
         ? `已结束 ${s.finished_at} · 新增 <b style="color:var(--ok)">${t.new||0}</b> 篇`+
-          (t.failed?` · 失败 ${t.failed}`:'')+(s.error?' · 出错':'')
+          (t.failed?` · 失败 ${t.failed}`:'')+(skipTxt?` · ${skipTxt.slice(3)}`:'')+(s.error?' · 出错':'')
         : '空闲');
+
+    // 栏目级进度：同步时能看到「现在跑到哪个栏目」，不再只有一个总数在转
+    renderSyncColumns(s.columns||[]);
+
     $('sy_go').disabled = s.running;
     $('sy_go').textContent = s.running ? '同步中…' : '开始同步';
     if(!s.running && s.finished_at){ loadRuns(); loadFacets(); }
   }catch(e){ /* 服务重启中，下轮再试 */ }
   // s 在 try 外不可见，所以用 running 变量带出来
   SYNC_TIMER=setTimeout(pollSync, running?1200:4000);
+}
+
+function renderSyncColumns(cols){
+  const box=$('sy_cols');
+  if(!cols || !cols.length){ box.innerHTML=''; return; }
+  box.innerHTML='<div class="colprog">'+cols.map(c=>{
+    const running=c.state==='running';
+    return `<div class="colprog-item ${running?'on':''} ${c.failed?'bad':''}">
+      <span class="n">${esc(c.name)}</span>
+      <span class="m">${c.listed||0} 条`+
+        (c.state==='done'&&c.new!=null?` · 新增 ${c.new}`:'')+
+        (c.state==='done'&&c.failed?` · <b class="e">失败 ${c.failed}</b>`:'')+
+      (running?' <span class="spin">…</span>':'')+'</span></div>`;
+  }).join('')+'</div>';
 }
 
 async function runDoctor(useAI){
@@ -1006,19 +1098,28 @@ async function testAI(){
 }
 
 function drawBars(el, rows){
-  if(!rows.length){ el.innerHTML='<div class="empty" style="padding:20px">无数据</div>'; return; }
+  if(!rows.length){ el.classList.remove('dense');
+    el.innerHTML='<div class="empty" style="padding:20px">无数据</div>'; return; }
   const max=Math.max(...rows.map(r=>r.n))||1;
   // 容器高 130px，减去数值行(14) 与横轴行(16) 与间距(6)，剩约 94px 可用
   const MAXH=94;
-  el.innerHTML=rows.map(r=>{
+  // 超过 16 根就切密集模式：定宽 24px + 只显示部分横轴标签。
+  // 否则 36 根 × 46px 上限 = 1656px，远超容器宽，会撑出横向滚动条，
+  // 整张图被挤成一条，还一上来就 scrollLeft 跳到最右边（只剩最近几个月可见）。
+  const dense = rows.length > 16;
+  el.classList.toggle('dense', dense);
+  const step = dense ? Math.ceil(rows.length/12) : 1;
+  el.innerHTML=rows.map((r,i)=>{
     const h=Math.max(2, Math.round(r.n/max*MAXH));
     const short=r.k.length>7 ? r.k.slice(2).replace('-','/') : r.k;
+    const showLab = !dense || i%step===0 || i===rows.length-1;
     return `<div class="bar-item" title="${esc(r.k)}: ${r.n} 篇 / ${((r.c||0)/10000).toFixed(1)} 万字">
-      <div class="bar-v">${r.n}</div>
+      <div class="bar-v">${showLab?r.n:''}</div>
       <div class="bar-fill" style="height:${h}px"></div>
-      <div class="bar-x">${esc(short)}</div></div>`;
+      <div class="bar-x" ${showLab?'':'style="visibility:hidden"'}>${esc(short)}</div></div>`;
   }).join('');
-  el.scrollLeft = el.scrollWidth;
+  // 只在真的溢出时才滚过去
+  if(el.scrollWidth > el.clientWidth) el.scrollLeft = el.scrollWidth;
 }
 
 async function loadTrend(){
@@ -1032,8 +1133,23 @@ async function loadTrend(){
 async function loadPanel(){
   await loadTrend();
   const f=await (await fetch('/api/facets')).json();
-  $('rank_col').innerHTML=f.columns.slice(0,12).map(c=>
-    `<div class="rank"><span class="t">${c.site==='cac'?'国':'浙'}·${esc(c.column_name)}</span>
+  // 每个站点各取 Top N，不能直接 slice(0,12) ——
+  // /api/facets 的栏目是按 site 再按篇数排序的，CAC 库比浙江大一个量级，
+  // slice(0,12) 会让 CAC 吃满全部名额，浙江一个栏目都不显示
+  // （这是「浙江面板上根本没有浙江栏目」的真实原因，不是数据缺失）。
+  const per = Math.max(4, Math.floor(12 / Math.max(1, f.sites.length)));
+  const bySite = {};
+  for(const c of f.columns){ (bySite[c.site] ||= []).push(c); }
+  const rank = [];
+  for(const s of f.sites){
+    const tag = s.site==='cac' ? '国' : (s.site==='zjwx' ? '浙' : s.site.slice(0,2));
+    for(const c of (bySite[s.site]||[]).slice(0, per))
+      rank.push({...c, tag, site_name:s.site_name});
+  }
+  rank.sort((a,b)=>b.n-a.n);
+  $('rank_col').innerHTML=rank.map(c=>
+    `<div class="rank" title="${esc(c.site_name||'')} · ${esc(c.column_name)}">
+       <span class="t">${esc(c.tag)}·${esc(c.column_name)}</span>
      <span class="v">${c.n}</span></div>`).join('');
   const e=await (await fetch('/api/events?days=30')).json();
   const ev=e.by_kind.map(x=>({k:x.kind,n:x.n}));

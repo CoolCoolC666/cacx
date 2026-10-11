@@ -32,6 +32,7 @@ except ImportError:                              # pragma: no cover
     BeautifulSoup = None
 
 from .base import SiteCollector, absolutize, clean_title, decode_response
+from .classify import classify
 
 # ---------------------------------------------------------------- 日期
 _DATE_FULL = [
@@ -103,8 +104,10 @@ def dig(obj: Any, path: str, default=None) -> Any:
         m = re.match(r"^([^\[\]]*)((?:\[\d+\])+)$", part)
         keys = [part]
         if m:
-            keys = [k for k in ([m.group(1)] if m.group(1) else [])] + \
-                   re.findall(r"\[(\d+)\]", m.group(2))
+            # 下标必须转成 int，否则后面 isinstance(k, int) 分支永远进不去，
+            # 'data.list[1].u' 会静默返回默认值
+            keys = ([m.group(1)] if m.group(1) else []) + \
+                   [int(x) for x in re.findall(r"\[(\d+)\]", m.group(2))]
         for k in keys:
             if isinstance(k, int):
                 if isinstance(cur, list) and -len(cur) <= k < len(cur):
@@ -205,12 +208,16 @@ class GenericCollector(SiteCollector):
         return self._list_html(col)
 
     def _mk(self, col, url, title, date, column_code):
+        kind, reason = classify(url, self.base_url,
+                                self.cfg_site.get("topic_prefixes", ()))
         return {
             "url": url,
             "title": clean_title(title or ""),
             "date": date,
             "column_code": str(column_code),
             "column_name": col.get("name", ""),
+            "kind": kind,
+            "skip_reason": reason,
         }
 
     def _list_html(self, col) -> List[Dict]:

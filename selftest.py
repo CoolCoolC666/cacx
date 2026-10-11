@@ -79,8 +79,22 @@ _raw_total = d.conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
 check("文章已入库且计数自洽",
       f["total"] == _raw_total and f["total"] >= 4507,
       f"{f['total']} 篇（基线 4507，sync 后增长属正常）")
-check("站外条目已登记", f["external"] == 13, f"{f['external']} 条")
-check("空正文为显式标记", f["empty"] == 2, f"{f['empty']} 篇")
+
+# 不写死 external/empty 的具体条数 —— 语料一涨就误报（同上面 total 的道理）。
+# 该测的是**一致性**：facets 报的数与直接 COUNT(*) 吻合，
+# 以及每条站外条目都有分类（没分类 = 分流漏了，等于静默丢弃）。
+_ext_raw = d.conn.execute("SELECT COUNT(*) FROM external_links").fetchone()[0]
+_no_kind = d.conn.execute(
+    "SELECT COUNT(*) FROM external_links "
+    "WHERE COALESCE(fail_kind,'')=''").fetchone()[0]
+check("站外条目已登记且计数自洽",
+      f["external"] == _ext_raw and _no_kind == 0,
+      f"facets {f['external']} / 实表 {_ext_raw}，未分类 {_no_kind} 条")
+_empty_raw = d.conn.execute(
+    "SELECT COUNT(*) FROM articles WHERE COALESCE(content_empty,0)=1"
+).fetchone()[0]
+check("空正文计数自洽", f["empty"] == _empty_raw,
+      f"facets {f['empty']} / 实表 {_empty_raw}")
 # 抓取中途失败的半成品绝不能落库：content_text 为空就必须有显式标记
 _ghost = d.conn.execute(
     "SELECT COUNT(*) FROM articles "

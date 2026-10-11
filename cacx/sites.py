@@ -115,8 +115,15 @@ def save_custom(spec: Dict[str, Any]) -> Path:
     只写 sites.d/<code>.json，**不碰 settings.json**。
     """
     code = str(spec.get("code") or "").strip()
-    if not _CODE_BAD.fullmatch(code or ""):
-        raise ValueError(f"站点代码不合法: {code!r}（只允许字母数字下划线连字符）")
+    # 正向白名单，而不是拿「非法字符类」去反着判。
+    # 两次踩坑都栽在双重否定上：
+    #   · fullmatch(code) 配非法字符类 → 任何正常代码都存不进去
+    #   · 换成「有非法字符才匹配」→ '../evil' 这种混合串反而匹配不上，
+    #     结果路径穿越照样写进去了（更糟：写到目录外去了）
+    # 白名单一次说清：只允许小写字母、数字、下划线、连字符。
+    if not re.fullmatch(r"[a-z0-9_-]+", code):
+        raise ValueError(f"站点代码不合法: {code!r}"
+                         f"（只允许小写字母、数字、下划线、连字符）")
     ensure_dir()
     spec = dict(spec)
     spec.pop("_file", None)

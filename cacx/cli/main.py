@@ -223,6 +223,48 @@ def cmd_doctor(args):
     return doctor(cfg, site=args.site, use_ai=not args.no_ai)
 
 
+# ---------------------------------------------------------------- 非文章条目查询
+def cmd_links(args):
+    """
+    列出被判定为「非文章」而跳过的条目。
+
+    这些不是失败，是**明确登记**：专题页、站外链接、公众号、脏数据。
+    之前它们全被记成「正文抓不到」，同步日志里一片刺眼的失败，
+    真问题（2015/2019 年下线的旧稿）反而被淹没。
+    """
+    from ..collector.classify import KIND_LABEL
+    cfg = C.load()
+    d = D.open_db(cfg)
+    kind = args.kind or ""
+    sql = ("SELECT site,title,pub_date,column_name,list_url,target_host,"
+           "is_own_site,fail_kind,reason FROM external_links WHERE 1=1")
+    args_ = []
+    if kind:
+        sql += " AND fail_kind=?"; args_.append(kind)
+    if args.site:
+        sql += " AND site=?"; args_.append(args.site)
+    sql += " ORDER BY id DESC LIMIT ?"; args_.append(max(1, args.limit))
+    with d._lock:
+        rows = [dict(r) for r in d.conn.execute(sql, args_)]
+    d.close()
+    if not rows:
+        print("没有符合条件的非文章条目（还没跑过同步，或已被筛掉）")
+        return 0
+    tally = {}
+    for r in rows:
+        tally[r["fail_kind"]] = tally.get(r["fail_kind"], 0) + 1
+    print(f"共 {len(rows)} 条："
+          + "，".join(f"{KIND_LABEL.get(k, k)} {v}" for k, v in tally.items()))
+    print("-" * 78)
+    for r in rows:
+        own = "本站" if r["is_own_site"] else (r["target_host"] or "站外")
+        print(f"[{KIND_LABEL.get(r['fail_kind'], r['fail_kind'])}] {own} "
+              f"{r['pub_date']} {r['title'][:38]}")
+        print(f"    {r['reason']}")
+        print(f"    {r['list_url'][:96]}")
+    return 0
+
+
 # ---------------------------------------------------------------- 站点管理
 def cmd_site(args):
     """自定义站点：推断 → 试抓 → 保存。配置写在 config/sites.d/<code>.json"""
@@ -522,6 +564,12 @@ def build_parser():
     sp.add_argument("--site", action="append", help="只查指定站点，可重复")
     sp.add_argument("--no-ai", action="store_true", help="不用 AI，仅规则检查")
     sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser("links", help="列出被跳过的非文章条目（专题页/站外/公众号/脏数据）")
+    sp.add_argument("--kind", help="只看某一类: index_page/external/wechat/dirty")
+    sp.add_argument("--site", help="限定站点")
+    sp.add_argument("-n", "--limit", type=int, default=40)
+    sp.set_defaults(func=cmd_links)
 
     sp = sub.add_parser("site", help="站点管理：添加 / 试抓 / 删除自定义站点")
     ssub = sp.add_subparsers(dest="action", required=True)

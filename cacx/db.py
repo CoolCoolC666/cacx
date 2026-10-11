@@ -582,14 +582,32 @@ class Database:
 
     # ---------------------------------------------------------- 统计
     def facets(self) -> Dict[str, Any]:
-      with self._lock:
-        sites = [dict(r) for r in self.conn.execute(
+        return self.facets_by_site("")
+
+    def facets_by_site(self, site: str = "") -> Dict[str, Any]:
+        """
+        分面统计。site 非空时**只返回该站的栏目**。
+
+        这是栏目筛选能联动的关键：栏目下拉必须跟着站点走。
+        早前端端一次拿全部 27 个栏目混在一起，切站点也不变 ——
+        用户选了「浙江网信网」，栏目里还挂着国信的栏目，纯属噪音。
+        站点列表本身始终返回全部（切站点要用），只过滤栏目。
+        """
+        with self._lock:
+            sites = [dict(r) for r in self.conn.execute(
             "SELECT site, site_name, COUNT(*) n, SUM(chars) c "
             "FROM articles GROUP BY site, site_name ORDER BY n DESC")]
-        cols = [dict(r) for r in self.conn.execute(
-            "SELECT site, column_code, column_name, COUNT(*) n "
-            "FROM articles GROUP BY site, column_code, column_name "
-            "ORDER BY site, n DESC")]
+        if site:
+            cols = [dict(r) for r in self.conn.execute(
+                "SELECT site, column_code, column_name, COUNT(*) n "
+                "FROM articles WHERE site=? "
+                "GROUP BY site, column_code, column_name ORDER BY n DESC",
+                (site,))]
+        else:
+            cols = [dict(r) for r in self.conn.execute(
+                "SELECT site, column_code, column_name, COUNT(*) n "
+                "FROM articles GROUP BY site, column_code, column_name "
+                "ORDER BY site, n DESC")]
         years = [dict(r) for r in self.conn.execute(
             "SELECT year, COUNT(*) n FROM articles WHERE year<>'' "
             "GROUP BY year ORDER BY year")]
@@ -603,7 +621,8 @@ class Database:
             "COUNT(DISTINCT pub_day) FROM articles").fetchone()
         return {"total": total, "chars": chars, "days": docs,
                 "empty": empty, "external": ext,
-                "sites": sites, "columns": cols, "years": years}
+                "sites": sites, "columns": cols, "years": years,
+                "filtered_site": site}
 
     def integrity(self) -> Dict[str, Any]:
         """
