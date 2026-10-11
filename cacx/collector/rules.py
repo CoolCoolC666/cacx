@@ -63,7 +63,10 @@ def css_of(el, max_depth: int = 4) -> str:
             sibs = [c for c in parent.find_all(cur.name, recursive=False)
                     if c is not cur]
             if sibs:
-                seg += f":nth-of-type({sibs.index(cur) + 1})"
+                try:
+                    seg += f":nth-of-type({sibs.index(cur) + 1})"
+                except ValueError:
+                    pass          # bs4 的 Tag 相等性会漏判，退化成不加序号
         parts.append(seg)
         cur = parent
         depth += 1
@@ -84,6 +87,56 @@ def _text(el, limit: int = 200) -> str:
 
 
 # ---------------------------------------------------------------- 列表规则
+def _sel_no_nth(el, max_depth: int = 3) -> str:
+    """
+    生成「带父级上下文」但**不含 :nth-of-type** 的选择器。
+
+    两个方向都踩过：
+      · 只用祖先自身的 tag.classes（早前版本）→ 得到裸 'li'，
+        导航栏的 li 一并选中，比例判不过直接失败。
+        CAC 时政要闻实测：真条目是 div.default 下的 20 个 li，
+        而 div.default 本身只选中 1 个元素，裸 li 又太宽 —— 两头不靠。
+      · 带 :nth-of-type（css_of 的做法）→ 每个条目成了唯一选择器，
+        各自只选中 1 个，全被数量下限挡掉。
+
+    所以：沿祖先链拼 tag.classes，**只拼不拆**，不加分隔序号。
+    """
+    segs, cur = [], el
+    while cur is not None and getattr(cur, "name", None) and len(segs) < max_depth:
+        if cur.name in ("body", "html", "[document]"):
+            break
+        seg = cur.name
+        eid = cur.get("id")
+        if eid and re.match(r"^[A-Za-z][\w-]*$", str(eid)):
+            segs.append("#" + str(eid))
+            break
+        cls = [c for c in (cur.get("class") or [])
+               if isinstance(c, str) and re.match(r"^[A-Za-z][\w-]*$", c)]
+        if cls:
+            seg += "".join("." + c for c in cls[:2])
+        segs.append(seg)
+        cur = cur.parent
+    return " > ".join(reversed(segs))
+
+
+def _rel_sel(el) -> str:
+    """
+    条目**内部**用的相对选择器（不含祖先、不含 :nth-of-type）。
+    通用采集器是在条目元素里 select_one，所以必须是相对的短选择器。
+    """
+    if el is None:
+        return ""
+    seg = el.name
+    eid = el.get("id")
+    if eid and re.match(r"^[A-Za-z][\w-]*$", str(eid)):
+        return "#" + str(eid)
+    cls = [c for c in (el.get("class") or [])
+           if isinstance(c, str) and re.match(r"^[A-Za-z][\w-]*$", c)]
+    if cls:
+        seg += "".join("." + c for c in cls[:2])
+    return seg
+
+
 def infer_list_rule(html: str, base_url: str = "") -> Dict[str, Any]:
     """
     从一份列表页 HTML 里推断 item / title / link / date 选择器。
@@ -96,8 +149,8 @@ def infer_list_rule(html: str, base_url: str = "") -> Dict[str, Any]:
     """
     soup = _soup(html)
 
-    # 候选：(tag, class元组)
-    cands: Dict[Tuple[str, Tuple[str, ...]], None] = {}
+    # 候选：每篇文章链接的各级祖先，保留完整父子路径
+    cands: set = set()
     for a in soup.find_all("a"):
         if not _looks_article(a.get("href") or ""):
             continue
@@ -106,14 +159,14 @@ def infer_list_rule(html: str, base_url: str = "") -> Dict[str, Any]:
             cur = cur.parent
             if cur is None or not getattr(cur, "name", None) or cur.name == "body":
                 break
-            key = (cur.name, tuple(cur.get("class") or []))
-            cands[key] = None
+            s = _sel_no_nth(cur)
+            if s:
+                cands.add(s)
             if cur.find_parent(["body", "html"]) is None:
                 break
 
     best, best_score = None, 0.0
-    for (tag, cls) in cands:
-        sel = tag + "".join("." + c for c in cls if re.match(r"^[A-Za-z][\w-]*$", c))
+    for sel in {c for c in cands if c}:
         try:
             els = soup.select(sel)
         except Exception:
@@ -123,8 +176,13 @@ def infer_list_rule(html: str, base_url: str = "") -> Dict[str, Any]:
         ok_link = ok_date = 0
         texts = []
         for el in els:
-            links = [a for a in el.find_all("a") if _looks_article(a.get("href") or "")]
-            if len(links) == 1:
+            # 按**去重后的 URL 数**判，不是链接个数。
+            # 极常见的列表写法是「图片链接 + 标题链接」指向同一篇文章
+            # （江苏网信实测：<a><img></a><a>标题</a><span>日期</span>），
+            # 数链接会把这种正常列表整片判成不合格，然后一个候选都不剩。
+            hrefs = {a.get("href") for a in el.find_all("a")
+                     if _looks_article(a.get("href") or "")}
+            if len(hrefs) == 1:
                 ok_link += 1
             t = _text(el)
             if DATE_RX.search(t):
@@ -135,20 +193,28 @@ def infer_list_rule(html: str, base_url: str = "") -> Dict[str, Any]:
             continue
         ratio_link = ok_link / len(els)
         ratio_date = ok_date / len(els)
-        if ratio_link < 0.8 or ratio_date < 0.6:
+        if ratio_link < 0.7 or ratio_date < 0.5:
             continue
         # 打分：结构一致性权重最高，其次日期，其次「命中别太多」
         # （命中 200 条往往是把整个 ul 也选进去了）
         score = ratio_link * 3 + ratio_date * 2.5 + min(len(els), 40) / 40.0
-        joined = " ".join(cls).lower()
+        joined = sel.lower()
         if any(k in joined for k in ("list", "news", "item", "row", "content", "article")):
             score += 0.6
         if score > best_score:
             best_score, best = score, sel
     if not best:
-        return {"ok": False, "issues": [
-            "没找到像文章列表的区块。可能：①列表是 JS 渲染的（这种站要 Playwright，"
-            "本版不支持）②页面确实没有超过 5 条的列表 ③需要手工指定 item 选择器"]}
+        # 失败也要给候选。全空手而归，用户只能自己去看源码填选择器；
+        # 给一个「大概率对但没把握」的起点，用户改两下就能用，
+        # 这比「推断失败」有用得多。置信度必须如实标出来。
+        loose = _best_loose(soup)
+        return {"ok": False, "confidence": "low",
+                "best": loose,
+                "issues": [
+                    "没找到高置信度的列表区块。若下面给了候选，请务必试抓验证后再保存。",
+                    "如果这个列表是 JS 加载的（页面上只有零散几条），"
+                    "多半要走 JSON 接口模式 —— 试试自动探测接口，或手工填 api_url。",
+                ]}
 
     els = soup.select(best)
     item = els[0]
@@ -175,10 +241,10 @@ def infer_list_rule(html: str, base_url: str = "") -> Dict[str, Any]:
     rule = {
         "ok": True,
         "item": best,
-        "link": css_of(link_el).split(" > ")[-1] if link_el else "a",
-        "title": css_of(title_el).split(" > ")[-1] if title_el else "a",
-        "date": (css_of(date_el).split(" > ")[-1] if date_el and date_el is not item
-                 else ""),
+        "link": _rel_sel(link_el) or "a",
+        "title": _rel_sel(title_el) or "a",
+        "date": _rel_sel(date_el) if date_el is not None and date_el is not item
+                else "",
         "hit_count": len(els),
         "score": round(best_score, 2),
     }
@@ -207,12 +273,12 @@ def infer_article_rule(html: str) -> Dict[str, Any]:
 
     h1 = soup.find("h1")
     if h1 and len(h1.get_text(strip=True)) >= 4:
-        out["title"] = css_of(h1).split(" > ")[-1]
+        out["title"] = _rel_sel(h1)
     else:
         for sel in (".title", ".article-title", "h2.title", ".tit", ".titMain"):
             el = soup.select_one(sel)
             if el and len(el.get_text(strip=True)) >= 4:
-                out["title"] = css_of(el).split(" > ")[-1]
+                out["title"] = _rel_sel(el)
                 break
     if not out.get("title"):
         out["issues"].append("找不到标题元素，详情页标题将退回列表页标题")
@@ -226,7 +292,7 @@ def infer_article_rule(html: str) -> Dict[str, Any]:
             date_el = el
             break
     if date_el is not None:
-        out["pub_date"] = css_of(date_el).split(" > ")[-1]
+        out["pub_date"] = _rel_sel(date_el)
 
     src_el = None
     for el in soup.select("[class*=source], [class*=from], [class*=zuizhi]"):
@@ -235,7 +301,7 @@ def infer_article_rule(html: str) -> Dict[str, Any]:
             src_el = el
             break
     if src_el is not None:
-        out["source"] = css_of(src_el).split(" > ")[-1]
+        out["source"] = _rel_sel(src_el)
 
     # 正文：文字最多、链接最少的块
     from .generic import guess_content
@@ -244,7 +310,7 @@ def infer_article_rule(html: str) -> Dict[str, Any]:
         # 反查是哪个节点
         for el in soup.select("div, td, article, section"):
             if _text(el, 10_000) and str(el).find(body[:60]) >= 0:
-                out["content"] = css_of(el).split(" > ")[-1]
+                out["content"] = _rel_sel(el)
                 break
     if not out.get("content"):
         out["issues"].append("定位不到正文块，必须手工指定 article.content 选择器，"
@@ -304,6 +370,109 @@ def discover_columns(base_url: str, fetcher: Fetcher,
         if len(out) >= limit:
             break
     return out
+
+
+def _best_loose(soup) -> Dict[str, Any]:
+    """
+    放宽标准再找一遍，给用户一个可改的起点。
+    判据只有两条：**每个块恰好一个文章 URL** + **块数 >= 4**。
+    有日期加成但不作硬要求 —— 很多站（江苏网信的「一图读懂」侧栏）
+    本身就是没有日期的短列表，让它因为缺日期被排除会错过可用候选。
+    """
+    best, best_n = None, 0
+    cands: set = set()
+    for a in soup.find_all("a"):
+        if not _looks_article(a.get("href") or ""):
+            continue
+        cur = a
+        for _ in range(5):
+            cur = cur.parent
+            if cur is None or not getattr(cur, "name", None) or cur.name == "body":
+                break
+            s = _sel_no_nth(cur)
+            if s:
+                cands.add(s)
+    for sel in cands:
+        try:
+            els = soup.select(sel)
+        except Exception:
+            continue
+        if not (4 <= len(els) <= 200):
+            continue
+        ok = 0
+        for el in els:
+            hrefs = {a.get("href") for a in el.find_all("a")
+                     if _looks_article(a.get("href") or "")}
+            if len(hrefs) == 1:
+                ok += 1
+        if ok / len(els) >= 0.7 and ok > best_n:
+            best, best_n = sel, ok
+    if not best:
+        return {}
+    return {"item": best, "title": "a", "link": "a", "date": "",
+            "hit_count": best_n, "confidence": "low"}
+
+
+# ---------------------------------------------------------------- 接口端点探测
+# 浙江、江苏等多省网信办跑在同一套「jpaas 建站平台」上，
+# 列表不是服务端渲染，而是前端调 JSON 接口拿的。
+# 这种站硬套 HTML 选择器是找不到主列表的（实测江苏网信整页只有 17 个
+# 含日期的零散块）。所以 HTML 推断失败时要能指路到 JSON 模式，
+# 否则用户只会得到一句「推断失败」，不知道该往哪走。
+_API_HINT = re.compile(
+    r"['\"](/[A-Za-z0-9_\-./]*(?:api|json|ajax|interface|list|page|query|"
+    r"content|jpaas)[A-Za-z0-9_\-./]*)['\"]", re.I)
+_ABS_URL = re.compile(r"['\"](https?://[^'\"]{12,200})['\"]")
+# 真正像「接口」的判据：路径里有 api/json/ajax/rest/service/jpaas 之类，
+# 或者带 .json/.do/.action 后缀。导航路径不含这些，直接排除。
+_API_KEYWORD = re.compile(
+    r"/(api|apis|json|ajax|interface|rest|service|server|jpaas|graphql)"
+    r"|\.(json|do|action)(\?|$)|[?&](api|json|action|service)=",
+    re.I)
+
+
+def find_api_candidates(html: str, base_url: str = "") -> List[Dict[str, str]]:
+    """
+    从 HTML（含内联脚本）里捞可能的列表接口地址。
+
+    只返回**路径里确实带接口关键词**的地址。
+    早前一版把「同域的任意绝对 URL」也算候选，结果导航路径 /fwhd/
+    被当成接口端点推荐出来 —— 宁可报「没找到」，也不能给个看着像、
+    实际打不开的地址：用户会照着填进配置，然后卡在一个打不开的接口上。
+
+    而且这里只给**候选**，命中不等于可用，最终以 probe 为准。
+    """
+    from urllib.parse import urljoin, urlparse
+    hits: Dict[str, None] = {}
+    for m in _ABS_URL.finditer(html or ""):
+        full = m.group(1)
+        p = urlparse(full)
+        if base_url and p.netloc != urlparse(base_url).netloc:
+            continue
+        if not _API_KEYWORD.search(p.path + "?" + p.query):
+            continue
+        hits[full] = None
+    for m in _API_HINT.finditer(html or ""):
+        full = urljoin(base_url or "", m.group(1))
+        if _API_KEYWORD.search(urlparse(full).path):
+            hits.setdefault(full, None)
+
+    out = []
+    for u in list(hits)[:40]:
+        p = urlparse(u)
+        if re.search(r"\.(js|css|png|jpg|gif|ico|woff|ttf|map|svg)$",
+                     p.path, re.I):
+            continue
+        score = 0
+        for kw, w in (("jpaas", 5), ("api", 3), ("json", 3), ("ajax", 3),
+                      ("list", 2), ("query", 2), ("page", 1), ("content", 1)):
+            if kw in u.lower():
+                score += w
+        if score <= 0:
+            continue
+        out.append({"url": u, "score": score})
+    out.sort(key=lambda x: -x["score"])
+    return out[:6]
 
 
 # ---------------------------------------------------------------- AI 补全

@@ -71,21 +71,34 @@ def draft_from_url(cfg: Dict[str, Any], url: str, name: str = "",
 
     # ---- 列表规则 ----
     lr = R.infer_list_rule(html, url)
+    kind = "html"
     if lr.get("ok") and not lr.get("issues"):
         evidence.append(f"自动探测到列表：{lr['item']}（命中 {lr.get('hit_count')} 条）")
     else:
         issues += lr.get("issues", ["列表规则自动探测失败"])
-        if use_ai:
-            ai = R.ai_infer(cfg, html, "list", url)
-            ai_info["list"] = {k: v for k, v in ai.items() if k != "result"}
-            if ai.get("ok") and isinstance(ai.get("result"), dict):
-                res = ai["result"]
-                merged = dict(res.get("list") or res)
-                lr = {**lr, **merged, "ok": bool(merged.get("item"))}
-                evidence.append("AI 补全了列表选择器：" +
-                                ", ".join(f"{k}={v}" for k, v in merged.items() if v))
-            else:
-                issues += ai.get("issues", [])
+        best = lr.get("best") or {}
+        if best.get("item"):
+            issues.append(f"已给出一个低置信度候选：{best['item']}，"
+                          f"试抓验证后再决定用不用")
+            lr = {**lr, **best}
+
+    # ---- HTML 路径走不通时，改推 JSON 接口模式 ----
+    # 浙江、江苏等多省网信办跑在同一套 jpaas 建站平台上，
+    # 主列表是前端调接口拿的，HTML 里压根没有（江苏网信整页只有 17 个
+    # 含日期的零散块）。这时硬套 CSS 选择器只会浪费时间，
+    # 正确的动作是换个采集模式。
+    if not lr.get("ok"):
+        api = R.find_api_candidates(html, url)
+        if api:
+            kind = "json"
+            evidence.append(
+                "这个页面像是 JS 加载列表的，已自动切换到 JSON 接口模式")
+            for a in api[:3]:
+                evidence.append(f"  接口候选：{a['url']}")
+            issues.append("已按 JSON 模式生成草稿，但 list_path / fields 需要你确认："
+                          "打开接口看返回的 JSON 结构，列表在哪个字段、文章字段叫什么。")
+            draft_json = _json_draft(url, site_name, api[0]["url"])
+            return _finish(draft_json, evidence, issues, ai_info, url)
 
     col = {
         "code": "main",
@@ -102,7 +115,6 @@ def draft_from_url(cfg: Dict[str, Any], url: str, name: str = "",
     article_rule: Dict[str, Any] = {}
     sample_url = (lr.get("sample") or {}).get("url", "")
     if sample_url:
-        import base as _b
         from .base import absolutize
         sample_url = absolutize(sample_url, url)
         ar = f.get(sample_url)
@@ -117,6 +129,7 @@ def draft_from_url(cfg: Dict[str, Any], url: str, name: str = "",
                                 f"（约 {art_rule['content_chars']} 字）")
             else:
                 issues += art_rule.get("issues", [])
+            ai = None
             if use_ai and not art_rule.get("ok"):
                 ai = R.ai_infer(cfg, ar_html, "article", sample_url)
                 ai_info["article"] = {k: v for k, v in ai.items() if k != "result"}
@@ -128,8 +141,12 @@ def draft_from_url(cfg: Dict[str, Any], url: str, name: str = "",
                     evidence.append("AI 补全了正文选择器")
                 else:
                     issues += ai.get("issues", [])
-            if ai.get("ok") and isinstance(ai.get("result"), dict) \
-                    and not site_name:
+            # 站名补全：无论走没走 AI 分支都要判一次。
+            # 早前把这段放在 `if use_ai` 块外面却引用 ai，
+            # 启发式成功（ai 从未赋值）时直接 UnboundLocalError，
+            # 而启发式成功恰恰是最常见的路径 —— 等于主流程一走就崩。
+            if (ai and ai.get("ok") and isinstance(ai.get("result"), dict)
+                    and not site_name):
                 nm = ai["result"].get("site_name")
                 if nm:
                     site_name = nm
@@ -150,6 +167,42 @@ def draft_from_url(cfg: Dict[str, Any], url: str, name: str = "",
     }
     return {"draft": draft, "evidence": evidence,
             "issues": issues, "ai": ai_info}
+
+
+def _finish(draft, evidence, issues, ai_info, url):
+    draft["_inferred_from"] = url
+    return {"draft": draft, "evidence": evidence,
+            "issues": issues, "ai": ai_info}
+
+
+def _json_draft(url, site_name, api_url):
+    """JSON 模式的草稿骨架。
+    list_path / fields 留成占位并显式标注 —— 这里不能瞎猜，
+    猜错了用户会以为系统能自己填，直接保存就会抓回一堆空。"""
+    return {
+        "name": site_name or url,
+        "base_url": _origin(url),
+        "kind": "json",
+        "enabled": True,
+        "date_start": "2000-01-01",
+        "date_end": "2099-12-31",
+        "columns": [{
+            "code": "main",
+            "name": site_name or "主栏目",
+            "api_url": api_url,
+            "method": "GET",
+            "list_path": "TODO:列表在哪个字段，如 data.list",
+            "total_path": "",
+            "url_prefix": "",
+            "fields": {"title": "TODO:标题字段", "url": "TODO:链接字段",
+                       "date": "TODO:日期字段"},
+            "pagination": {"mode": "params", "size": 20, "max_pages": 20,
+                           "params": {"page": "{page}", "size": "{size}"}},
+            "_need_fill": ["list_path", "fields.title", "fields.url", "fields.date"],
+        }],
+        "article": {"title": "h1", "pub_date": "", "content": "TODO:正文选择器",
+                    "_need_fill": ["article.content"]},
+    }
 
 
 def re_split_title(title: str) -> str:

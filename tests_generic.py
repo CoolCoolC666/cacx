@@ -289,7 +289,77 @@ def test_decode():
     check("gb18030 兜底", decode_response(FakeResp(gb, None)) == "紫金e评 网信办")
 
 
-# ---------------------------------------------------------------- 7. 通用采集器配置校验
+# ---------------------------------------------------------------- 7. 列表规则推断
+LIST_HTML = """
+<html><body>
+<nav><ul>
+  <li><a href="/index.html">首页</a></li>
+  <li><a href="/about.html">关于我们</a></li>
+</ul></nav>
+<div class="main"><ul id="loadingInfoPage">
+  <li><h5><a href="//w.gov.cn/2026-09/30/c_1792520315672675.htm">第一条标题</a></h5>
+      <div class="times">2026-09-30</div></li>
+  <li><h5><a href="//w.gov.cn/2026-09/29/c_1792520315672676.htm">第二条标题</a></h5>
+      <div class="times">2026-09-29</div></li>
+  <li><h5><a href="//w.gov.cn/2026-09/28/c_1792520315672677.htm">第三条标题</a></h5>
+      <div class="times">2026-09-28</div></li>
+  <li><h5><a href="//w.gov.cn/2026-09/27/c_1792520315672678.htm">第四条标题</a></h5>
+      <div class="times">2026-09-27</div></li>
+  <li><h5><a href="//w.gov.cn/2026-09/26/c_1792520315672679.htm">第五条标题</a></h5>
+      <div class="times">2026-09-26</div></li>
+</ul></div></body></html>
+"""
+
+
+def test_list_inference():
+    """这条结构取自 CAC 时政要闻列表页的真实 HTML（简化）"""
+    from cacx.collector import rules as R
+    r = R.infer_list_rule(LIST_HTML, "https://www.w.gov.cn")
+    check("推断出列表条目选择器", r.get("ok") is True, str(r.get("issues")))
+    if not r.get("ok"):
+        return
+    check("item 带父级上下文",
+          "li" in r["item"] and ">" in r["item"], f"item={r['item']}")
+    check("item 不是裸 li（裸 li 会把导航栏选进来）",
+          r["item"].strip() != "li", f"item={r['item']}")
+    check("item 不带 :nth-of-type（会把每条拆成唯一选择器）",
+          "nth-of-type" not in r["item"], f"item={r['item']}")
+    check("标题选择器", r["title"] == "a", f"title={r['title']}")
+    check("链接选择器", r["link"] == "a", f"link={r['link']}")
+    check("日期选择器", r["date"] == "div.times", f"date={r['date']}")
+    s = r.get("sample") or {}
+    check("样本能解析出日期", s.get("date") == "2026-09-30", str(s))
+    check("样本能解析出标题", s.get("title", "").startswith("第一条"), str(s))
+
+    # 条目内部选择器必须是**相对**的：通用采集器在条目里 select_one
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(LIST_HTML, "html.parser")
+    item = soup.select_one(r["item"])
+    check("item 选择器可定位到元素", item is not None)
+    if item is not None:
+        check("标题选择器在条目内可定位",
+              item.select_one(r["title"]) is not None, r["title"])
+        check("日期选择器在条目内可定位",
+              item.select_one(r["date"]) is not None, r["date"])
+
+
+def test_api_candidates():
+    """接口探测不能把普通导航路径当接口推荐出去"""
+    from cacx.collector.rules import find_api_candidates
+    html = """
+    <script>var a="/fwhd/tzgg/",b="/about/index.html",
+      c="https://x.gov.cn/api-gateway/jpaas-publish-server/front/page/build/unit",
+      d="/static/js/app.js";</script>"""
+    got = [c["url"] for c in find_api_candidates(html, "https://x.gov.cn")]
+    check("抓到 jpaas 接口", any("jpaas" in u for u in got), str(got))
+    check("普通导航路径不被当成接口",
+          not any("/fwhd/" in u for u in got), str(got))
+    check("静态 js 不算接口", not any(u.endswith(".js") for u in got), str(got))
+    check("无接口关键词时返回空",
+          find_api_candidates('<a href="/a/b/c.html">x</a>', "https://x.gov.cn") == [])
+
+
+# ---------------------------------------------------------------- 8. 通用采集器配置校验
 def test_generic_build():
     from cacx.collector.generic import build as build_col
     spec = {"code": "x", "name": "X", "base_url": "https://a.cn", "kind": "html",
@@ -312,7 +382,8 @@ def main():
     print("通用采集链路回归测试")
     print("=" * 62)
     for fn in (test_classify, test_dates, test_dig, test_sites_registry,
-               test_runner_diversion, test_decode, test_generic_build):
+               test_runner_diversion, test_decode, test_list_inference,
+               test_api_candidates, test_generic_build):
         try:
             fn()
         except Exception:

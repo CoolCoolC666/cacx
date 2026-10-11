@@ -255,7 +255,7 @@
     <div class="box">
       <h3>同步设置</h3>
       <p style="color:var(--dim);font-size:12.5px;margin:0 0 12px;line-height:1.7">
-        只读两站的公开列表接口，不登录、不碰需要授权的内容。
+        只读各站的公开列表接口，不登录、不碰需要授权的内容。
         首次全量约 20 分钟，日常增量一般 1-3 分钟。<br>
         <b style="color:var(--warn)">增量</b>只补库里没有的；
         <b style="color:var(--warn)">全量</b>会重抓并刷新所有文章（耗时最长）；
@@ -292,6 +292,59 @@
         </div>
         <div id="sy_cols" style="margin-top:10px"></div>
       </div>
+    </div>
+
+    <div class="box" style="margin-top:12px">
+      <h3>站点清单</h3>
+      <div id="sites_list" style="font-size:12.5px;color:var(--dim)">加载中…</div>
+    </div>
+
+    <div class="box" style="margin-top:12px">
+      <h3>添加同类网站
+        <span style="color:var(--dim);font-weight:400;font-size:12px">
+          输网址 → 自动推断 → 试抓验证 → 确认保存</span>
+      </h3>
+      <p style="color:var(--dim);font-size:12.5px;margin:0 0 12px;line-height:1.7">
+        三步都要走完才存。<b style="color:var(--warn)">规则是猜的</b>，
+        猜错直接入库会攒出一批「标题对、正文是导航栏」的脏数据，
+        要等人真去读才发现。试用抓：全程只读，不写库也不写配置。
+      </p>
+      <div class="form">
+        <label>网站地址
+          <input type="text" id="sp_url" style="min-width:330px"
+                 placeholder="https://www.xxx.gov.cn/  或某个栏目列表页">
+        </label>
+        <label>站点名称（可选）
+          <input type="text" id="sp_name" style="min-width:200px"
+                 placeholder="留空则从网页标题推断">
+        </label>
+        <label class="inline">
+          <input type="checkbox" id="sp_ai" checked>
+          <span>用 AI 辅助推断（探测不出来时才派上用场）</span>
+        </label>
+        <div class="row">
+          <button class="btn" id="sp_b1" onclick="siteProbe()">① 推断规则</button>
+          <button class="btn" id="sp_b2" disabled onclick="siteProbeRun()">② 试抓验证</button>
+          <button class="btn" id="sp_b3" disabled onclick="siteSave()">③ 确认保存</button>
+          <span id="sp_state" style="color:var(--dim);font-size:12.5px"></span>
+        </div>
+      </div>
+
+      <div id="sp_ev" style="margin-top:12px;font-size:12.5px"></div>
+
+      <div id="sp_draft_wrap" style="display:none;margin-top:12px">
+        <h3 style="font-size:12.5px">推断出的配置（可直接改，改完再试抓）
+          <span class="grow" style="flex:1"></span>
+          <button class="btn" onclick="siteReset()">重新推断</button>
+        </h3>
+        <textarea id="sp_draft" spellcheck="false"
+          style="width:100%;height:230px;background:#0b0d11;color:var(--fg);
+                 border:1px solid var(--line);border-radius:6px;padding:9px;
+                 font-size:12px;font-family:ui-monospace,Consolas,monospace;
+                 line-height:1.55"></textarea>
+      </div>
+
+      <div id="sp_probe" style="display:none;margin-top:12px"></div>
     </div>
 
     <div class="box" id="doctor_box" style="margin-top:12px;display:none">
@@ -682,7 +735,7 @@ function showTab(t){
   if(t==='panel') loadPanel();
   if(t==='set') loadCfg();
   if(t==='ai'){ loadAiBadge(); loadAnns(); }
-  if(t==='sync'){ loadSyncSites(); loadRuns(); pollSync(); }
+  if(t==='sync'){ loadSyncSites(); loadRuns(); loadSitesList(); pollSync(); }
 }
 
 /* ---------------- 同步页 ---------------- */
@@ -778,6 +831,151 @@ function renderSyncColumns(cols){
         (c.state==='done'&&c.failed?` · <b class="e">失败 ${c.failed}</b>`:'')+
       (running?' <span class="spin">…</span>':'')+'</span></div>`;
   }).join('')+'</div>';
+}
+
+// ---------------------------------------------------------------- 添加站点
+function siteReset(){
+  $('sp_b2').disabled=true; $('sp_b3').disabled=true;
+  $('sp_draft_wrap').style.display='none';
+  $('sp_probe').style.display='none';
+  $('sp_state').textContent='';
+}
+
+function spIssues(list){
+  if(!list || !list.length) return '';
+  return '<div style="color:var(--warn);margin-top:6px">⚠ '+list.map(esc).join('<br>⚠ ')+'</div>';
+}
+
+async function siteProbe(){
+  const url=$('sp_url').value.trim();
+  if(!url){ toast('先填网址', true); return; }
+  $('sp_b1').disabled=true; $('sp_b1').textContent='推断中…（10-40 秒）';
+  $('sp_state').textContent=''; $('sp_ev').innerHTML='';
+  siteReset();
+  try{
+    const r=await (await fetch('/api/sites/probe',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url:url, name:$('sp_name').value.trim(),
+                           use_ai:$('sp_ai').checked})})).json();
+    if(r.detail){ $('sp_ev').innerHTML='<span style="color:var(--err)">'+esc(
+        typeof r.detail==='string'?r.detail:JSON.stringify(r.detail))+'</span>';
+      toast('推断失败', true); return; }
+    if(!r.draft || !Object.keys(r.draft).length){
+      $('sp_ev').innerHTML='<span style="color:var(--err)">没能推断出可用配置</span>'+
+        spIssues(r.issues); return; }
+    $('sp_draft').value=JSON.stringify(r.draft,null,2);
+    $('sp_draft_wrap').style.display='block';
+    $('sp_b2').disabled=false;
+    $('sp_ev').innerHTML='<span style="color:var(--ok)">推断完成，下面可以改规则再试抓</span>'+
+      spIssues(r.issues);
+  }catch(e){ toast('推断失败：'+e.message,true); }
+  finally{ $('sp_b1').disabled=false; $('sp_b1').textContent='① 推断规则'; }
+}
+
+async function siteProbeRun(){
+  let draft;
+  try{ draft=JSON.parse($('sp_draft').value); }
+  catch(e){ toast('配置不是合法 JSON：'+e.message,true); return; }
+  $('sp_b2').disabled=true; $('sp_b2').textContent='试抓中…（10-60 秒）';
+  $('sp_probe').style.display='block'; $('sp_probe').innerHTML=
+    '<div class="empty" style="padding:16px">正在真抓列表与一篇正文…（只读，不入库）</div>';
+  $('sp_b3').disabled=true;
+  try{
+    const r=await (await fetch('/api/sites/probe-run',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({draft:draft})})).json();
+    if(r.detail){ $('sp_probe').innerHTML='<span style="color:var(--err)">试抓出错：'+esc(
+        typeof r.detail==='string'?r.detail:JSON.stringify(r.detail))+'</span>'; return; }
+    let h='';
+    for(const c of r.columns||[]){
+      h+=`<div style="margin-bottom:10px">
+        <div><b>${esc(c.name||c.code)}</b>
+          <span style="color:var(--dim)">抓到 ${c.listed||0} 条`+
+          (c.no_date?` · <span style="color:var(--warn)">${c.no_date} 条无日期</span>`:'')+
+          `</span></div>`;
+      if(c.error) h+=`<div style="color:var(--err);font-size:12px">${esc(c.error)}</div>`;
+      for(const s of (c.samples||[]))
+        h+=`<div style="font-size:12px;color:var(--dim);padding-left:12px">
+             ${esc(s.date||'无日期')} · ${esc(s.title)}</div>`;
+    }
+    const a=r.article;
+    if(a){
+      h+=`<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
+        <div><b>正文样本</b> ${esc(a.title)} <span style="color:var(--dim)">
+        ${esc(a.pub_date||'无日期')} · ${a.chars} 字${a.guessed?' · ⚠ 启发式兜底':''}</span></div>
+        <div style="font-size:12px;color:var(--dim);background:#0b0d11;padding:9px;
+             border-radius:6px;margin-top:6px;max-height:150px;overflow:auto;
+             white-space:pre-wrap">${esc(a.preview)}</div></div>`;
+    }
+    $('sp_probe').innerHTML=h+spIssues(r.issues);
+    if(r.ok){
+      $('sp_b3').disabled=false;
+      $('sp_state').innerHTML='<span style="color:var(--ok)">试抓通过，可以保存</span>';
+      if(!draft.code){
+        draft.code=prompt('给这个站点起个代码（只用小写字母/数字/下划线/连字符）',
+                          (draft.name||'site').toLowerCase().replace(/[^a-z0-9_-]+/g,'')||'site');
+        if(!draft.code){ toast('没填代码，未保存', true); return; }
+        $('sp_draft').value=JSON.stringify(draft,null,2);
+      }
+    }else{
+      $('sp_state').innerHTML='<span style="color:var(--warn)">试抓没过，按上面提示改规则；也可以硬存</span>';
+      $('sp_b3').disabled=false;   // 允许强存，但会明确标注
+      $('sp_b3').textContent='③ 仍然保存';
+    }
+  }catch(e){ toast('试抓失败：'+e.message,true); }
+  finally{ $('sp_b2').disabled=false; $('sp_b2').textContent='② 试抓验证'; }
+}
+
+async function siteSave(){
+  let draft;
+  try{ draft=JSON.parse($('sp_draft').value); }
+  catch(e){ toast('配置不是合法 JSON：'+e.message,true); return; }
+  let force=false;
+  if($('sp_b3').textContent.indexOf('仍然')>=0){
+    force=true;
+    if(!confirm('试抓没通过。仍然保存的话，后续同步可能抓不到东西。确定？')) return;
+  }
+  $('sp_b3').disabled=true;
+  try{
+    const r=await (await fetch('/api/sites',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({draft:draft, force:force})})).json();
+    if(r.detail){
+      const d=r.detail;
+      const msg=(d && d.issues) ? d.issues.join('；') : (typeof d==='string'?d:JSON.stringify(d));
+      toast('保存失败：'+msg,true); return; }
+    toast(r.forced?'已保存（有告警）':'站点已保存，去「数据同步」即可采集');
+    $('sp_b3').textContent='③ 确认保存';
+    siteReset(); loadSitesList(); loadSyncSites();
+  }catch(e){ toast('保存失败：'+e.message,true); }
+  finally{ $('sp_b3').disabled=false; }
+}
+
+async function loadSitesList(){
+  try{
+    const r=await (await fetch('/api/sites')).json();
+    $('sites_list').innerHTML=r.items.map(s=>{
+      const tags=[];
+      if(s.builtin) tags.push('内置');
+      else tags.push('自定义 · '+(s.kind||'html'));
+      if(!s.enabled) tags.push('已停用');
+      if(s.broken) tags.push('<span style="color:var(--err)">配置损坏</span>');
+      return `<div style="padding:4px 0;border-bottom:1px solid var(--line)">
+        <b style="color:var(--fg)">${esc(s.name)}</b>
+        <span style="color:var(--dim)">${esc(s.code)} · ${tags.join(' · ')}
+        ${s.n?` · 已入库 ${s.n} 篇`:''}</span>
+        ${(!s.builtin&&!s.broken)?`<span class="grow" style="flex:1"></span>
+          <button class="btn" onclick="siteDelete('${esc(s.code)}')">删除</button>`:''}
+      </div>`;}).join('');
+  }catch(e){ $('sites_list').textContent='读取失败：'+e.message; }
+}
+
+async function siteDelete(code){
+  if(!confirm('删除站点配置 '+code+'？\n已入库的文章会保留，只是不再同步。')) return;
+  const r=await (await fetch('/api/sites/'+encodeURIComponent(code),
+    {method:'DELETE'})).json();
+  toast(r.deleted?'已删除':(r.detail||'删除失败'), !r.deleted);
+  loadSitesList(); loadSyncSites();
 }
 
 async function runDoctor(useAI){
