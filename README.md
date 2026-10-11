@@ -258,9 +258,10 @@ python tests_generic.py             # 或各测试文件单跑
 
 ---
 
-## 📄 许可与致谢
+## 📄 许可与声明
 
-- 代码部分：见 [LICENSE](LICENSE)
+- **代码部分**：MIT License，见 [LICENSE](LICENSE)
 - **语料内容**：来自中国网信办（www.cac.gov.cn）与浙江网信网（www.zjwx.gov.cn）
-  的公开发布页面，著作权归原作者及原发布网站所有。
+  的公开发布页面，**著作权归原作者及原发布网站所有**，不随代码开源。
+  完整说明见 [CONDUCT.md](CONDUCT.md)。
 - 感谢两个站点的公开信息发布工作，正是它们让这类研究成为可能。
