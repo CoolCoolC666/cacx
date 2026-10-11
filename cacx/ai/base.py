@@ -14,6 +14,7 @@ AI 适配层
 
 import json
 import re
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -21,7 +22,101 @@ import requests
 
 
 class AIError(RuntimeError):
-    pass
+    """
+    AI 调用失败。
+
+    ⚠ 带 `retryable` 是这次新增的关键字段。
+      中途中断处理的第一步不是「重试」，而是**先分清该不该重试**：
+        · 可重试（retryable=True）：429 限流、5xx、连接超时、网络抖动
+          —— 供应商侧/链路侧的临时问题，等一下再来一次通常就成了。
+        · 不可重试（retryable=False）：401/403 鉴权失败、400 参数错、
+          配置缺失、模型不存在 —— 重试一万次也是同样结果，
+          只会白等并烧限流额度。
+      以前两者都被压成一句 `AIError(f"HTTP {code}: ...")`，
+      调用方无法判断，于是只能「整批重跑」—— 既浪费又掩盖了真实病因。
+    """
+
+    def __init__(self, message: str, retryable: bool = False,
+                 status_code: int = 0):
+        super().__init__(message)
+        self.retryable = bool(retryable)
+        self.status_code = int(status_code or 0)
+
+
+# 供应商侧的「等一下就好」信号码。
+# 429 限流必须尊重 Retry-After；503/502/504 常见于过载或网关抖动。
+_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+# 鉴权/参数类：重试无意义，且继续打可能被风控。
+_FATAL_STATUS = {400, 401, 403, 404, 422}
+
+
+def classify_status(code: int) -> bool:
+    """按 HTTP 码判断是否值得重试。未知码**不重试** —— 宁可漏重试，
+    也不要对一个必然失败的请求反复敲门（会触发风控）。"""
+    if code in _RETRYABLE_STATUS:
+        return True
+    if code in _FATAL_STATUS:
+        return False
+    # 2xx/3xx 在这里不可能出现（调用方已先判 !=200）
+    return False
+
+
+def _retry_after_seconds(headers: Optional[Dict[str, str]], default: float) -> float:
+    """优先听服务器的 Retry-After，别自顾自地重试。
+    限流场景下，无视服务端指引的立即重试几乎必然再撞一次 429。"""
+    if not headers:
+        return default
+    ra = headers.get("Retry-After") or headers.get("retry-after")
+    if not ra:
+        return default
+    try:
+        return max(0.0, min(float(ra), 120.0))
+    except (TypeError, ValueError):
+        return default
+
+
+def post_with_retry(url: str, *, headers: Optional[Dict[str, str]] = None,
+                    json_body: Optional[Dict[str, Any]] = None,
+                    timeout: int = 60, attempts: int = 3,
+                    base_delay: float = 1.5, on_retry=None) -> requests.Response:
+    """
+    带分类与指数退避的 POST。
+
+    attempts=1 即退化为「不重试」，供 dry_run / 单篇调用沿用旧行为。
+    on_retry(attempt, delay, reason) 用于把「正在重试」告诉界面 ——
+    否则用户只看到进度条卡住十几秒，完全不知道系统在自救。
+    """
+    last: Optional[Exception] = None
+    for i in range(1, max(1, attempts) + 1):
+        try:
+            r = requests.post(url, headers=headers, json=json_body,
+                              timeout=timeout)
+        except requests.RequestException as e:
+            # 连接层失败（超时/DNS/连接重置）一律可重试：
+            # 请求根本没送到服务端，不存在「重复提交」的副作用。
+            last = AIError(f"请求失败: {type(e).__name__}", retryable=True)
+            if i >= attempts:
+                raise last from e
+            delay = min(base_delay * (2 ** (i - 1)), 20.0)
+            if on_retry:
+                on_retry(i, delay, f"{type(e).__name__}")
+            time.sleep(delay)
+            continue
+        if r.status_code == 200:
+            return r
+        retryable = classify_status(r.status_code)
+        err = AIError(f"HTTP {r.status_code}: {r.text[:200]}",
+                      retryable=retryable, status_code=r.status_code)
+        if not retryable or i >= attempts:
+            raise err
+        delay = _retry_after_seconds(
+            getattr(r, "headers", None),
+            min(base_delay * (2 ** (i - 1)), 20.0))
+        if on_retry:
+            on_retry(i, delay, f"HTTP {r.status_code}")
+        time.sleep(delay)
+        last = err
+    raise last or AIError("请求失败")
 
 
 def _mask(v: str) -> str:
@@ -43,6 +138,16 @@ class Provider(ABC):
         self.api_key = cfg_ai.get("api_key") or ""
         self.timeout = int(cfg_ai.get("timeout", 60))
         self.max_tokens = int(cfg_ai.get("max_tokens", 2000))
+        # 重试次数与退避基数。0/缺省=1 次，即**沿用旧行为不重试** ——
+        # 想要自动重试必须显式开，避免有人无意识地把配额多烧一遍。
+        self.retry_attempts = max(1, int(cfg_ai.get("retry_attempts", 1)))
+        self.retry_base_delay = float(cfg_ai.get("retry_base_delay", 1.5))
+        # 最近一次重试的原因，供调用方呈现给用户
+        self.last_retry: Optional[Dict[str, Any]] = None
+
+    def _on_retry(self, attempt: int, delay: float, reason: str):
+        self.last_retry = {"attempt": attempt, "delay": round(delay, 2),
+                           "reason": reason}
 
     @abstractmethod
     def chat(self, system: str, user: str, dry_run: bool = False) -> str:
@@ -78,16 +183,13 @@ class OpenAICompat(Provider):
                                self.base_url + "/chat/completions",
                                "payload_preview": payload}, ensure_ascii=False, indent=2)
         url = self.base_url + "/chat/completions"
-        try:
-            r = requests.post(
-                url,
-                headers={"Authorization": f"Bearer {self.api_key}",
-                         "Content-Type": "application/json"},
-                json=payload, timeout=self.timeout)
-        except requests.RequestException as e:
-            raise AIError(f"请求失败: {type(e).__name__}") from e
-        if r.status_code != 200:
-            raise AIError(f"HTTP {r.status_code}: {r.text[:200]}")
+        r = post_with_retry(
+            url,
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "Content-Type": "application/json"},
+            json_body=payload, timeout=self.timeout,
+            attempts=self.retry_attempts, base_delay=self.retry_base_delay,
+            on_retry=self._on_retry)
         try:
             d = r.json()
         except Exception as e:
@@ -118,12 +220,10 @@ class Ollama(Provider):
                                "endpoint": self.base_url + "/api/chat",
                                "payload_preview": payload}, ensure_ascii=False, indent=2)
         url = self.base_url + "/api/chat"
-        try:
-            r = requests.post(url, json=payload, timeout=self.timeout)
-        except requests.RequestException as e:
-            raise AIError(f"请求失败: {type(e).__name__}（本地服务是否已启动？）") from e
-        if r.status_code != 200:
-            raise AIError(f"HTTP {r.status_code}: {r.text[:200]}")
+        r = post_with_retry(
+            url, json_body=payload, timeout=self.timeout,
+            attempts=self.retry_attempts, base_delay=self.retry_base_delay,
+            on_retry=self._on_retry)
         try:
             d = r.json()
         except Exception as e:

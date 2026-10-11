@@ -76,24 +76,65 @@ def _emit(on_progress, ev: Dict[str, Any]):
         pass
 
 
+def _classify_failure(e: BaseException) -> tuple:
+    """
+    把异常归类为 (是否值得重试, 给人看的说明)。
+
+    为什么要分：以前所有失败都被压成 `type(e).__name__: e`，
+    界面上「失败 12」看起来都一样，用户既不知道是网络抖了（该重跑）
+    还是 api_key 错了（重跑一万次也没用），只能整批重来 —— 配额白烧。
+
+    判据：
+      · AIError 自带 retryable —— 429/5xx/超时 为 True，
+        401/403/400/404 等为 False（重试无意义，还可能撞风控）
+      · 其它异常默认**不可重试**：来源不明时宁可不重试，
+        盲目重试未知异常可能反复触发同一个确定性失败
+    """
+    from .base import AIError
+    if isinstance(e, AIError):
+        if e.retryable:
+            return True, "可重试（限流/超时/服务端临时故障）"
+        if e.status_code in (401, 403):
+            return False, "鉴权失败 —— 检查 api_key，重试无用"
+        if e.status_code in (400, 422):
+            return False, "请求被拒（参数/模型名问题）—— 检查模型配置"
+        if e.status_code == 404:
+            return False, "接口地址不存在 —— 检查 base_url"
+        return False, "配置或请求问题，重试无用"
+    return False, f"{type(e).__name__}（原因不明，建议先手动试一篇）"
+
+
 def run_batch(cfg: Dict[str, Any], d, articles: List[Dict[str, Any]],
               dry_run: bool = True,
               concurrency: int = 3,
               rate: float = 0.0,
               resume: bool = False,
               stop_on_error: bool = False,
+              batch_id: str = "",
               on_progress: Optional[Callable[[Dict[str, Any]], None]] = None
               ) -> Dict[str, Any]:
     """
     批量跑文章摘要。
 
-    返回 {"total","ok","fail","skipped","dry_run","failments":[{"id","title","url","error"}]}
+    返回 {"total","ok","fail","skipped","dry_run","failures":[…],"retriable"}
     dry_run 时额外带 "preview"。
+
+    中途中断语义（本次重点）
+    ------------------------------------
+    · **每成功一篇立即落库**（save_annotation 在主线程、逐个调用）。
+      进程被 kill 最多丢 concurrency 篇，其余都在库里；
+      重跑走 incremental/resume 会被跳过 —— 不重复烧配额。
+    · **失败单独留痕**（record_ai_failure）并标注该不该重试。
+      失败绝不写进 ai_annotations —— 否则 resume 会把它当已完成跳过，
+      一个瞬时失败会被固化成永久缺口。
+    · 自动重试交给 AI 调用层（指数退避 + 尊重 Retry-After），
+      这里只负责把「正在重试第 N 次」如实报给界面。
     """
     total = len(articles or [])
     summary: Dict[str, Any] = {"total": total, "ok": 0, "fail": 0,
-                               "skipped": 0, "dry_run": dry_run,
-                               "failures": []}
+                               "skipped": 0, "cancelled": 0, "dry_run": dry_run,
+                               "failures": [], "retriable": 0,
+                               "interrupted": False, "not_run": 0}
     if not articles:
         return summary
 
@@ -168,13 +209,28 @@ def run_batch(cfg: Dict[str, Any], d, articles: List[Dict[str, Any]],
             try:
                 art_done, res = fut.result()
             except _BatchCancelled:
+                summary["cancelled"] += 1
                 continue  # 主动取消的：没调 AI，不计 ok 也不计 fail
             except Exception as e:
+                retryable, hint = _classify_failure(e)
+                msg = f"{type(e).__name__}: {e}"
                 summary["fail"] += 1
+                if retryable:
+                    summary["retriable"] += 1
                 summary["failures"].append({
                     "id": art.get("id"), "title": art.get("title"),
                     "url": art.get("url"),
-                    "error": f"{type(e).__name__}: {e}"})
+                    "error": msg, "retryable": retryable, "hint": hint})
+                # 失败留痕：写进独立的 ai_failures（不碰 ai_annotations）。
+                # 这样进程重启后仍能查到「哪几篇没成、该不该重试」。
+                try:
+                    d.record_ai_failure(art.get("id"), TASK, msg,
+                                        retryable=retryable,
+                                        attempts=(cfg.get("ai", {})
+                                                  .get("retry_attempts", 1)),
+                                        batch_id=batch_id)
+                except Exception:
+                    pass  # 留痕失败不能反过来把整批搞崩
                 if stop_on_error:
                     stop.set()
                     for f in futs:
@@ -190,6 +246,15 @@ def run_batch(cfg: Dict[str, Any], d, articles: List[Dict[str, Any]],
                 "skipped": summary["skipped"], "total": total,
                 "title": art.get("title")})
             if stop_on_error and stop.is_set():
+                summary["interrupted"] = True
                 break  # 已在飞的任务让它跑完（shutdown 会等），但不再处理新结果
 
+    # 被 stop_on_error 打断时，剩下的 pending 还没跑 —— 必须显式交代，
+    # 否则界面只显示「失败 1」，用户以为剩下的 9 篇也跑过了。
+    # 用计数而非 id 差集：id 可能重复出现在 failures 与成功里，
+    # 靠集合相减得到的是「看起来像」的数，不是真的没跑数。
+    handled = summary["ok"] + summary["fail"] + summary["cancelled"]
+    summary["not_run"] = max(0, len(pending) - handled)
+    if summary["not_run"] and not summary["interrupted"]:
+        summary["interrupted"] = True
     return summary

@@ -140,6 +140,25 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_kind_time ON events(kind, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_article  ON events(article_id);
+
+-- AI 批处理的失败留痕。**独立于 ai_annotations** 是刻意的：
+-- 失败绝不能写进 ai_annotations，否则 get_annotation() 就会返回非空，
+-- 下一轮 resume 把它当成「已完成」永久跳过 —— 一个失败会被固化成永久缺口。
+-- 这里另立一表记「谁失败了、为什么、该不该重试」，供：
+--   · 界面列出失败清单
+--   · 服务重启后一键续跑（内存里的 job 状态会随进程消失）
+CREATE TABLE IF NOT EXISTS ai_failures (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_id INTEGER NOT NULL,
+    task       TEXT NOT NULL,
+    error      TEXT,                   -- 人话错误
+    retryable  INTEGER DEFAULT 0,      -- 1=值得重试（429/超时/5xx）
+    attempts   INTEGER DEFAULT 1,      -- 试了几次（含自动重试）
+    batch_id   TEXT,                   -- 哪一批产生的
+    created_at TEXT,
+    UNIQUE (article_id, task)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_fail_retryable ON ai_failures(retryable, created_at);
 """
 
 
@@ -271,6 +290,12 @@ class Database:
                  result if isinstance(result, str)
                  else json.dumps(result, ensure_ascii=False),
                  time.strftime("%Y-%m-%d %H:%M:%S")))
+            # 写成功 = 这篇不再是失败项。放在这里而不是调用方，
+            # 是为了「只要有摘要就绝不可能同时出现在失败清单里」——
+            # 这条不变式比"谁负责清理"更可靠。
+            self.conn.execute(
+                "DELETE FROM ai_failures WHERE article_id=? AND task=?",
+                (article_id, task))
             self.conn.commit()
 
     def get_annotation(self, article_id: int, task: str) -> Optional[dict]:
@@ -278,6 +303,46 @@ class Database:
             "SELECT * FROM ai_annotations WHERE article_id=? AND task=?",
             (article_id, task)).fetchone()
         return dict(r) if r else None
+
+    # ---------------------------------------------------------- AI 失败留痕
+    def record_ai_failure(self, article_id: int, task: str, error: str,
+                          retryable: bool = False, attempts: int = 1,
+                          batch_id: str = ""):
+        """记一次失败。成功重试后应由 clear_ai_failure 抹掉。"""
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO ai_failures
+                   (article_id, task, error, retryable, attempts, batch_id,
+                    created_at)
+                   VALUES (?,?,?,?,?,?,?)
+                   ON CONFLICT(article_id, task) DO UPDATE SET
+                     error=excluded.error, retryable=excluded.retryable,
+                     attempts=excluded.attempts, batch_id=excluded.batch_id,
+                     created_at=excluded.created_at""",
+                (int(article_id), task, str(error)[:500],
+                 1 if retryable else 0, int(attempts), batch_id,
+                 time.strftime("%Y-%m-%d %H:%M:%S")))
+
+    def clear_ai_failure(self, article_id: int, task: str):
+        """这篇跑成功了 → 失败留痕作废（否则会一直显示在「失败清单」里，
+        让人以为还没修好）。"""
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM ai_failures WHERE article_id=? AND task=?",
+                (int(article_id), task))
+
+    def list_ai_failures(self, task: str = "", retryable_only: bool = False,
+                         limit: int = 200) -> List[dict]:
+        sql = ("SELECT f.*, a.title, a.site, a.url FROM ai_failures f "
+               "LEFT JOIN articles a ON a.id = f.article_id WHERE 1=1")
+        args: List[Any] = []
+        if task:
+            sql += " AND f.task = ?"; args.append(task)
+        if retryable_only:
+            sql += " AND f.retryable = 1"
+        sql += " ORDER BY f.created_at DESC LIMIT ?"
+        args.append(int(limit))
+        return [dict(r) for r in self.conn.execute(sql, args)]
 
     # ---------------------------------------------------------- 检索
     @staticmethod

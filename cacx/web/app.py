@@ -20,6 +20,9 @@ FastAPI 检索服务
     POST /api/purge/preview    批量删除：影响面预览（只读，返 confirm_token）
     POST /api/purge/execute    批量删除：真删（需 yes=true + 正确的 token）
 
+    GET  /api/ai/failures      跨重启的 AI 失败清单（限流/超时/配置类）
+    POST /api/ai/retry-failed  只重跑「可重试」的失败项，不重跑整批
+
 约定
     · 只读接口一律不写库；写操作（AI 落库）需显式 ?commit=1
     · 原文跳转走本服务中转，方便记录「哪篇被检索后跳走了」
@@ -425,6 +428,10 @@ class BatchReq(BaseModel):
     # （含已有摘要，重新生成）。非法值交给 Pydantic Literal 拦成 422 —— 与
     # limit 传字符串这类 schema 错误同码，不另起一套手工 400，前端错误处理统一。
     mode: Literal["incremental", "full"] = "incremental"
+    # 中断续跑专用：直接点名要跑哪几篇。
+    # 与 sites/date/limit 互斥 —— 给了 ids 就只跑这些，
+    # 「只重试失败项」靠它接上（见 /api/ai/retry-failed）。
+    ids: Optional[List[int]] = None
 
 
 def _same_source_groups(cfg: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -502,6 +509,20 @@ def _select_batch_articles(d, cfg: Dict[str, Any], req: BatchReq):
       各调一次，两次过滤口径必须一致，否则预检 total 与后台 total 对不上。
     """
     from .. import sites as S
+    # 中断续跑：点名 ids 时只跑这几篇，忽略站点/日期/limit ——
+    # 「只重试失败项」必须精确到篇，否则 limit 截断会把失败项挤掉，
+    # 变成「重试了但没轮到它」。
+    if req.ids:
+        arts = []
+        for i in req.ids:
+            it = d.get_article(int(i), with_html=False)
+            if it:
+                arts.append(it)
+        if req.mode == "incremental":
+            arts = [a for a in arts
+                    if d.get_annotation(a["id"], "summarize") is None]
+        return [], arts
+
     sites_list = req.sites or list(S.enabled_codes(cfg))
     seen, merged = set(), []
     for s in sites_list:
@@ -578,10 +599,30 @@ def _batch_worker(job_id: str, cfg_snapshot: Dict[str, Any], req: BatchReq):
 
         summary = _run_batch(cfg_snapshot, d, arts, dry_run=req.dry_run,
                              concurrency=req.concurrency, rate=req.rate,
-                             resume=req.resume, stop_on_error=req.stop_on_error,
-                             on_progress=_on_ev)
+                             resume=req.resume,
+                             stop_on_error=req.stop_on_error,
+                             batch_id=job_id, on_progress=_on_ev)
         with BATCH_LOCK:
             job["summary"] = summary
+            # 中断/失败要把「该怎么办」直接写进 job，前端照着显示即可，
+            # 不用在前端重新推导这些语义。
+            if summary.get("not_run"):
+                job["logs"].append({
+                    "t": time.strftime("%H:%M:%S"),
+                    "msg": f"⚠ 批次中断：{summary['not_run']} 篇尚未处理"
+                           f"（未调 AI，没有烧配额）。重新点「开始生成」"
+                           f"会跳过已完成的，只跑剩下的。"})
+            if summary.get("retriable"):
+                job["logs"].append({
+                    "t": time.strftime("%H:%M:%S"),
+                    "msg": f"⚠ {summary['retriable']} 篇因限流/超时失败，"
+                           f"属于可重试 —— 用「仅重试失败项」即可补跑。"})
+            fatal = summary["fail"] - summary["retriable"]
+            if fatal > 0:
+                job["logs"].append({
+                    "t": time.strftime("%H:%M:%S"),
+                    "msg": f"⚠ {fatal} 篇因配置/请求问题失败"
+                           f"（如 api_key、模型名），重试无用，请先改配置。"})
     except Exception as e:
         with BATCH_LOCK:
             job["error"] = f"{type(e).__name__}: {e}"
@@ -594,6 +635,66 @@ def _batch_worker(job_id: str, cfg_snapshot: Dict[str, Any], req: BatchReq):
         with BATCH_LOCK:
             job["running"] = False
             job["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+@app.get("/api/ai/failures")
+def api_ai_failures(task: str = "summarize",
+                    retryable_only: bool = False,
+                    limit: int = Query(200, ge=1, le=1000)):
+    """
+    跨重启的失败清单。
+
+    为什么要有这个接口：BATCH_JOBS 是**内存 dict**，进程一重启，
+    刚才那批跑了多少、哪几篇失败、有没有中断，全都没了。
+    失败留痕写在库里，所以重启后仍能回答「上次那批还欠哪几篇」，
+    并据此只补跑它们 —— 而不是把整批重跑一遍再烧一次配额。
+    """
+    d = _db()
+    rows = d.list_ai_failures(task=task, retryable_only=retryable_only,
+                              limit=limit)
+    return {"items": rows, "count": len(rows),
+            "retryable": sum(1 for r in rows if r.get("retryable"))}
+
+
+class RetryFailedIn(BaseModel):
+    dry_run: bool = True
+    concurrency: int = 3
+    rate: float = 0.0
+    retryable_only: bool = True
+    limit: int = Query(100, ge=1, le=1000)
+
+
+@app.post("/api/ai/retry-failed")
+def api_ai_retry_failed(req: RetryFailedIn):
+    """只重跑失败清单里的文章 —— 中断续跑的正确姿势。
+
+    retryable_only=True 时只挑「值得重试」的（429/超时/5xx）。
+    鉴权失败、模型名错误这类重试一万次也一样，直接跳过，
+    否则每次点「重试」都是白烧一轮额度还依然失败。
+    """
+    cfg = _cfg()
+    d = _db()
+    rows = d.list_ai_failures(task="summarize",
+                              retryable_only=req.retryable_only,
+                              limit=req.limit)
+    arts = []
+    for r in rows:
+        a = d.get_article(r["article_id"], with_html=False)
+        if a:
+            arts.append(a)
+    if not arts:
+        raise HTTPException(400, {
+            "message": "没有可重试的失败项"
+                       + ("（可重试清单为空；若是配置类失败，"
+                          "请先改 api_key / 模型名再试）" if req.retryable_only
+                          else ""),
+            "refused": True})
+    return {"selected": len(arts),
+            "article_ids": [a["id"] for a in arts],
+            "preview": [{"id": a["id"], "title": a.get("title")}
+                        for a in arts[:20]],
+            "dry_run": req.dry_run,
+            "note": "把 article_ids 交给批量摘要接口的 ids 参数即可只跑这些"}
 
 
 @app.post("/api/ai/summarize-batch")

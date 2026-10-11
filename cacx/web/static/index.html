@@ -437,6 +437,18 @@
            margin-top:6px;padding:6px 9px;border:1px solid #6a4a1a;
            border-radius:6px"></div>
 
+      <div id="bg_failbox" style="display:none;margin-top:12px">
+        <div class="row" style="margin-bottom:6px">
+          <span style="font-size:12.5px;color:#d98">⚠ 失败清单（跨服务重启保留）</span>
+          <div class="grow"></div>
+          <button class="btn" style="padding:2px 9px;font-size:11.5px"
+            onclick="loadFailures()">刷新</button>
+          <button class="btn" id="bg_retry" style="padding:2px 9px;font-size:11.5px"
+            onclick="retryFailed()">⟳ 仅重试可重试项</button>
+        </div>
+        <div id="bg_fail_list" style="font-size:12px;max-height:220px;overflow:auto"></div>
+      </div>
+
       <div id="bg_progress" style="display:none;margin-top:12px">
         <div class="row" style="margin-bottom:8px">
           <span id="bg_prog_txt" style="color:var(--dim);font-size:12.5px"></span>
@@ -869,6 +881,60 @@ async function backfillOne(id){
   }catch(e){ toast('补抓出错：'+e.message, true); }
 }
 
+/* 失败清单：写在库里，所以**服务重启后仍然可见** ——
+   批次进度（BATCH_JOBS）是内存 dict，一重启就没了。
+   没有这个清单，用户重启后就再也想不起来「上次那批还欠哪几篇」，
+   只能把整批重跑一遍 —— 已成功的虽会被 resume 跳过，
+   但那批没跑完的等待与排查成本全是白付。 */
+let BG_RETRY_IDS = [];
+
+async function loadFailures(){
+  try{
+    const r=await (await fetch('/api/ai/failures?task=summarize&limit=200')).json();
+    const box=$('bg_failbox');
+    if(!r.items.length){ box.style.display='none'; BG_RETRY_IDS=[]; return; }
+    box.style.display='block';
+    const retryable=r.items.filter(x=>x.retryable);
+    BG_RETRY_IDS=retryable.map(x=>x.article_id);
+    const btn=$('bg_retry');
+    btn.disabled = retryable.length===0;
+    btn.textContent = retryable.length
+      ? `⟳ 仅重试可重试项（${retryable.length}）` : '（无可重试项）';
+    $('bg_fail_list').innerHTML =
+      `<div style="color:var(--dim);margin-bottom:5px">共 ${r.items.length} 条，`
+      +`其中 ${retryable.length} 条可重试（限流/超时/服务端故障）；`
+      +`其余是配置或请求问题，重试无用，请先改 ai 配置。</div>`
+      + r.items.map(x=>{
+        const c = x.retryable? 'var(--warn)' : 'var(--err)';
+        return `<div style="padding:4px 0;border-top:1px solid var(--line)">`
+          +`<span style="color:${c}">[${x.retryable?'可重试':'不可重试'}]</span> `
+          +`${esc(x.title||x.article_id)}`
+          +`<div style="color:var(--dim);font-size:11.5px">${esc(x.error||'')}`
+          +`　${esc(x.created_at||'')}</div></div>`;
+      }).join('');
+  }catch(e){ /* 服务未起就静默 */ }
+}
+
+/* 只重跑可重试的失败项，不动整批。
+   关键在「只跑这些」：若只是把 limit 调小再点一次开始生成，
+   选取是按日期倒序的，失败项很可能压根排不上 —— 看起来点了没用，
+   实际上什么都没重试。 */
+async function retryFailed(){
+  try{
+    const r=await (await fetch('/api/ai/retry-failed',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({dry_run:true, retryable_only:true, limit:200})
+    })).json();
+    if(r.refused){ toast(r.detail?.message || r.message || '没有可重试项', true); return; }
+    if(!confirm(`将只重跑 ${r.selected} 篇「可重试」的失败文章。\n`
+      +'（其余失败项属配置问题，不会重试）\n\n先预览，确认后再点开始生成。')) return;
+    BG_PENDING_IDS = r.article_ids;
+    $('bg_state').textContent = '已选定 '+r.selected+' 篇失败项，请点「预览」确认';
+    $('bg_state').style.color='var(--warn)';
+    document.querySelector('#v_ai').scrollIntoView({behavior:'smooth'});
+  }catch(e){ toast('重试失败：'+e.message, true); }
+}
+
 async function detail(id){
   const a=await (await fetch('/api/article/'+id)).json();
   const ai=a.ai&&a.ai.summarize;
@@ -967,7 +1033,7 @@ function showTab(t){
   }
   if(t==='panel') loadPanel();
   if(t==='set') loadCfg();
-  if(t==='ai'){ loadAiBadge(); loadAnns(); loadBatchSites(); }
+  if(t==='ai'){ loadAiBadge(); loadAnns(); loadBatchSites(); loadFailures(); }
   if(t==='sync'){ loadSyncSites(); loadRuns(); loadSitesList(); pollSync(); }
 }
 
@@ -1383,6 +1449,9 @@ function exportAnns(){
 let BG_TIMER=null;
 let BG_JOB_ID=null;
 let BG_LOG_DONE=0;
+/* 「仅重试失败项」用：非 null 时，下一次批量只跑这些 id，
+   忽略站点/日期/limit。null = 走正常的筛选逻辑。 */
+let BG_PENDING_IDS=null;
 
 async function loadBatchSites(){
   // 站点多选来自 /api/sites（注册表），只列启用的；空 = 全部启用站点。
@@ -1628,6 +1697,16 @@ async function pgExecute(){
 }
 
 function collectBatchBody(dry_run){
+  // 「仅重试失败项」模式：只提交点名的那几篇
+  if(BG_PENDING_IDS && BG_PENDING_IDS.length){
+    return {
+      ids: BG_PENDING_IDS, sites: [], date_from: '', date_to: '',
+      column: '', mode: 'incremental', limit: BG_PENDING_IDS.length,
+      concurrency: Math.max(1, parseInt($('bg_conc').value)||3),
+      rate: parseFloat($('bg_rate').value)||0,
+      resume: false, stop_on_error: false, dry_run: !!dry_run
+    };
+  }
   const sites=[...document.querySelectorAll('.bg_site_cb:checked')].map(cb=>cb.value);
   const mode_el=document.querySelector('input[name=bg_mode]:checked');
   return {
@@ -1708,6 +1787,11 @@ function pollBatch(){
         // 完成后刷新统计与列表，让用户立刻看到新增摘要
         $('ai_stats').dataset.done='';
         loadAiBadge(); loadAnns();
+        // 批次结束 → 失败清单已经变了，重新拉一次
+        loadFailures();
+        // 「仅重试失败项」是一次性模式，跑完即失效，
+        // 否则下一次普通批量会被旧 id 劫持（用户明明没勾那些文章）。
+        BG_PENDING_IDS=null;
         $('bg_state').style.color = j.error ? 'var(--err)' : 'var(--ok)';
         $('bg_state').textContent = j.error
           ? ('出错停止：'+j.error)
