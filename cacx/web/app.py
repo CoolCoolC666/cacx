@@ -427,11 +427,69 @@ class BatchReq(BaseModel):
     mode: Literal["incremental", "full"] = "incremental"
 
 
+def _same_source_groups(cfg: Dict[str, Any]) -> Dict[str, List[str]]:
+    """按 base_url 把站点分组，返回 {base_url: [code, ...]}（只含 2+ 个的）。
+
+    为什么需要它：可以给同一个网站配多个站点 code（内置的 zjwx +
+    自定义的 zjwx-api 都是 www.zjwx.gov.cn）。它们抓到的是**同一批稿件**，
+    同时勾选入库会产生：
+      · 同一篇文章在库里出现两行（跨站同名标题已实测 10 条）
+      · 批量摘要对同一篇跑两次 —— 重复烧 AI 配额
+      · 计数口径失真（模拟：zjwx-api 同步后 28999 → 34716）
+    所以批量摘要与同步都要能识别并提示这组。
+    """
+    from .. import sites as S
+    groups: Dict[str, List[str]] = {}
+    for code, src in (S.all_sites(cfg) or {}).items():
+        if not (src or {}).get("enabled", True):
+            continue
+        base = str((src or {}).get("base_url", "") or "").rstrip("/")
+        if base:
+            groups.setdefault(base, []).append(code)
+    return {b: c for b, c in groups.items() if len(c) > 1}
+
+
+def _warn_same_source(cfg: Dict[str, Any], sites_list: List[str]) -> List[Dict]:
+    """挑出本次涉及「同源多 code」的组，给界面一句人话提醒。
+
+    ⚠ 只看**启用中**的站点。用户把 zjwx-api 停用之后，它根本不参与
+    同步，此时再提示「同源重复」就是误报 —— 而误报会训练用户忽略这条
+    提示，真出事时也就一起忽略了。
+    """
+    from .. import sites as S
+    allsrc = S.all_sites(cfg) or {}
+    enabled = {c for c, s in allsrc.items()
+               if (s or {}).get("enabled", True)}
+    groups = _same_source_groups(cfg)
+    out = []
+    for base, codes in groups.items():
+        hit = [c for c in codes if c in sites_list and c in enabled]
+        if len(hit) > 1:
+            names = [f"{(allsrc.get(c) or {}).get('name') or c}({c})"
+                     for c in hit]
+            out.append({"base_url": base, "codes": hit, "names": names,
+                        "note": f"这几个站点指向同一个站 {base}，"
+                                "抓到的是同一批稿件；同时处理会重复入库、"
+                                "重复消耗 AI 配额。建议只留一个。"})
+    return out
+
+
 def _select_batch_articles(d, cfg: Dict[str, Any], req: BatchReq):
     """
     按站点逐站 search 再合并（db.search 只支持单 site 参数）。
-    limit 口径：每站各取 limit 条，合并去重后不二次截断 —— 站点数量天然有限，
-    这样每个站在批次里都有同等候选名额，不会被单一大站挤光。
+
+    limit 口径（2026-10-11 改）：
+        原来是**每站各取 limit 条**，合并后不二次截断 ——
+        界面上写着「最多条数 10」、勾了 2 个站，实际产出 20 条，
+        用户看到的数字和控件含义对不上（实测踩到）。
+        现在改为**全局上限**：各站按日期倒序取 limit 条，
+        合并去重后按 (日期, id) 排序再截到 limit。
+        每站仍然平等地拿到候选名额（不会被单一大站挤光），
+        但**产出总数 = 用户填的数**，控件含义与行为一致。
+
+    ⚠ 跨站去重按 article id 不够：同源的两个 site code 入库后
+      article id 不同，必须再按 url / 标题去一次，否则同一篇稿件
+      仍会被摘要两次。
 
     增量过滤为什么放在选文章这一步：
       run_batch 的 resume 是「提交线程池之前的兜底过滤」，发生在它内部；但前端
@@ -456,10 +514,31 @@ def _select_batch_articles(d, cfg: Dict[str, Any], req: BatchReq):
                 continue
             seen.add(it["id"])
             merged.append(it)
+
+    # 跨站去重：同一篇稿件可能被多个 site code 各存一行。
+    # article id 不同，所以要按 url 去；url 也可能因参数差异不同，
+    # 再用「标题+日期」兜一层。只留每组的第一条（按日期倒序时靠前的）。
+    by_key, dedup = {}, []
+    for it in merged:
+        key = (str(it.get("url") or "").rstrip("/").lower()
+               or str(it.get("title") or "").strip() + "|"
+               + str(it.get("pub_date") or "")[:10])
+        if key in by_key:
+            continue
+        by_key[key] = it["id"]
+        dedup.append(it)
+    merged = dedup
+
     if req.mode == "incremental":
         # 主线程单连接下 get_annotation 无锁直查是安全的（db 层已核对）
         merged = [it for it in merged
                   if d.get_annotation(it["id"], "summarize") is None]
+
+    # 全局截断：按日期倒序，让「每站平权」与「总数可控」同时成立
+    merged.sort(key=lambda it: (str(it.get("pub_date") or ""), it["id"]),
+                reverse=True)
+    if req.limit and len(merged) > req.limit:
+        merged = merged[:req.limit]
     return sites_list, merged
 
 
@@ -532,6 +611,10 @@ def api_ai_summarize_batch(req: BatchReq):
     if not merged:
         raise HTTPException(400, "没有可选到文章（换站点/时间范围，或调大 limit）")
 
+    # 同源站点提示：zjwx 与 zjwx-api 指向同一个 base_url，
+    # 同时勾上会让同一批稿件重复处理。前端要能显示出来。
+    same_src = _warn_same_source(cfg, sites_list)
+
     job_id = uuid.uuid4().hex
     with BATCH_LOCK:
         BATCH_JOBS[job_id] = {
@@ -543,6 +626,9 @@ def api_ai_summarize_batch(req: BatchReq):
                          "skipped": 0, "total": len(merged)},
             "summary": None, "error": "", "logs": [],
             "dry_run": req.dry_run, "sites": sites_list,
+            "same_source": same_src,
+            # 把口径说清楚，省得用户对着「10」和「20」猜
+            "limit": req.limit,
         }
     # 传副本：后台线程不能引用会被 /api/config 改写的 CFG（与 _sync_worker 同因）
     cfg_snapshot = json.loads(json.dumps(cfg))
@@ -550,7 +636,8 @@ def api_ai_summarize_batch(req: BatchReq):
                          args=(job_id, cfg_snapshot, req), daemon=True)
     t.start()
     return {"job_id": job_id, "started": True, "total": len(merged),
-            "mode": req.mode, "dry_run": req.dry_run}
+            "mode": req.mode, "dry_run": req.dry_run,
+            "limit": req.limit, "same_source": same_src}
 
 
 @app.get("/api/ai/summarize-batch/{job_id}")
@@ -678,6 +765,43 @@ def api_sync_start(
             bad = [s for s in site_list if s not in known]
             if bad:
                 raise HTTPException(400, f"未知站点: {bad}")
+            # 同源站点拦截：同一站配了多个 code（zjwx + zjwx-api）时，
+            # 同时同步会把同一批稿件**各存一行**，之后再也无法靠
+            # (site,url) 唯一约束合并掉 —— 因为 url 相同但 site 不同。
+            # 这是重复入库的源头，比在摘要阶段拦更早、更干净。
+            dup_src = _warn_same_source(_cfg(), site_list)
+            if dup_src:
+                names = "、".join(dup_src[0]["names"])
+                raise HTTPException(400, {
+                    "message": f"{names} 指向同一个站（{dup_src[0]['base_url']}），"
+                               "同时同步会把同一批稿件重复入库。"
+                               "请只勾选其中一个。",
+                    "same_source": dup_src, "refused": True})
+        else:
+            # 走默认（全部启用站点）同样会撞上同源 —— 用户没勾选，
+            # 但 zjwx-api 处于启用状态就会被一并同步。
+            # 这里不硬拦（那会变成「一个都没勾就同步失败」的反直觉），
+            # 改成自动剔除同源的后来者，并在日志里说明。
+            from .. import sites as S
+            cfg_now = _cfg()
+            eff = list(S.enabled_codes(cfg_now))
+            drop = {}
+            for base, codes in _same_source_groups(cfg_now).items():
+                if len(codes) > 1:
+                    for c in codes[1:]:
+                        drop[c] = codes[0]
+            if drop:
+                eff = [c for c in eff if c not in drop]
+                for c, keep in sorted(drop.items()):
+                    _sync_log(f"⚠ 已自动跳过同源重复站点 {c}"
+                              f"（它与 {keep} 指向同一个网站，"
+                              f"同时同步会把同一批稿件存成两行）")
+
+        # 显式勾选时 site_list 原样传；默认路径用剔除同源后的 eff。
+        # ⚠ 这一步必须真的把 eff 传下去 —— 上面算 eff 只是为了生成日志，
+        # 若仍传 site_list（None），后台又会把 zjwx-api 一并同步，
+        # 「自动跳过同源」就成了一句空话。
+        run_sites = site_list or eff
 
         ds = de = None
         if year:
@@ -688,23 +812,26 @@ def api_sync_start(
 
         SYNC_STATE.update({
             "running": True, "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "finished_at": "", "mode": mode, "sites": site_list or ["全部"],
+            "finished_at": "", "mode": mode,
+            "sites": run_sites if site_list else ["全部"],
             "year": year or f"{from_year or ''}~{to_year or ''}",
             "logs": [], "error": "", "cancel_requested": False,
             "totals": {"listed": 0, "new": 0, "failed": 0},
         })
     _sync_log(f"开始同步：模式 {mode}"
               + (f"，年份 {year}" if year else "")
-              + (f"，站点 {','.join(site_list)}" if site_list else "，全部站点"))
+              + (f"，站点 {','.join(site_list)}" if site_list
+                 else f"，全部站点（已剔除同源：{','.join(run_sites)}）"))
 
     # 传副本：后台线程不能引用服务里那份会被 /api/config 改写的 CFG
     cfg_snapshot = json.loads(json.dumps(_cfg()))
     t = threading.Thread(target=_sync_worker,
-                         args=(cfg_snapshot, site_list, mode, ds, de, limit),
+                         args=(cfg_snapshot, run_sites, mode, ds, de, limit),
                          daemon=True)
     t.start()
     return {"started": True, "mode": mode, "year": year or None,
-            "sites": site_list or "all"}
+            "sites": run_sites if site_list else "all",
+            "effective_sites": run_sites}
 
 
 @app.get("/api/sync/status")

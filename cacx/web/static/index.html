@@ -418,7 +418,8 @@
           <input type="date" id="bg_to" style="width:150px">
         </label>
         <div class="row">
-          <label>最多条数 <input type="number" id="bg_limit" value="10" min="1" style="width:90px"></label>
+          <label>最多条数 <input type="number" id="bg_limit" value="10" min="1" style="width:90px">
+          <span style="color:var(--dim);font-size:11.5px">本批次总数上限（多站合计，不是每站各 N 条）</span></label>
           <label>并发 <input type="number" id="bg_conc" value="3" min="1" style="width:80px"></label>
           <label>限速（秒/篇，0 = 不限）
             <input type="number" id="bg_rate" value="0" min="0" step="0.1" style="width:80px">
@@ -432,6 +433,9 @@
           <span id="bg_state" style="color:var(--dim);font-size:12.5px"></span>
         </div>
       </div>
+      <div id="bg_dup" style="display:none;font-size:12px;color:var(--warn);
+           margin-top:6px;padding:6px 9px;border:1px solid #6a4a1a;
+           border-radius:6px"></div>
 
       <div id="bg_progress" style="display:none;margin-top:12px">
         <div class="row" style="margin-bottom:8px">
@@ -1387,6 +1391,18 @@ async function loadBatchSites(){
     const wrap=$('bg_sites');
     if(wrap.dataset.loaded) return;
     const r=await (await fetch('/api/sites')).json();
+    // 先按 base_url 分组，给同源的站点打标 ——
+    // 用户在勾选**之前**就该知道这两个抓到的是同一批稿件，
+    // 等跑完才提示就晚了（而且可能已经烧了配额）。
+    const byBase={};
+    for(const s of (r.items||[])){
+      if(!s.enabled) continue;
+      const b=(s.base_url||'').replace(/\/+$/,'');
+      (byBase[b]=byBase[b]||[]).push(s.code);
+    }
+    const dupCodes=new Set();
+    for(const b in byBase){ if(byBase[b].length>1) byBase[b].forEach(c=>dupCodes.add(c)); }
+
     wrap.innerHTML='';
     for(const s of (r.items||[])){
       if(!s.enabled) continue;
@@ -1397,9 +1413,19 @@ async function loadBatchSites(){
         'background:var(--panel2);display:flex;align-items:center;gap:5px;cursor:pointer';
       const cb=document.createElement('input');
       cb.type='checkbox'; cb.className='bg_site_cb'; cb.value=s.code;
-      lab.appendChild(cb);
-      lab.appendChild(document.createTextNode(
-        (s.name||s.code)+(s.builtin?'':' ★')));
+      if(dupCodes.has(s.code)){
+        lab.style.borderColor='#8a6a2a';
+        lab.style.color='var(--warn)';
+        cb.addEventListener('change', bgDupHint);
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(
+          (s.name||s.code)+(s.builtin?'':' ★')+' ⧉'));
+        lab.title='⚠ 与其它已选站点指向同一个网站，抓到的是同一批稿件';
+      }else{
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(
+          (s.name||s.code)+(s.builtin?'':' ★')));
+      }
       wrap.appendChild(lab);
     }
     wrap.dataset.loaded='1';
@@ -1419,6 +1445,29 @@ async function loadBatchSites(){
 
 function bgSiteAll(v){
   document.querySelectorAll('.bg_site_cb').forEach(cb=>{ cb.checked=!!v; });
+  bgDupHint();
+}
+
+/* 勾了同源站点时立刻提醒。
+   放在勾选这一刻而不是运行那一刻，是因为配额是跑起来才烧的 ——
+   事后再提示就只是「告知损失已经发生」。 */
+function bgDupHint(){
+  const el=$('bg_dup'); if(!el) return;
+  const picked=[...document.querySelectorAll('.bg_site_cb:checked')].map(c=>c.value);
+  // 同源信息已渲染成 ⧉ 标记，这里按 data 找
+  const dup=[];
+  document.querySelectorAll('.bg_site_cb').forEach(cb=>{
+    if(cb.checked && cb.parentElement && cb.parentElement.textContent.includes('⧉'))
+      dup.push(cb.value);
+  });
+  if(dup.length>1){
+    el.style.display='';
+    el.innerHTML='⚠ 已勾选的 <b>'+dup.join('、')+
+      '</b> 指向同一个网站，抓到的是同一批稿件。'+
+      '已按 URL 去重，但为免计数混乱与重复消耗配额，建议只勾其中一个。';
+  }else{
+    el.style.display='none';
+  }
 }
 
 /* ============================================================
@@ -1619,6 +1668,17 @@ async function startBatch(dry_run){
       $('bg_state').style.color='var(--err)';
       resetBatchBtns();
       return;
+    }
+    // 同源站点提醒：zjwx 与 zjwx-api 指向同一个网站，
+    // 抓到的是同一批稿件 —— 用户看不到就只会觉得「数字怎么对不上」。
+    if(r.same_source && r.same_source.length){
+      const w=r.same_source[0];
+      $('bg_state').innerHTML =
+        '⚠ '+esc(w.names.join('、'))+' 指向同一个站' +
+        '（<a href="'+esc(w.base_url)+'" target="_blank" rel="noopener">'
+        + esc(w.base_url)+'</a>），抓到的是同一批稿件。'+
+        '<br><span style="font-size:12px">同时处理会重复入库、重复消耗 AI 配额，建议只勾一个。</span>';
+      $('bg_state').style.color='var(--warn)';
     }
     BG_JOB_ID=r.job_id;
     $('bg_state').textContent =
