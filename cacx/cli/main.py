@@ -516,6 +516,18 @@ def _pick_articles(cfg, d, args, site_list):
         合并去重后再按 pub_day 倒序截到 limit。即「每站候选上限 = limit」，
         最终总量仍被 limit 截断，不会因为多站点悄悄把 AI 配额翻 N 倍。
       · 单站 / 不指定站：行为与改造前完全一致。
+
+    mode 语义（选文章阶段的开关，与 --resume 独立）：
+      · incremental（默认）：--all-missing 走「x.id IS NULL」天然增量 SQL；
+        条件检索分支在合并去重后再用 get_annotation 剔掉已有 summarize 摘要
+        的文章。为什么在选文章这步就剔：run_batch 的 total 分母按选中篇数写，
+        这里不剔会把「注定被跳过」的文章算进进度条分母。
+      · full：--all-missing 摘掉 x.id IS NULL（全部有正文的都纳入）；条件
+        检索分支不过滤 —— 本来就是要重生成已有摘要的文章。
+      · --resume 是 run_batch 提交线程池前的兜底过滤，与本处是两道独立闸：
+        mode 管「选文章时算不算它」，--resume 管「真跑时再跳一次」。full
+        模式下想跳过已有的，就 --mode full --resume 组合用，双重过滤无害
+        （resume 只会看到 skipped=0）。
     """
     if args.id:
         a = d.get_article(args.id)
@@ -524,16 +536,21 @@ def _pick_articles(cfg, d, args, site_list):
         return d.recent_articles(args.recent)
     if args.all_missing:
         sql = ("SELECT a.id FROM articles a LEFT JOIN ai_annotations x "
-               "ON x.article_id=a.id AND x.task='summarize' "
-               "WHERE x.id IS NULL")
+               "ON x.article_id=a.id AND x.task='summarize' ")
+        conds: list = []
+        if args.mode != "full":
+            # incremental：天然增量，SQL 里就只挑还没有摘要的
+            conds.append("x.id IS NULL")
         params: list = []
         if site_list:
             # search 封装不支持多站，这里补一段裸 SQL 的 IN 过滤；
             # 站点代码来自 sites.enabled_codes / 用户手填，用占位符传值防注入
-            sql += (" AND a.site IN ("
-                    + ",".join("?" for _ in site_list) + ")")
+            conds.append("a.site IN ("
+                        + ",".join("?" for _ in site_list) + ")")
             params.extend(site_list)
-        sql += " ORDER BY a.pub_day DESC LIMIT ?"
+        if conds:
+            sql += "WHERE " + " AND ".join(conds) + " "
+        sql += "ORDER BY a.pub_day DESC LIMIT ?"
         params.append(args.limit)
         with d._lock:
             ids = [r["id"] for r in d.conn.execute(sql, params).fetchall()]
@@ -545,22 +562,28 @@ def _pick_articles(cfg, d, args, site_list):
                      date_from=args.date_from or "", date_to=args.date_to or "",
                      sort="date_desc", limit=args.limit,
                      min_fts_chars=cfg["search"]["min_fts_chars"])
-        return [d.get_article(i["id"]) for i in r["items"]]
-    seen, merged = set(), []
-    for s in site_list:
-        r = d.search(q=args.query or "", site=s,
-                     column_name=args.column or "", year=args.year or "",
-                     date_from=args.date_from or "", date_to=args.date_to or "",
-                     sort="date_desc", limit=args.limit,
-                     min_fts_chars=cfg["search"]["min_fts_chars"])
-        for it in r["items"]:
-            if it["id"] in seen:
-                continue
-            seen.add(it["id"])
-            merged.append(it)
-    merged.sort(key=lambda it: it.get("pub_day") or "", reverse=True)
-    merged = merged[:args.limit]
-    return [d.get_article(i["id"]) for i in merged]
+        items = list(r["items"])
+    else:
+        seen, merged = set(), []
+        for s in site_list:
+            r = d.search(q=args.query or "", site=s,
+                         column_name=args.column or "", year=args.year or "",
+                         date_from=args.date_from or "", date_to=args.date_to or "",
+                         sort="date_desc", limit=args.limit,
+                         min_fts_chars=cfg["search"]["min_fts_chars"])
+            for it in r["items"]:
+                if it["id"] in seen:
+                    continue
+                seen.add(it["id"])
+                merged.append(it)
+        merged.sort(key=lambda it: it.get("pub_day") or "", reverse=True)
+        items = merged[:args.limit]
+    if args.mode != "full":
+        # incremental：合并去重后剔掉已有摘要的文章。改造前这一支不过滤，是
+        # 语义缺口（条件检索会把已有摘要的文章也卷进来烧配额），现在补上。
+        items = [it for it in items
+                 if d.get_annotation(it["id"], "summarize") is None]
+    return [d.get_article(i["id"]) for i in items]
 
 
 def cmd_ai(args):
@@ -613,7 +636,8 @@ def cmd_ai(args):
     print(f"选中 {len(arts)} 篇"
           + (f"（并发 {args.concurrency}"
              + (f"，限速 {args.rate}/s" if args.rate > 0 else "")
-             + (f"，resume" if args.resume else "") + "）"))
+             + (f"，resume" if args.resume else "")
+             + f"，mode={args.mode}）"))
     print("=" * 60)
 
     # 真跑前先探一下 AI 是否就绪：build 返回 None（provider=none 等）时
@@ -672,6 +696,10 @@ def cmd_ai(args):
     # 收尾汇总
     print(f"\n成功 {summary['ok']}  失败 {summary['fail']}  "
           f"跳过 {summary['skipped']}  共 {summary['total']}")
+    if args.mode == "full" and not args.resume:
+        # 全量模式选文章阶段不过滤已有摘要，收尾再提一句，免得用户没意识到
+        # 这次把旧摘要也重跑了一遍（想跳过已有的：--mode full --resume）
+        print("提示：全量模式会重新生成已有摘要的文章")
     failures = summary.get("failures") or []
     if failures:
         if args.export_failures:
@@ -855,6 +883,10 @@ def build_parser():
     spsum.add_argument("--stop-on-error", action="store_true")
     spsum.add_argument("--resume", action="store_true",
                        help="跳过已有 summarize annotation 的文章（断点续跑）")
+    spsum.add_argument("--mode", default="incremental",
+                       choices=["incremental", "full"],
+                       help="incremental=只处理尚无摘要的（默认）；"
+                            "full=全部符合条件重新生成（含已有摘要）")
     spsum.add_argument("--rate", type=float, default=0.0,
                        help="每秒最多 AI 调用次数（0=不限速，避免触发供应商限流）")
     spsum.add_argument("--concurrency", type=int, default=3,

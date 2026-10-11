@@ -33,6 +33,7 @@ MCP 客户端配置示例（对接文档 §5.4）：
 from __future__ import annotations
 
 import contextlib
+import copy
 from typing import Any, Dict, List, Optional
 
 from mcp.server.mcpserver import MCPServer
@@ -246,6 +247,42 @@ def cacx_list_links(
         return _err(e)
 
 
+@mcp.tool()
+def cacx_ai_status() -> Dict[str, Any]:
+    """
+    AI 配置概览（只读）。
+
+    返回 AI 供应商 / 模型 / 就绪状态等摘要。密钥**绝不回显明文**：
+    只给 has_key(bool) 与 key_masked（C.mask_secret 掩码，只露末 4 位）。
+    不复用 ai.base.status 的 api_key 字段（其 _mask 对短 key 会返回
+    「（未设置）」占位串，且字段名/口径与本工具约定不同），这里自己组装。
+
+    返回：{enabled, provider, model, base_url, ready,
+           has_key, key_masked, timeout, max_tokens, tasks}
+    """
+    try:
+        from .ai import base as AIbase
+        cfg = _get_cfg()
+        ai = cfg.get("ai") or {}
+        st = AIbase.status(cfg)
+        # key 只用于算 has_key / 掩码，绝不把原值塞进返回
+        key = ai.get("api_key") or ""
+        return {
+            "enabled": bool(ai.get("enabled", False)),
+            "provider": ai.get("provider", "none"),
+            "model": ai.get("model", ""),
+            "base_url": ai.get("base_url", ""),
+            "ready": bool(st.get("ready")),
+            "has_key": bool(key),
+            "key_masked": C.mask_secret(key),
+            "timeout": int(ai.get("timeout", 60)),
+            "max_tokens": int(ai.get("max_tokens", 2000)),
+            "tasks": ai.get("tasks", {}),
+        }
+    except Exception as e:
+        return _err(e)
+
+
 # ================================================================ 2. 写 / 花钱（在后）
 @mcp.tool()
 def cacx_sync(
@@ -336,6 +373,226 @@ def cacx_summarize(article_id: int, dry_run: bool = True) -> Dict[str, Any]:
             "dry_run": bool(dry_run),
             "result": result,
         }
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def cacx_summarize_batch(
+    sites: Optional[List[str]] = None,
+    date_from: str = "",
+    date_to: str = "",
+    column: str = "",
+    mode: str = "incremental",
+    limit: int = 10,
+    concurrency: int = 3,
+    rate: float = 0.0,
+    resume: bool = False,
+    stop_on_error: bool = False,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """
+    批量给文章生成摘要（**默认只预览不真调 AI**，烧配额工具）。
+
+    ⚠ mode 与 resume 的关系（与 web/CLI 语义一致）：
+        · mode="incremental"（默认）：选文章阶段就在主线程过滤掉已有
+          summarize annotation 的文章（d.get_annotation 判断）——这些文章
+          根本不进批次，total 里就不含它们，skipped 计数含之。
+        · mode="full"：选文章阶段不过滤，全部符合条件的文章都进批次；
+          是否跳过已有摘要交给 run_batch 内部的 resume 参数决定。
+        · resume=True 是 run_batch 自己的「断点续跑」开关（提交线程池前
+          在主线程再筛一遍 annotation）。incremental 下它是双保险；
+          full 下它才是主过滤器。
+
+    ⚠ 线程模型（run_batch 自己管）：选文章 / 增量过滤都在本工具的主线程
+      串行做（本工具是同步 def，天然主线程）；run_batch 内部才开线程池
+      并发 AI 网络调用，落库仍回主线程串行。本工具不要再开线程。
+
+    参数：
+        sites:       指定站点 code 列表；None=全部启用站点。
+        date_from/date_to: pub_day 闭区间 YYYY-MM-DD。
+        column:      栏目名模糊匹配。
+        mode:        incremental（默认）/ full。
+        limit:       每站最多选多少条（合并去重后不二次截断）。
+        concurrency: AI 并发数。
+        rate:        每秒最多 AI 调用次数（0=不限速）。
+        resume:      断点续跑（跳过已有摘要）。
+        stop_on_error: 遇到首个错误就停。
+        dry_run:     True（默认）只预览第一篇，不真调 AI、不写库。
+
+    返回：{dry_run, mode, total, ok, fail, skipped, failures, 可选 preview}
+    """
+    try:
+        from .ai.batch import run_batch
+        cfg = _get_cfg()
+        mode = mode if mode in ("incremental", "full") else "incremental"
+        sites_list = list(sites) if sites else list(S.enabled_codes(cfg))
+
+        with _db() as d:
+            # 逐站 search 合并去重（db.search 只支持单 site）——照 web
+            # _select_batch_articles：每站各取 limit 条，合并后不二次截断。
+            seen, merged_ids = set(), []
+            for s in sites_list:
+                r = d.search(
+                    q="", site=s, column_name=column,
+                    date_from=date_from, date_to=date_to,
+                    sort="date_desc", limit=int(limit),
+                    min_fts_chars=int((cfg.get("search") or {}).get("min_fts_chars", 3)))
+                for it in r.get("items") or []:
+                    if it["id"] in seen:
+                        continue
+                    seen.add(it["id"])
+                    merged_ids.append(it["id"])
+
+            # incremental：主线程过滤掉已有摘要的文章（见 run_batch 线程模型注释）
+            pre_filtered = 0
+            picked_ids = []
+            for aid in merged_ids:
+                if mode == "incremental" and \
+                        d.get_annotation(aid, "summarize") is not None:
+                    pre_filtered += 1
+                    continue
+                picked_ids.append(aid)
+
+            arts = [a for a in (d.get_article(aid) for aid in picked_ids)
+                    if a is not None]
+
+            summary = run_batch(
+                cfg, d, arts,
+                dry_run=bool(dry_run),
+                concurrency=int(concurrency),
+                rate=float(rate),
+                resume=bool(resume),
+                stop_on_error=bool(stop_on_error))
+
+        out = dict(summary)
+        out["mode"] = mode
+        # 选择阶段过滤掉的并入 skipped，保证 total + skipped ≈ 候选数
+        out["skipped"] = out.get("skipped", 0) + pre_filtered
+        return out
+    except Exception as e:
+        return _err(e)
+
+
+# 写盘前必须读磁盘原文的原因（docs/工程留痕.md §9 两次洗 key 事故）：
+#   历史上有两次自检/批量任务把用户真实 MiniMax key 洗空——根因都是拿
+#   「服务启动时的内存快照」改完就 save()，而快照是在用户后来通过 Web
+#   填 key 之前拍的，save 一写就把 Web 刚填的 key 覆盖回了旧的空值。
+#   所以任何写盘动作都必须当场重读磁盘原文，再在原文上逐字段改。
+#   测试通过 monkeypatch _load_cfg_fresh 注入临时 cfg，绝不真碰 settings.json。
+def _load_cfg_fresh() -> Dict[str, Any]:
+    """写盘用：重读磁盘原文。生产走 C.load()；测试可覆盖本函数。"""
+    if _CFG_OVERRIDE is not None:
+        return copy.deepcopy(_CFG_OVERRIDE)
+    return C.load()
+
+
+@mcp.tool()
+def cacx_ai_config(
+    provider: str = "",
+    base_url: str = "",
+    model: str = "",
+    api_key: str = "",
+    timeout: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+    enabled: Optional[bool] = None,
+    clear_key: bool = False,
+    dry_run: bool = True,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """
+    编辑 AI 配置（B 端写盘操作，**双闸门防误触**）。
+
+    ⚠ 双闸门：
+        · dry_run=True（默认）：只预览 would_change 对照，绝不写盘。
+        · dry_run=False + confirm=False：仍不写盘，返回 confirm_required=True，
+          提示「需要 confirm=true 才写盘」。
+        · 只有 dry_run=False 且 confirm=True 才真写盘。
+
+    ⚠ 密钥三态（照 web /api/config ConfigIn）：
+        · api_key 留空（默认）= 不修改；
+        · api_key 非空      = 覆盖；
+        · clear_key=True    = 清空（先判 clear 再判非空——哨兵法有个真实的
+          坑：万一哪天有合法 key 恰好以哨兵前缀开头，就会被无声清掉）。
+
+    ⚠ 写盘前必做：C.load() 重读磁盘原文，再逐字段 set_path——见上面
+      _load_cfg_fresh 的事故注释，绝不能拿内存快照直接 save。
+
+    字段白名单：provider / base_url / model / api_key / timeout / max_tokens /
+    enabled。provider 限 none / openai_compat / ollama。
+
+    返回（预览）：{dry_run:true, would_change:[{field,old/new 或 old_masked/new_masked}], changes:n}
+    返回（需确认）：{dry_run:false, confirm_required:true, ...}
+    返回（已写盘）：{saved:true, changed:[字段名], has_key, key_masked}
+    """
+    try:
+        P = "ai."
+        # 字段 -> (dotted path, 是否密钥)
+        changes: List[Dict[str, Any]] = []   # {field, path, old, new, secret}
+        disk_cfg = _load_cfg_fresh()
+
+        def add_change(field: str, path: str, new, secret: bool):
+            old = C.get_path(disk_cfg, path)
+            if old == new:
+                return  # 没变，不入清单
+            changes.append({"field": field, "path": path,
+                            "old": old, "new": new, "secret": secret})
+
+        if provider:
+            if provider not in ("none", "openai_compat", "ollama"):
+                return {"error": "provider 只能是 none / openai_compat / ollama"}
+            add_change("provider", P + "provider", provider, False)
+        if base_url:
+            add_change("base_url", P + "base_url", base_url, False)
+        if model:
+            add_change("model", P + "model", model, False)
+        # 密钥三态：先判 clear，再判非空（照 web ConfigIn 注释理由）
+        if clear_key:
+            add_change("api_key", P + "api_key", "", True)
+        elif api_key:
+            add_change("api_key", P + "api_key", api_key, True)
+        if timeout is not None:
+            add_change("timeout", P + "timeout", int(timeout), False)
+        if max_tokens is not None:
+            add_change("max_tokens", P + "max_tokens", int(max_tokens), False)
+        if enabled is not None:
+            add_change("enabled", P + "enabled", bool(enabled), False)
+
+        # 构造 would_change 对照；密钥一律掩码，绝不回显明文
+        would_change = []
+        for ch in changes:
+            if ch["secret"]:
+                old_m = C.mask_secret(ch["old"] or "")
+                new_m = C.mask_secret(ch["new"]) if ch["new"] else "(已清空)"
+                would_change.append({"field": ch["field"],
+                                     "old_masked": old_m,
+                                     "new_masked": new_m})
+            else:
+                would_change.append({"field": ch["field"],
+                                     "old": ch["old"], "new": ch["new"]})
+
+        # 闸门 1：dry_run 默认开，只预览
+        if dry_run:
+            return {"dry_run": True, "confirm_required": False,
+                    "would_change": would_change, "changes": len(changes)}
+
+        # 闸门 2：confirm 默认关，仍不写盘
+        if not confirm:
+            return {"dry_run": False, "confirm_required": True,
+                    "message": "需要 confirm=true 才写盘（双闸门防误触）",
+                    "would_change": would_change, "changes": len(changes)}
+
+        # 真写盘：在磁盘原文上逐字段改（_load_cfg_fresh 已重读）
+        for ch in changes:
+            C.set_path(disk_cfg, ch["path"], ch["new"])
+        C.save(disk_cfg)
+
+        ai = disk_cfg.get("ai") or {}
+        key = ai.get("api_key") or ""
+        return {"saved": True,
+                "changed": [ch["field"] for ch in changes],
+                "has_key": bool(key),
+                "key_masked": C.mask_secret(key)}
     except Exception as e:
         return _err(e)
 

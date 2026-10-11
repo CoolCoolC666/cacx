@@ -13,6 +13,7 @@ cacx MCP server 离线回归测试
 """
 
 import asyncio
+import copy
 import json
 import shutil
 import sys
@@ -42,9 +43,13 @@ def section(t):
 REQUIRED_TOOLS = [
     "cacx_search", "cacx_get_article", "cacx_list_sites",
     "cacx_facets", "cacx_stats", "cacx_list_links",
-    "cacx_sync", "cacx_summarize", "cacx_doctor",
+    "cacx_ai_status",
+    "cacx_sync", "cacx_summarize",
+    "cacx_summarize_batch", "cacx_ai_config",
+    "cacx_doctor",
 ]
-WRITE_TOOLS = {"cacx_sync", "cacx_summarize"}
+WRITE_TOOLS = {"cacx_sync", "cacx_summarize",
+               "cacx_summarize_batch", "cacx_ai_config"}
 
 # 人造「真实格式」密钥：长得像 MiniMax key，但完全是测试用假串。
 FAKE_KEY = "sk-TESTKEY-abcdef0123456789XYZ"
@@ -81,7 +86,7 @@ def test_import():
 
 # ---------------------------------------------------------------- 2. 工具注册
 def test_tools_registered():
-    section("2. 9 个工具全部注册")
+    section("2. 12 个工具全部注册")
     import cacx.mcp_server as m
 
     async def _names():
@@ -90,19 +95,28 @@ def test_tools_registered():
 
     tools = asyncio.run(_names())
     names = [t[0] for t in tools]
-    check("工具总数 == 9", len(names) == 9, f"实际 {len(names)}: {names}")
+    check("工具总数 == 12", len(names) == 12, f"实际 {len(names)}: {names}")
     for want in REQUIRED_TOOLS:
         check(f"已注册 {want}", want in names, f"现有 {names}")
 
-    # 注册顺序：只读在前
-    section("3. 只读工具在写/花钱工具之前")
-    first6 = names[:6]
-    bad = [n for n in first6 if n in WRITE_TOOLS]
-    check("前 6 个里没有 sync/summarize", not bad, f"前6={first6}")
-    pos_sync = names.index("cacx_sync") if "cacx_sync" in names else -1
-    pos_sum = names.index("cacx_summarize") if "cacx_summarize" in names else -1
-    check("sync 在第 7 位", pos_sync == 6, f"位置 {pos_sync}")
-    check("summarize 在第 8 位", pos_sum == 7, f"位置 {pos_sum}")
+    # 注册顺序：只读在前、写/花钱在后
+    section("3. 注册顺序（只读在前，写/花钱在后）")
+    first7 = names[:7]
+    bad = [n for n in first7 if n in WRITE_TOOLS]
+    check("前 7 个里没有写/花钱工具", not bad, f"前7={first7}")
+    pos = {n: (names.index(n) if n in names else -1) for n in REQUIRED_TOOLS}
+    check("ai_status 在第 7 位(idx6)", pos["cacx_ai_status"] == 6,
+          f"位置 {pos['cacx_ai_status']}")
+    check("sync 在第 8 位(idx7)", pos["cacx_sync"] == 7,
+          f"位置 {pos['cacx_sync']}")
+    check("summarize 在第 9 位(idx8)", pos["cacx_summarize"] == 8,
+          f"位置 {pos['cacx_summarize']}")
+    check("summarize_batch 在第 10 位(idx9)", pos["cacx_summarize_batch"] == 9,
+          f"位置 {pos['cacx_summarize_batch']}")
+    check("ai_config 在第 11 位(idx10)", pos["cacx_ai_config"] == 10,
+          f"位置 {pos['cacx_ai_config']}")
+    check("doctor 在末尾(idx11)", pos["cacx_doctor"] == 11,
+          f"位置 {pos['cacx_doctor']}")
 
     # 每个工具都有 docstring（MCP 客户端靠它生成界面）
     section("4. 每个工具都有非空描述")
@@ -114,7 +128,8 @@ def test_tools_registered():
     # dry_run 默认值必须是 True（从 input_schema 读，等于客户端实际看到的默认）
     section("5. dry_run 默认 True（从 input_schema 读）")
     schemas = {t[0]: t[2] for t in tools}
-    for tn in ("cacx_sync", "cacx_summarize"):
+    for tn in ("cacx_sync", "cacx_summarize",
+               "cacx_summarize_batch", "cacx_ai_config"):
         props = (schemas.get(tn) or {}).get("properties") or {}
         dr = props.get("dry_run") or {}
         check(f"{tn}.dry_run 默认 True", dr.get("default") is True,
@@ -246,9 +261,195 @@ def test_offline_and_key_zero_echo():
               f"before={mtime_before} after={after}")
 
 
-# ---------------------------------------------------------------- 7. 源码静态扫描
+# ---------------------------------------------------------------- 7. ai_status
+def test_ai_status():
+    section("7. cacx_ai_status（只读 / 密钥零回显）")
+    import cacx.mcp_server as m
+
+    tmp = Path(tempfile.mkdtemp(prefix="cacx_mcp_ais_"))
+    m._CFG_OVERRIDE = _make_cfg(tmp)
+    try:
+        r = m.cacx_ai_status()
+        check("ai_status 返回 dict", isinstance(r, dict), str(r)[:200])
+        check("has_key=True", r.get("has_key") is True, str(r)[:200])
+        km = r.get("key_masked") or ""
+        check("key_masked 非空", bool(km), str(r)[:200])
+        check("key_masked != 明文", km != FAKE_KEY, km)
+        check("key_masked 保留末4位", km.endswith(FAKE_KEY[-4:]), km)
+        for k in ("enabled", "provider", "model", "base_url", "ready",
+                  "timeout", "max_tokens", "tasks"):
+            check(f"ai_status 含 {k}", k in r, str(r)[:200])
+        blob = json.dumps(r, ensure_ascii=False)
+        check("ai_status 响应不含明文 key", FAKE_KEY not in blob,
+              f"blob 前 200: {blob[:200]}")
+    finally:
+        m._CFG_OVERRIDE = None
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- 8. ai_config
+def test_ai_config():
+    section("8. cacx_ai_config 双闸门 + 密钥三态")
+    import cacx.mcp_server as m
+    from cacx import config as C
+
+    tmp = Path(tempfile.mkdtemp(prefix="cacx_mcp_cfg_"))
+    cfg = _make_cfg(tmp)
+    m._CFG_OVERRIDE = cfg
+
+    saved_calls = []
+    orig_save = C.save
+    def fake_save(cfg_):
+        saved_calls.append(copy.deepcopy(cfg_))
+        return Path("fake-settings.json")
+    C.save = fake_save
+    try:
+        before_model = cfg["ai"]["model"]
+
+        # --- dry_run=True：不写盘 / would_change 对照 / 掩码 ---
+        r = m.cacx_ai_config(model="new-model-xyz", dry_run=True)
+        check("dry_run=True 返回 dry_run", r.get("dry_run") is True, str(r)[:200])
+        check("dry_run=True changes=1", r.get("changes") == 1, str(r)[:200])
+        wc = r.get("would_change") or []
+        rec = [w for w in wc if w["field"] == "model"]
+        check("would_change 含 model", len(rec) == 1, str(wc))
+        if rec:
+            check("model old/new 对照",
+                  rec[0].get("old") == before_model
+                  and rec[0].get("new") == "new-model-xyz", str(rec[0]))
+        check("dry_run 未写盘", len(saved_calls) == 0, f"saved={len(saved_calls)}")
+        check("dry_run 未改 override", cfg["ai"]["model"] == before_model,
+              cfg["ai"]["model"])
+        blob = json.dumps(r, ensure_ascii=False)
+        check("dry_run 响应不含明文 key", FAKE_KEY not in blob, blob[:200])
+
+        # --- provider 非法：报错且不写盘 ---
+        r = m.cacx_ai_config(provider="evil", dry_run=True)
+        check("provider 非法返回 error", "error" in r, str(r)[:200])
+
+        # --- 闸门 2：dry_run=False + confirm=False 不写盘 ---
+        saved_calls.clear()
+        r = m.cacx_ai_config(model="should-not-save",
+                             dry_run=False, confirm=False)
+        check("confirm_required=True", r.get("confirm_required") is True,
+              str(r)[:200])
+        check("闸门2 未写盘", len(saved_calls) == 0, f"saved={len(saved_calls)}")
+        check("闸门2 override 未变", cfg["ai"]["model"] == before_model,
+              cfg["ai"]["model"])
+
+        # --- 闸门 3：dry_run=False + confirm=True 才写盘 ---
+        saved_calls.clear()
+        r = m.cacx_ai_config(model="saved-model",
+                             dry_run=False, confirm=True)
+        check("saved=True", r.get("saved") is True, str(r)[:200])
+        check("写盘 1 次", len(saved_calls) == 1, f"saved={len(saved_calls)}")
+        check("changed 含 model", "model" in (r.get("changed") or []),
+              str(r.get("changed")))
+        check("写盘内容 model 已更新",
+              saved_calls[0]["ai"]["model"] == "saved-model",
+              saved_calls[0]["ai"]["model"])
+        check("has_key 仍 True", r.get("has_key") is True, str(r)[:200])
+        check("key_masked != 明文", r.get("key_masked") != FAKE_KEY,
+              str(r.get("key_masked")))
+
+        # --- 密钥三态 ---
+        # (a) api_key 留空 = 不修改
+        saved_calls.clear()
+        m.cacx_ai_config(api_key="", model="m2",
+                         dry_run=False, confirm=True)
+        check("留空不改 key", saved_calls[0]["ai"]["api_key"] == FAKE_KEY,
+              saved_calls[0]["ai"]["api_key"])
+
+        # (b) api_key 非空 = 覆盖
+        NEW_KEY = "sk-NEWKEY-999988887777"
+        saved_calls.clear()
+        r = m.cacx_ai_config(api_key=NEW_KEY, dry_run=False, confirm=True)
+        check("非空覆盖 key", saved_calls[0]["ai"]["api_key"] == NEW_KEY,
+              saved_calls[0]["ai"]["api_key"])
+        blob = json.dumps(r, ensure_ascii=False)
+        check("覆盖后响应不含新明文 key", NEW_KEY not in blob, blob[:200])
+
+        # (c) clear_key=True = 清空
+        saved_calls.clear()
+        r = m.cacx_ai_config(clear_key=True, dry_run=False, confirm=True)
+        check("clear_key 清空", saved_calls[0]["ai"]["api_key"] == "",
+              saved_calls[0]["ai"]["api_key"])
+        check("清空后 has_key=False", r.get("has_key") is False, str(r)[:200])
+    finally:
+        C.save = orig_save
+        m._CFG_OVERRIDE = None
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- 9. summarize_batch
+def test_summarize_batch():
+    section("9. cacx_summarize_batch（增量过滤 / dry_run 预览）")
+    import cacx.mcp_server as m
+    from cacx import db as D
+    from cacx.ai import tasks as AI_tasks
+
+    tmp = Path(tempfile.mkdtemp(prefix="cacx_mcp_batch_"))
+    cfg = _make_cfg(tmp)
+    cfg["sites"]["cac"] = {"enabled": True, "name": "中国网信办",
+                           "base_url": "https://www.cac.gov.cn"}
+    m._CFG_OVERRIDE = cfg
+
+    # 种 3 篇文章
+    d = D.Database(tmp / "t.db")
+    ids = []
+    for i, title in enumerate(["文章一", "文章二", "文章三"]):
+        aid = d.upsert_article({
+            "site": "cac", "site_name": "中国网信办",
+            "column_code": "yw", "column_name": "要闻",
+            "title": title, "pub_date": f"2026-10-1{i}",
+            "url": f"https://www.cac.gov/{i}.htm",
+            "content_text": "正文 " * 200, "chars": 1000,
+        })
+        ids.append(aid)
+    # 给第一篇打 summarize annotation（模拟已摘要过）
+    d.save_annotation(ids[0], "summarize", {"summary": "已有摘要"})
+    d.close()
+
+    # 打桩 ai.tasks.summarize，计数调用次数
+    calls = []
+    orig_summarize = AI_tasks.summarize
+    def fake_summarize(cfg_, art, dry_run=False):
+        calls.append(art.get("id"))
+        return {"summary": "stub", "tags": []}
+    AI_tasks.summarize = fake_summarize
+
+    try:
+        # mode=incremental：过滤掉第一篇（已有摘要），剩 2 篇
+        r = m.cacx_summarize_batch(mode="incremental", dry_run=True)
+        check("incremental total=2", r.get("total") == 2, str(r)[:200])
+        check("incremental skipped=1", r.get("skipped") == 1, str(r)[:200])
+        check("incremental dry_run=True", r.get("dry_run") is True,
+              str(r)[:200])
+        # dry_run 只预览第一篇：fake_summarize 只被调 1 次
+        check("dry_run 只调 1 次 AI", len(calls) == 1, f"calls={calls}")
+
+        # mode=full：3 篇全选
+        calls.clear()
+        r = m.cacx_summarize_batch(mode="full", dry_run=True)
+        check("full total=3", r.get("total") == 3, str(r)[:200])
+
+        # limit 生效：limit=1 → 每站最多 1 篇
+        r = m.cacx_summarize_batch(mode="full", limit=1, dry_run=True)
+        check("limit=1 total<=1", r.get("total") <= 1, str(r)[:200])
+
+        # 密钥零回显
+        blob = json.dumps(r, ensure_ascii=False)
+        check("batch dry_run 响应不含明文 key", FAKE_KEY not in blob,
+              blob[:200])
+    finally:
+        AI_tasks.summarize = orig_summarize
+        m._CFG_OVERRIDE = None
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- 10. 源码静态扫描
 def test_source_scan():
-    section("7. 源码静态扫描：任何输出路径不回显 api_key")
+    section("10. 源码静态扫描：任何输出路径不回显 api_key")
     src_path = Path(__file__).resolve().parent / "cacx" / "mcp_server.py"
     src = src_path.read_text(encoding="utf-8")
 
@@ -256,24 +457,27 @@ def test_source_scan():
     check("源码无 print(", "print(" not in src.replace("    # print(", ""),
           "存在 print( 调用")
 
-    # 2) api_key 只能出现在 _sanitize 里（剥密钥）或注释/模块 docstring 里，
-    #    不能出现在任何 return/响应构造路径。
+    # 2) api_key 只允许在「授权函数」里被引用：
+    #    - _sanitize：剥密钥（防御性）
+    #    - cacx_ai_status：只读 key 算 has_key / 掩码
+    #    - cacx_ai_config：签名入参 + 写盘（C.set_path 目标）
+    #    其他函数里出现 api_key 即视为「可能把明文塞进响应」。
+    #    docstring / 注释行一律放行。
+    ALLOWED = {"_sanitize", "cacx_ai_status", "cacx_ai_config"}
     bad_lines = []
-    in_sanitize = False
+    cur_func = ""
     in_docstring = False
     for i, line in enumerate(src.splitlines(), 1):
         stripped = line.strip()
-        # 三引号 docstring 状态翻转（粗略按行计数 """ 出现次数）
         in_docstring = (in_docstring ^ (stripped.count('"""') % 2 == 1))
-        if line.startswith("def _sanitize"):
-            in_sanitize = True
-            continue
-        if in_sanitize and line.startswith("def ") and "_sanitize" not in line:
-            in_sanitize = False
+        # 只在顶格 def（外层函数）时更新 cur_func；嵌套 def（如 add_change）
+        # 不改变外层函数上下文，否则函数体内的 api_key 调用会被误判。
+        if line.startswith("def "):
+            cur_func = stripped.split("(")[0].replace("def ", "").strip()
         if "api_key" in line and not in_docstring and not stripped.startswith("#"):
-            if not in_sanitize:
+            if cur_func not in ALLOWED:
                 bad_lines.append((i, stripped))
-    check("api_key 仅在 _sanitize 内被引用（docstring/注释除外）",
+    check("api_key 仅在授权函数(_sanitize/ai_status/ai_config)内被引用",
           not bad_lines, str(bad_lines))
 
     # 3) _sanitize 在所有 except 路径上都被调用过（_err 用了它）
@@ -286,7 +490,9 @@ def main():
     print("cacx MCP server 离线测试")
     print("=" * 62)
     for fn in (test_import, test_tools_registered,
-               test_offline_and_key_zero_echo, test_source_scan):
+               test_offline_and_key_zero_echo,
+               test_ai_status, test_ai_config, test_summarize_batch,
+               test_source_scan):
         try:
             fn()
         except Exception:

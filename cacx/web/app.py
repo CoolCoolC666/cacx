@@ -28,7 +28,7 @@ import time
 import uuid
 import webbrowser
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query
@@ -413,6 +413,10 @@ class BatchReq(BaseModel):
     resume: bool = False
     stop_on_error: bool = False
     dry_run: bool = True
+    # incremental（默认）= 只处理尚无 summarize 摘要的文章；full = 全部符合条件
+    # （含已有摘要，重新生成）。非法值交给 Pydantic Literal 拦成 422 —— 与
+    # limit 传字符串这类 schema 错误同码，不另起一套手工 400，前端错误处理统一。
+    mode: Literal["incremental", "full"] = "incremental"
 
 
 def _select_batch_articles(d, cfg: Dict[str, Any], req: BatchReq):
@@ -420,6 +424,16 @@ def _select_batch_articles(d, cfg: Dict[str, Any], req: BatchReq):
     按站点逐站 search 再合并（db.search 只支持单 site 参数）。
     limit 口径：每站各取 limit 条，合并去重后不二次截断 —— 站点数量天然有限，
     这样每个站在批次里都有同等候选名额，不会被单一大站挤光。
+
+    增量过滤为什么放在选文章这一步：
+      run_batch 的 resume 是「提交线程池之前的兜底过滤」，发生在它内部；但前端
+      进度条的分母 total 是 POST 时按 merged 长度写进 job 的。若这里不过滤，
+      incremental 模式下 total 会把「已有摘要、注定被 resume 跳过」的文章也算进
+      分母，进度条永远停在 (total-skipped)/total 上，看着像卡死。在选文章阶段
+      就把已有 summarize annotation 的剔除掉，total 从一开始就是真实待办数，
+      进度条分母不虚胖。full 模式本来就是要重生成已有摘要的文章，所以不过滤。
+      本函数会被请求线程（预检）和 _batch_worker（后台自己再 open_db 选一遍）
+      各调一次，两次过滤口径必须一致，否则预检 total 与后台 total 对不上。
     """
     from .. import sites as S
     sites_list = req.sites or list(S.enabled_codes(cfg))
@@ -434,6 +448,10 @@ def _select_batch_articles(d, cfg: Dict[str, Any], req: BatchReq):
                 continue
             seen.add(it["id"])
             merged.append(it)
+    if req.mode == "incremental":
+        # 主线程单连接下 get_annotation 无锁直查是安全的（db 层已核对）
+        merged = [it for it in merged
+                  if d.get_annotation(it["id"], "summarize") is None]
     return sites_list, merged
 
 
@@ -512,6 +530,7 @@ def api_ai_summarize_batch(req: BatchReq):
             "running": True,
             "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "finished_at": "",
+            "mode": req.mode,
             "progress": {"done": 0, "ok": 0, "fail": 0,
                          "skipped": 0, "total": len(merged)},
             "summary": None, "error": "", "logs": [],
@@ -523,7 +542,7 @@ def api_ai_summarize_batch(req: BatchReq):
                          args=(job_id, cfg_snapshot, req), daemon=True)
     t.start()
     return {"job_id": job_id, "started": True, "total": len(merged),
-            "dry_run": req.dry_run}
+            "mode": req.mode, "dry_run": req.dry_run}
 
 
 @app.get("/api/ai/summarize-batch/{job_id}")
