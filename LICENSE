@@ -1,0 +1,36 @@
+MIT License
+
+Copyright (c) 2026 cacx 项目贡献者
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## 关于本项目采集的语料内容（非代码部分）
+
+本 MIT 许可**仅适用于上述源代码**。
+
+本项目采集并保存的文章内容：
+- 全部来自互联网**公开可访问**的页面（中国网信办 www.cac.gov.cn、
+  浙江网信网 www.zjwx.gov.cn 等）
+- **著作权归原作者及原发布网站所有**，不因被本项目采集而发生转移
+- 仅供学习研究、课程作业与非商业研究用途使用
+
+本项目为学习研究性质的软件工具，使用者应自行遵守目标站点的服务条款、
+`robots.txt` 与相关法律法规。使用本工具产生的任何后果由使用者自行承担。
