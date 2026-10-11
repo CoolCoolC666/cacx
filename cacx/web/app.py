@@ -1260,6 +1260,11 @@ class ConfigIn(BaseModel):
     enabled: Optional[bool] = None
     timeout: Optional[int] = None
     max_tokens: Optional[int] = None
+    # 自动重试：默认开启。设 1 = 关闭（不重试）。
+    retry_attempts: Optional[int] = None
+    retry_base_delay: Optional[float] = None
+    # 送进模型的正文截断字数；**0 或留空 = 不截断**。
+    max_content_chars: Optional[int] = None
     page_size: Optional[int] = None
     host: Optional[str] = None
     port: Optional[int] = None
@@ -1283,6 +1288,13 @@ def api_config_get():
             "provider": ai.get("provider", "none"),
             "base_url": ai.get("base_url", ""),
             "model": ai.get("model", ""),
+            # 数值项回显**当前生效值**（未配置过时即默认值），
+            # 这样用户不必翻文档就知道「不填时是多少」。
+            "max_tokens": ai.get("max_tokens"),
+            "timeout": ai.get("timeout"),
+            "retry_attempts": ai.get("retry_attempts"),
+            "retry_base_delay": ai.get("retry_base_delay"),
+            "max_content_chars": ai.get("max_content_chars"),
             # 只有这两个字段，绝不回显 key 本身
             "has_key": bool(key),
             "key_len": len(key),
@@ -1337,6 +1349,12 @@ def api_config_set(req: ConfigIn):
         put("ai.enabled", req.enabled)
     put("ai.timeout", req.timeout)
     put("ai.max_tokens", req.max_tokens)
+    put("ai.retry_attempts", req.retry_attempts)
+    put("ai.retry_base_delay", req.retry_base_delay)
+    # max_content_chars 的 0 是有意义的取值（=不截断），
+    # 不能像别的字段那样把 0/None 当「没改」跳过。
+    if req.max_content_chars is not None:
+        put("ai.max_content_chars", max(0, int(req.max_content_chars)))
     put("app.page_size", req.page_size)
     put("app.host", req.host)
     put("app.port", req.port)

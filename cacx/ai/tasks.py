@@ -24,8 +24,33 @@ SYS_SUMMARIZE = (
 )
 
 
-def _article_block(art: Dict[str, Any], limit: int = 2500) -> str:
-    body = (art.get("content_text") or "")[:limit]
+def content_limit(cfg: Dict) -> int:
+    """
+    送进模型的正文截断字数；**0 = 不截断**。
+
+    为什么改成可配 + 默认不截断：
+      原先 summarize 硬编码 2500 字。政务长文（讲话全文、政策解读）
+      常超这个数，摘要只看得到前半段 —— 结论容易偏，甚至把
+      「文末才出现的关键结论」直接漏掉，而用户完全无从察觉。
+      截断的真实用途只是控制 token 成本，所以把选择权交回用户：
+      留空/0 不截断（默认），有成本诉求的再自己设一个上限。
+
+    ⚠ 兼容老配置：显式设了 max_content_chars 就用它；没设则取
+      DEFAULT_CONTENT_LIMIT（0=不截断）。
+    """
+    v = (cfg.get("ai") or {}).get("max_content_chars", 0)
+    try:
+        n = int(v or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return n if n > 0 else 0
+
+
+def _article_block(art: Dict[str, Any], limit: int = 0) -> str:
+    """limit<=0 = 不截断。"""
+    body = art.get("content_text") or ""
+    if limit and limit > 0:
+        body = body[:limit]
     return (f"标题：{art.get('title','')}\n"
             f"栏目：{art.get('column_name','')}\n"
             f"日期：{art.get('pub_date','')}\n"
@@ -38,7 +63,8 @@ def summarize(cfg: Dict, art: Dict[str, Any], dry_run: bool = True) -> Any:
     p = build(cfg, task="summarize")
     if p is None:
         raise AIError("AI 未配置（cacx config set ai.provider openai_compat）")
-    raw = p.chat(SYS_SUMMARIZE, _article_block(art), dry_run=dry_run)
+    raw = p.chat(SYS_SUMMARIZE, _article_block(art, content_limit(cfg)),
+                 dry_run=dry_run)
     if dry_run:
         return json.loads(raw)
     return parse_json(raw, {"summary": "", "tags": [], "sentiment": "neutral",
@@ -50,6 +76,9 @@ def tag_many(cfg: Dict, arts: List[Dict[str, Any]], dry_run: bool = True) -> Any
     p = build(cfg, task="tag")
     if p is None:
         raise AIError("AI 未配置")
+    # ⚠ 这里的 700 与 summarize 的 max_content_chars 是**两回事**，不要合并：
+    # 本函数一次调用要装 20 篇，若每篇都不截断，请求体会大到被模型
+    # 直接拒收（或悄悄截掉后半批）。批量标签本来就只需要每篇的梗概。
     blocks = "\n\n---\n\n".join(
         _article_block(a, 700) for a in arts[:20])
     sys_p = ("为下列每篇文章提取 3-5 个中文主题标签，输出 JSON 数组，"

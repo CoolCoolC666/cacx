@@ -138,9 +138,12 @@ class Provider(ABC):
         self.api_key = cfg_ai.get("api_key") or ""
         self.timeout = int(cfg_ai.get("timeout", 60))
         self.max_tokens = int(cfg_ai.get("max_tokens", 2000))
-        # 重试次数与退避基数。0/缺省=1 次，即**沿用旧行为不重试** ——
-        # 想要自动重试必须显式开，避免有人无意识地把配额多烧一遍。
-        self.retry_attempts = max(1, int(cfg_ai.get("retry_attempts", 1)))
+        # 重试次数与退避基数。与 config.DEFAULTS['ai'] 保持一致：**默认开启 3 次**。
+        # 这里的兜底值只在调用方递进来一份没跟 DEFAULTS 合并过的 cfg 时才会生效
+        # （正常路径 C.load() 已经合过了），但两处默认值必须一致 ——
+        # 否则同一份配置在「走服务」和「直接构造 client」两条路上行为不同。
+        # 想关掉设成 1（0 也按 1 处理：没有「重试 0 次」这种语义）。
+        self.retry_attempts = max(1, int(cfg_ai.get("retry_attempts", 3)))
         self.retry_base_delay = float(cfg_ai.get("retry_base_delay", 1.5))
         # 最近一次重试的原因，供调用方呈现给用户
         self.last_retry: Optional[Dict[str, Any]] = None

@@ -664,6 +664,23 @@ def test_frontend_js_syntax():
         check(f"第{i + 1}块反引号成对",
               js.count("`") % 2 == 0, f"count={js.count('`')}")
 
+    # --- HTML 结构完整性 ---
+    # ⚠ 统计 div 必须**先剔除 <script> 区段**：JS 模板串里写着的 "<div class=...>"
+    # 会被算成未闭合的标签，造成「差几个」的假警报，而真问题反被淹没。
+    stripped = re.sub(r"<script\b.*?</script>", "", html, flags=re.S | re.I)
+    op = len(re.findall(r"<div\b", stripped, re.I))
+    cl = len(re.findall(r"</div\s*>", stripped, re.I))
+    check("HTML 区 div 配平（已剔除 script）", op == cl, f"open={op} close={cl}")
+
+    ids = re.findall(r'\bid\s*=\s*"([^"]+)"', html)
+    dup = sorted({i for i in ids if ids.count(i) > 1})
+    check("id 全局唯一", not dup, f"重复={dup}")
+
+    # $('xxx') 引用必须都能在页面里找到 —— 找不到就是拿 null 去读 .value，运行时才炸
+    refs = set(re.findall(r"\$\('([A-Za-z_][\w-]*)'\)", html))
+    missing = sorted(r for r in refs if f'id="{r}"' not in html)
+    check("$() 引用的 id 全部存在", not missing, f"缺失={missing}")
+
 
 # ---------------------------------------------------------------- main
 def main():

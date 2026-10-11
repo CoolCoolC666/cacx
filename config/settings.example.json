@@ -43,6 +43,9 @@
     "api_key": "",
     "timeout": 60,
     "max_tokens": 2000,
+    "retry_attempts": 3,
+    "retry_base_delay": 1.5,
+    "max_content_chars": 0,
     "tasks": {
       "summarize": {
         "enabled": false,

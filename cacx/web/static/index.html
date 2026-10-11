@@ -596,6 +596,23 @@
           <input type="number" id="cfg_timeout" style="width:90px">
           <span style="color:var(--dim);font-size:12.5px">秒</span>
         </div>
+        <div class="row">
+          <span style="color:var(--dim);font-size:12.5px">自动重试</span>
+          <input type="number" id="cfg_retry" style="width:70px" min="1" step="1"
+                 title="总共尝试几次；1 = 不重试。限流/超时/5xx 会自动退避后重试。">
+          <span style="color:var(--dim);font-size:12.5px">次（1 = 不重试）</span>
+          <span style="color:var(--dim);font-size:12.5px;margin-left:14px">退避基数</span>
+          <input type="number" id="cfg_retry_delay" style="width:70px" min="0" step="0.5"
+                 title="第 n 次重试等待 基数 × 2^(n-1) 秒；服务端返回 Retry-After 时以它为准（上限 120 秒）。">
+          <span style="color:var(--dim);font-size:12.5px">秒</span>
+        </div>
+        <div class="row">
+          <span style="color:var(--dim);font-size:12.5px">正文截断</span>
+          <input type="number" id="cfg_max_content" style="width:110px" min="0" step="1"
+                 placeholder="留空 = 不受限"
+                 title="送进模型的正文最多取多少字。留空或 0 = 不截断，模型读到全文。">
+          <span style="color:var(--dim);font-size:12.5px">字（留空 = 不受限）</span>
+        </div>
       </div>
     </div>
 
@@ -1947,9 +1964,14 @@ async function loadCfg(){
   $('cfg_zj_to').value    = (c.sites?.zjwx?.date_end)||'';
   $('cfg_page_size').value= c.app?.page_size ?? 20;
   $('cfg_path').textContent = '文件：' + (c.settings_file||'');
-  // max_tokens / timeout 不在 GET 里（避免暴露内部默认值），先留空由用户填
-  $('cfg_max_tokens').value='';
-  $('cfg_timeout').value='';
+  // 数值项回显当前生效值（未配置时就是默认值），用户一眼能看到
+  // 「不填时是多少」，不必去翻配置文件。
+  $('cfg_max_tokens').value  = a.max_tokens ?? '';
+  $('cfg_timeout').value     = a.timeout ?? '';
+  $('cfg_retry').value       = a.retry_attempts ?? '';
+  $('cfg_retry_delay').value = a.retry_base_delay ?? '';
+  // 0 = 不截断：显示成空，让 placeholder「留空 = 不受限」自己说话
+  $('cfg_max_content').value = a.max_content_chars || '';
 }
 
 function collectCfg(){
@@ -1963,6 +1985,14 @@ function collectCfg(){
   const mt=$('cfg_max_tokens').value, to=$('cfg_timeout').value;
   if(mt) body.max_tokens=parseInt(mt);
   if(to) body.timeout=parseInt(to);
+  const rt=$('cfg_retry').value, rd=$('cfg_retry_delay').value;
+  if(rt) body.retry_attempts=parseInt(rt);
+  if(rd) body.retry_base_delay=parseFloat(rd);
+  // 正文截断：留空 = 不受限（后端记 0）。这里**必须无条件发送** ——
+  // 若沿用「留空 = 不修改」的约定，用户清空输入框想取消限制时会被静默忽略，
+  // 以为放开了其实还卡在旧值上。
+  const mc=$('cfg_max_content').value.trim();
+  body.max_content_chars = mc ? Math.max(0, parseInt(mc,10)||0) : 0;
   const ps=$('cfg_page_size').value; if(ps) body.page_size=parseInt(ps);
   if($('cfg_cac_from').value) body.date_start_cac=$('cfg_cac_from').value;
   if($('cfg_cac_to').value)   body.date_end_cac=$('cfg_cac_to').value;

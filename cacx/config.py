@@ -75,6 +75,16 @@ DEFAULTS: Dict[str, Any] = {
         "api_key": "",
         "timeout": 60,
         "max_tokens": 2000,
+        # 自动重试：默认**开启**（3 次，指数退避 1.5s 起）。
+        # 限流/超时/5xx 是供应商侧的临时故障，自动退避后重试通常就能过；
+        # 不重试的话，跑到一半撞一次限流，后面几十篇全废，
+        # 前面已烧的配额也白费。想关掉设成 1（=不重试）。
+        "retry_attempts": 3,
+        "retry_base_delay": 1.5,
+        # 送进模型的正文截断字数。**0（或缺省）= 不截断**。
+        # 上限存在的意义只是为了控制 token 成本；设成很小的值会让
+        # 长文摘要只看到开头，结论失真。默认不截断，把选择权交给用户。
+        "max_content_chars": 0,
         # 各任务可单独覆盖 provider/model，留空则用上面的默认
         "tasks": {
             "summarize": {"enabled": False, "provider": "", "model": ""},
