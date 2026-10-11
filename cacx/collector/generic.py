@@ -124,14 +124,16 @@ def dig(obj: Any, path: str, default=None) -> Any:
     return cur
 
 
-def _subst(obj, page: int, size: int):
-    """把 {page} / {size} 占位替换掉；非字符串原样返回"""
+def _subst(obj, page: int, size: int, code: str = ""):
+    """把 {page} / {size} / {code} 占位替换掉；非字符串原样返回"""
     if isinstance(obj, str):
-        return obj.replace("{page}", str(page)).replace("{size}", str(size))
+        return (obj.replace("{page}", str(page))
+                .replace("{size}", str(size))
+                .replace("{code}", str(code)))
     if isinstance(obj, dict):
-        return {k: _subst(v, page, size) for k, v in obj.items()}
+        return {k: _subst(v, page, size, code) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_subst(x, page, size) for x in obj]
+        return [_subst(x, page, size, code) for x in obj]
     return obj
 
 
@@ -346,8 +348,13 @@ class GenericCollector(SiteCollector):
         for page in range(1, max_pages + 1):
             params = {}
             for k, v in (pg.get("params") or {"page": "{page}", "size": str(size)}).items():
-                params[k] = str(v).replace("{page}", str(page)).replace(
-                    "{size}", str(size))
+                params[k] = (str(v).replace("{page}", str(page))
+                             .replace("{size}", str(size))
+                             # {code} 也要能替换：栏目 id 常常同时出现在
+                             # 接口参数(pageId)与 Referer(/col/col{code}/)两处，
+                             # 只支持 referer 那边的 {code} 的话，配置作者
+                             # 得把同一个 id 手抄两遍，抄错一处极难察觉。
+                             .replace("{code}", str(col.get("code", ""))))
             headers = col.get("headers") or None
             # Referer 不是可选项：jpaas 建站平台的列表接口会校验它，
             # 不带就直接 success=false（实测浙江网信）。默认用 base_url 兜底。
@@ -364,15 +371,21 @@ class GenericCollector(SiteCollector):
                         # json_body 里也允许 {page} 占位
                         r = self.fetcher.post(
                             api,
-                            json=_subst(body, page, size),
+                            json=_subst(body, page, size,
+                                        str(col.get("code", ""))),
                             headers=headers)
                     else:
                         r = self.fetcher.post(api, data=params, headers=headers)
                 else:
                     r = self.fetcher.get(api, params=params, headers=headers,
                                          referer=referer)
-            except TypeError:
-                # 源站只吃裸 GET 时不要因为多传了 headers 就整条挂掉
+            except TypeError as te:
+                # 兜底重试可以留，但必须**留痕**。
+                # 之前这里是光秃秃的 except TypeError，把「参数传错了」
+                # 和「源站只吃裸 GET」一起吞成一次没带 params 的裸请求，
+                # 症状是「列表一条都抓不到」，排查时完全看不出发生过异常。
+                self.log(f"    [warn] 带参请求失败({type(te).__name__}: {te})，"
+                         f"降级为裸请求重试")
                 r = self.fetcher.get(api, params=params)
             if r is None:
                 break

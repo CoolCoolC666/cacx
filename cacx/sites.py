@@ -250,10 +250,23 @@ def validate(spec: Dict[str, Any]) -> List[str]:
                 issues.append(f"{tag}：缺 api_url")
             if not (c.get("list_path") or "").strip():
                 issues.append(f"{tag}：缺 list_path（JSON 里列表所在路径）")
+            # 两种 json 栏目形态，校验要求不同：
+            #   ① 对象数组 -> 用 fields.{title,url,date} 映射
+            #   ② 字段里装 **HTML 片段** -> 用 CSS 选择器 item/title/date
+            #      （jpaas 建站平台就是这种，返回 {"data":{"html":"<ul>…"}}）
+            # 早先不分形态，一律要求 fields，结果 ② 这类站**永远过不了
+            # 校验闸门**——而它们的抓取路径是好的，白白挡住。
+            uses_fields = not (c.get("item") or "").strip()
             f = c.get("fields") or {}
-            for need in ("title", "url", "date"):
-                if not f.get(need):
-                    issues.append(f"{tag}：fields.{need} 没填")
+            if uses_fields:
+                for need in ("title", "url", "date"):
+                    if not f.get(need):
+                        issues.append(f"{tag}：fields.{need} 没填")
+            else:
+                if not (c.get("title") or "").strip():
+                    issues.append(f"{tag}：配了 item 就必须有 title 选择器")
+                if not (c.get("date") or "").strip():
+                    issues.append(f"{tag}：配了 item 就必须有 date 选择器")
     art = spec.get("article") or {}
     if kind == "html" and not (art.get("content") or "").strip():
         issues.append("article.content 没填 —— 正文选择器为空会抓出一堆空正文")

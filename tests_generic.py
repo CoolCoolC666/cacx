@@ -454,6 +454,167 @@ def test_generic_build():
         check("非法 kind 被拒", True)
 
 
+# ---------------------------------------------------------------- 7. jpaas
+# 浙江省网信/江苏网信等省级网信站同属 jpaas 建站平台，接口形态：
+#   GET /api-gateway/jpaas-publish-server/front/page/build/unit
+#   必带 Referer（按栏目校验，形如 /col/col{栏目id}/index.html），否则 success=false
+#   返回 {"success":true,"data":{"html":"<整页HTML>"}} —— 字段里装的是 HTML 片段
+# 下面是按该平台实测响应做的离线复现。
+JPAAS_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+<nav><ul><li><a href="/col/col1673565/art/x.html">推荐位A</a></li>
+  <li><a href="/col/col1673565/art/y.html">推荐位B</a></li></ul></nav>
+<ul class="pagination" count="331" pageNo="1">
+  <li><a class="bt-left" href="/col/col1694583/art/2026/art_a1.html">工作动态一</a>
+      <span class="bt-right">2026-10-10</span></li>
+  <li><a class="bt-left" href="/col/col1694583/art/2026/art_a2.html">工作动态二</a>
+      <span class="bt-right">2026-09-30</span></li>
+  <li><a class="bt-left" href="/col/col1694583/art/2026/art_a3.html">工作动态三</a>
+      <span class="bt-right">2026-09-21</span></li>
+</ul></body></html>"""
+
+
+def _jpaas_resp(ok=True):
+    import json as _json
+    class R:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        apparent_encoding = "utf-8"
+        encoding = "utf-8"
+
+        def __init__(self):
+            body = {"success": ok,
+                    "data": {"html": JPAAS_PAGE if ok else "模版内容不能为空！"}}
+            self.text = _json.dumps(body, ensure_ascii=False)
+            self.content = self.text.encode("utf-8")
+
+        def json(self):
+            return _json.loads(self.text)
+    return R()
+
+
+def test_jpaas_json_column():
+    """jpaas 平台的 json 栏目：params 在 pagination 下 + {code} 占位 + HTML 片段分流"""
+    from cacx.collector.generic import GenericCollector, _subst
+    from cacx import sites as S
+
+    # --- {code} 占位：params 与 referer 共用栏目 id，不能手抄两遍
+    out = _subst({"pageId": "{code}", "n": "{page}", "s": "{size}",
+                  "keep": 7, "deep": ["{code}"]}, 3, 15, "1694583")
+    check("_subst 替换 {code}", out["pageId"] == "1694583", str(out))
+    check("_subst 替换 {page}/{size}",
+          out["n"] == "3" and out["s"] == "15", str(out))
+    check("_subst 不动非字符串", out["keep"] == 7, str(out))
+    check("_subst 递归进列表", out["deep"] == ["1694583"], str(out))
+
+    # --- 校验闸门：HTML 片段模式不该被要求填 fields
+    col = {"code": "1694583", "name": "工作动态",
+           "api_url": "https://x.gov.cn/api", "list_path": "data.html",
+           "item": "ul.pagination li", "title": "a.bt-left",
+           "date": "span.bt-right",
+           "referer": "https://www.zjwx.gov.cn/col/col{code}/index.html",
+           "pagination": {"mode": "api", "size": 15,
+                          "params": {"pageId": "{code}"}}}
+    spec = {"code": "t", "name": "T", "base_url": "https://x.gov.cn",
+            "kind": "json", "columns": [col]}
+    check("HTML 片段模式不再误报 fields", S.validate(spec) == [],
+          str(S.validate(spec)))
+    bad = dict(col, item="")           # 退回对象数组形态 -> 必须要求 fields
+    spec2 = {**spec, "columns": [bad]}
+    iss = S.validate(spec2)
+    check("对象数组模式仍要求 fields", any("fields." in i for i in iss), str(iss))
+
+    # --- 列表解析：只取目标栏目，不吃进导航里的推荐位
+    gc = GenericCollector.__new__(GenericCollector)
+    gc.base_url = "https://www.zjwx.gov.cn"
+    gc.cfg_site = {"code": "zjwx", "name": "浙江", "topic_prefixes": ()}
+    gc.log = lambda *a, **k: None
+    gc.date_start, gc.date_end = "2000-01-01", "2099-12-31"
+    gc.in_window = lambda d: True
+
+    sent = {}
+
+    class F:
+        def get(self, url, referer="", headers=None, **kw):
+            sent["referer"] = referer
+            sent["headers"] = headers
+            sent["params"] = kw.get("params")
+            return _jpaas_resp()
+
+    gc.fetcher = F()
+    rows = gc._list_json(col)
+    check("jpaas 列表抓到 3 条", len(rows) == 3, f"n={len(rows)}")
+    check("没吃进导航推荐位（裸 ul li 会抓到 5 条）",
+          all("/col/col1694583/" in r["url"] for r in rows),
+          str([r["url"] for r in rows]))
+    check("标题取自 a.bt-left",
+          rows and rows[0]["title"] == "工作动态一", str(rows[:1]))
+    check("日期取自 span.bt-right",
+          rows and rows[0]["date"] == "2026-10-10", str(rows[:1]))
+    check("params 里 {code} 已替换",
+          sent["params"].get("pageId") == "1694583", str(sent["params"]))
+    check("Referer 按栏目拼装",
+          sent["referer"].endswith("/col/col1694583/index.html"),
+          sent["referer"])
+    # referer -> 真正变成请求头是 Fetcher.get 的职责，已由
+    # test_fetcher_header_merge 单独覆盖，这里只断言值传对了。
+    check("未显式给 headers 时不干扰 referer",
+          sent["headers"] in (None, {}), str(sent["headers"]))
+
+
+def test_fetcher_header_merge():
+    """
+    Fetcher.get 同时收到 referer 和 headers 时必须**合并**。
+    早先是 get(url, referer) 内部拼好 headers 又往下传 headers，
+    调用方再传 headers 就撞 'multiple values for keyword argument'，
+    被上层 except TypeError 吞成裸请求 —— 症状是「列表一条都抓不到」，
+    完全看不出发生过异常。
+    """
+    from cacx.collector.base import Fetcher
+
+    seen = {}
+
+    class FakeSession:
+        def request(self, method, url, **kw):
+            seen.update(kw)
+            seen["method"] = method
+
+            class R:
+                status_code = 200
+            return R()
+
+    f = Fetcher.__new__(Fetcher)
+    f.session = FakeSession()
+    f.retry = 1
+    f.interval = 0
+    f.timeout = 5
+    f._throttle = lambda: None
+
+    f.get("https://x.gov.cn/a", referer="https://x.gov.cn/",
+          headers={"X-Token": "t1"}, params={"a": 1})
+    h = seen.get("headers") or {}
+    check("referer 与 headers 合并而非冲突",
+          h.get("Referer") == "https://x.gov.cn/" and h.get("X-Token") == "t1",
+          str(h))
+    check("其余参数原样透传", seen.get("params") == {"a": 1}, str(seen))
+
+    seen.clear()
+    f.get("https://x.gov.cn/b", referer="https://x.gov.cn/ref")
+    check("无 headers 时也能带 Referer",
+          (seen.get("headers") or {}).get("Referer") == "https://x.gov.cn/ref",
+          str(seen.get("headers")))
+
+    seen.clear()
+    f.get("https://x.gov.cn/c")
+    check("既无 referer 又无 headers 时传空头",
+          seen.get("headers") == {}, str(seen.get("headers")))
+
+    seen.clear()
+    f.get("https://x.gov.cn/d", headers={"Referer": "https://explicit/"})
+    check("调用方显式给的 Referer 优先",
+          (seen.get("headers") or {}).get("Referer") == "https://explicit/",
+          str(seen.get("headers")))
+
+
 # ---------------------------------------------------------------- main
 def main():
     print("=" * 62)
@@ -461,7 +622,8 @@ def main():
     print("=" * 62)
     for fn in (test_classify, test_dates, test_dig, test_sites_registry,
                test_runner_diversion, test_early_stop, test_decode,
-               test_list_inference, test_api_candidates, test_generic_build):
+               test_list_inference, test_api_candidates, test_generic_build,
+               test_jpaas_json_column, test_fetcher_header_merge):
         try:
             fn()
         except Exception:

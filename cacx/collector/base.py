@@ -37,9 +37,17 @@ class Fetcher:
             time.sleep(self.interval - dt)
         self._last = time.time()
 
-    def get(self, url: str, referer: str = "", **kw) -> Optional[requests.Response]:
-        headers = {"Referer": referer} if referer else {}
-        return self._do("GET", url, headers=headers, **kw)
+    def get(self, url: str, referer: str = "", headers=None,
+            **kw) -> Optional[requests.Response]:
+        # referer 与 headers 要**合并**，不能一个拼好一个再传下去：
+        # 否则调用方同时给 referer 和 headers 时，
+        # session.request 会撞上「headers 重复传」的 TypeError。
+        # json 模式的列就正好同时传这两个（jpaas 接口校验 Referer），
+        # 之前被上层 except TypeError 吞成裸请求，表现为「列表一条都抓不到」。
+        h = dict(headers or {})
+        if referer:
+            h.setdefault("Referer", referer)
+        return self._do("GET", url, headers=h, **kw)
 
     def post(self, url: str, data=None, headers=None, **kw) -> Optional[requests.Response]:
         return self._do("POST", url, data=data, headers=headers, **kw)
