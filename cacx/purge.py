@@ -103,23 +103,35 @@ def _clean(filters: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------- 影响面统计
-def _stats_articles(d, f: Dict[str, Any]) -> Dict[str, Any]:
+def _article_where(f: Dict[str, Any], d, prefix: str = "") -> tuple:
+    """
+    文章筛选条件 → (SQL 片段, 参数)。
+
+    ⚠ prefix 是给 JOIN 场景用的。级联统计那段要把同一批条件
+    拼到 `ai_annotations x JOIN articles a` 后面，此时裸列名
+    （site / id / chars…）会同时匹配到 x 和 a 两张表，
+    SQLite 直接报 `ambiguous column name: id`。
+    实测踩到：所有 except site/year 的条件路径在 JOIN 下都炸，
+    只有最常见的 `site=xxx` 侥幸能过 —— 因为 site 只在 articles 上。
+    所以凡是要复用的条件，一律带上表别名。
+    """
+    p = (prefix + ".") if prefix else ""
     where, args = [], []
     if f.get("site"):
-        where.append("site = ?"); args.append(f["site"])
+        where.append(f"{p}site = ?"); args.append(f["site"])
     if f.get("site_like"):
-        where.append("site LIKE ?"); args.append(f"%{f['site_like']}%")
+        where.append(f"{p}site LIKE ?"); args.append(f"%{f['site_like']}%")
     if f.get("date_from"):
-        where.append("pub_day >= ?"); args.append(f["date_from"])
+        where.append(f"{p}pub_day >= ?"); args.append(f["date_from"])
     if f.get("date_to"):
-        where.append("pub_day <= ?"); args.append(f["date_to"])
+        where.append(f"{p}pub_day <= ?"); args.append(f["date_to"])
     if f.get("year"):
-        where.append("year = ?"); args.append(str(f["year"]))
+        where.append(f"{p}year = ?"); args.append(str(f["year"]))
     if f.get("column_name"):
-        where.append("column_name = ?"); args.append(f["column_name"])
+        where.append(f"{p}column_name = ?"); args.append(f["column_name"])
     if f.get("ids"):
         ph = ",".join("?" * len(f["ids"]))
-        where.append(f"id IN ({ph})")
+        where.append(f"{p}id IN ({ph})")
         args.extend(f["ids"])
     if f.get("q"):
         # 用 search 走既有 FTS/LIKE 逻辑，避免另写一套筛选口径
@@ -129,18 +141,22 @@ def _stats_articles(d, f: Dict[str, Any]) -> Dict[str, Any]:
                        date_from=f.get("date_from", "") or "",
                        date_to=f.get("date_to", "") or "",
                        skip_empty=False, limit=100000)
-        ids = [it["id"] for it in res.get("items", [])]
-        ph = ",".join("?" * len(ids)) if ids else "NULL"
-        where.append(f"id IN ({ph})"); args.extend(ids)
+        rids = [it["id"] for it in res.get("items", [])]
+        ph = ",".join("?" * len(rids)) if rids else "NULL"
+        where.append(f"{p}id IN ({ph})"); args.extend(rids)
     if f.get("chars_below"):
-        where.append("chars < ?"); args.append(int(f["chars_below"]))
+        where.append(f"{p}chars < ?"); args.append(int(f["chars_below"]))
     if f.get("empty_content_only"):
-        where.append("content_empty = 1")
+        where.append(f"{p}content_empty = 1")
     if f.get("before_synced_at"):
-        where.append("COALESCE(synced_at,'') < ?"); args.append(f["before_synced_at"])
-
+        where.append(f"COALESCE({p}synced_at,'') < ?")
+        args.append(f["before_synced_at"])
     w = (" WHERE " + " AND ".join(where)) if where else ""
+    return w, args
 
+
+def _stats_articles(d, f: Dict[str, Any]) -> Dict[str, Any]:
+    w, args = _article_where(f, d=d)
     total = d.conn.execute(f"SELECT COUNT(*) FROM articles{w}", args).fetchone()[0]
     by_site = [dict(r) for r in d.conn.execute(
         f"SELECT site, COUNT(*) n, MIN(pub_day) a, MAX(pub_day) b, "
@@ -151,11 +167,12 @@ def _stats_articles(d, f: Dict[str, Any]) -> Dict[str, Any]:
     # 连带会一起没掉的 AI 摘要（这是用户最该知道的）
     ann = 0
     if total:
-        ids_w = w.replace("WHERE ", "WHERE ") if w else "WHERE 1=1"
+        # 复用同一批条件，但必须带 a. 前缀 —— 见 _article_where 的说明
+        aw, aargs = _article_where(f, prefix="a", d=d)
         ann = d.conn.execute(
             f"SELECT COUNT(*) FROM ai_annotations x "
-            f"JOIN articles a ON a.id=x.article_id {ids_w}",
-            args).fetchone()[0]
+            f"JOIN articles a ON a.id=x.article_id{aw}",
+            aargs).fetchone()[0]
     return {"target": "articles", "matches": total,
             "by_site": by_site, "sample": sample,
             "cascade": {"ai_annotations": ann,
@@ -360,39 +377,10 @@ def execute_purge(d, target: str, confirm_token: str, **filters) -> Dict[str, An
 
 
 def _article_ids(d, f) -> List[int]:
-    where, args = [], []
-    if f.get("site"):
-        where.append("site = ?"); args.append(f["site"])
-    if f.get("site_like"):
-        where.append("site LIKE ?"); args.append(f"%{f['site_like']}%")
-    if f.get("date_from"):
-        where.append("pub_day >= ?"); args.append(f["date_from"])
-    if f.get("date_to"):
-        where.append("pub_day <= ?"); args.append(f["date_to"])
-    if f.get("year"):
-        where.append("year = ?"); args.append(str(f["year"]))
-    if f.get("column_name"):
-        where.append("column_name = ?"); args.append(f["column_name"])
-    if f.get("chars_below"):
-        where.append("chars < ?"); args.append(int(f["chars_below"]))
-    if f.get("empty_content_only"):
-        where.append("content_empty = 1")
-    if f.get("before_synced_at"):
-        where.append("COALESCE(synced_at,'') < ?"); args.append(f["before_synced_at"])
-    if f.get("ids"):
-        ph = ",".join("?" * len(f["ids"]))
-        where.append(f"id IN ({ph})"); args.extend(f["ids"])
-    if f.get("q"):
-        res = d.search(q=f["q"], site=f.get("site", "") or "",
-                       column_name=f.get("column_name", "") or "",
-                       year=str(f.get("year") or ""),
-                       date_from=f.get("date_from", "") or "",
-                       date_to=f.get("date_to", "") or "",
-                       skip_empty=False, limit=100000)
-        ids = [it["id"] for it in res.get("items", [])]
-        ph = ",".join("?" * len(ids)) if ids else "NULL"
-        where.append(f"id IN ({ph})"); args.extend(ids)
-    w = (" WHERE " + " AND ".join(where)) if where else ""
+    # 与 _stats_articles 共用同一份条件构造（_article_where）。
+    # 之前这里是手抄的第二份实现 —— 两份代码在 JOIN 修复后必然漂移，
+    # 会出现「预览说 6 条、实际删了另一批」的静默不一致。
+    w, args = _article_where(f, d)
     return [r["id"] for r in d.conn.execute(
         f"SELECT id FROM articles{w}", args)]
 

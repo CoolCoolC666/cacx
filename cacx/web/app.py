@@ -89,6 +89,7 @@ def api_search(
     date_to: str = "",
     min_chars: Optional[int] = None,
     skip_empty: bool = True,
+    only_empty: bool = False,
     sort: str = "date_desc",
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
@@ -99,7 +100,11 @@ def api_search(
     r = d.search(
         q=q, site=site, column_name=column, year=year,
         date_from=date_from, date_to=date_to, min_chars=min_chars,
-        skip_empty=skip_empty, sort=sort,
+        # only_empty 与 skip_empty 是互斥的两种视图，
+        # 同时传以 only_empty 为准（否则占位视图会被自己的过滤器清空）。
+        skip_empty=(False if only_empty else skip_empty),
+        only_empty=only_empty,
+        sort=sort,
         limit=size, offset=(page - 1) * size,
         min_fts_chars=cfg["search"]["min_fts_chars"])
     r["page"] = page
@@ -896,6 +901,50 @@ def api_sites_delete(code: str):
 def api_sites_toggle(code: str, enabled: bool = True):
     from .. import sites as S
     return {"ok": S.set_enabled(code, enabled), "code": code, "enabled": enabled}
+
+
+# ---------------------------------------------------------------- 占位条目
+@app.get("/api/placeholders")
+def api_placeholders(
+    site: str = "", column_name: str = "", year: str = "", q: str = "",
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0)):
+    """
+    占位条目：列表抓到、正文没入库的文章。
+
+    ⚠ 这里**不含**导航页/站外链接/公众号/脏数据 —— 它们被 classify.py
+    判成 SKIP_KINDS，根本不进 articles 表，记在 external_links 里。
+    「从来不是文章」与「是文章但正文没拿到」是两回事，
+    混在一起会让「缺口有多少」这个数字失去意义。
+    """
+    from ..placeholder import list_placeholders
+    return list_placeholders(DB, site=site, column_name=column_name,
+                             year=year, q=q, limit=limit, offset=offset)
+
+
+class BackfillIn(BaseModel):
+    article_ids: List[int]
+    dry_run: bool = True
+
+
+@app.post("/api/backfill")
+def api_backfill(req: BackfillIn):
+    """
+    按需补抓指定几篇的正文。
+
+    ⚠ 同 purge 的两阶段思路：dry_run 默认 True，先看这几篇能不能补上，
+    再 dry_run=false 真抓。**只接受点名的 id**，不给「一键补全某站」——
+    70 篇全量补抓若源站已改版，只会得到一片失败并让人误判站点坏了。
+    """
+    from ..placeholder import backfill
+    if len(req.article_ids) > 50:
+        raise HTTPException(400, "一次最多补抓 50 篇")
+    events: List[Dict[str, Any]] = []
+    try:
+        return backfill(CFG, DB, req.article_ids, dry_run=req.dry_run,
+                        on_event=lambda k, kw: events.append({"kind": k, **kw}))
+    except Exception as e:
+        raise HTTPException(502, f"补抓失败：{type(e).__name__}: {e}")
 
 
 # ---------------------------------------------------------------- 批量删除

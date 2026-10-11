@@ -299,11 +299,24 @@ class Database:
                sort: str = "date_desc",
                limit: int = 20,
                offset: int = 0,
-               min_fts_chars: int = 3) -> Dict[str, Any]:
+               min_fts_chars: int = 3,
+               only_empty: bool = False) -> Dict[str, Any]:
         """
         组合检索。
         返回 {total, items, mode, took_ms}
         mode 会标明走的是 fts 还是 like，便于排查「为什么搜不到」。
+
+        skip_empty / only_empty 是**三态**而不是布尔：
+            skip_empty=True （默认）只返回有正文的
+            only_empty=True 只返回空正文的（占位条目视图）
+            两者都 False       全部返回（要在一个列表里混着看时用）
+        ⚠ 不能用「skip_empty 取反」来实现 only_empty：那样会把
+        「未打标的半成品」（chars=0 且 content_empty=0，抓取中途留下的）
+        也当成空正文混进来。半成品是脏数据，占位不是。
+
+        ⚠ 空正文条目**不在 FTS 索引里**（没正文可索引），所以带 q 时
+        它们只能靠 title LIKE 命中 —— 检索「正文里的词」是找不到它们的，
+        这是正确行为，不是 bug。
 
         ⚠ 读路径也必须持锁：共享连接下，写线程提交事务会让其他线程
           正在使用的游标失效（InterfaceError: bad parameter or other
@@ -313,11 +326,13 @@ class Database:
         with self._lock:
             return self._search_locked(
                 q, site, column_code, column_name, year, date_from, date_to,
-                min_chars, skip_empty, sort, limit, offset, min_fts_chars)
+                min_chars, skip_empty, sort, limit, offset, min_fts_chars,
+                only_empty)
 
     def _search_locked(self, q, site, column_code, column_name, year,
                        date_from, date_to, min_chars, skip_empty, sort,
-                       limit, offset, min_fts_chars) -> Dict[str, Any]:
+                       limit, offset, min_fts_chars,
+                       only_empty=False) -> Dict[str, Any]:
         t0 = time.time()
         where, args = [], []
 
@@ -335,8 +350,13 @@ class Database:
             where.append("a.pub_day <= ?"); args.append(date_to)
         if min_chars is not None:
             where.append("a.chars >= ?"); args.append(int(min_chars))
-        if skip_empty:
+        if skip_empty and not only_empty:
             where.append("COALESCE(a.content_empty,0) = 0")
+        if only_empty:
+            # 只认「明确打了 content_empty 标」的行。
+            # chars=0 但没打标的半成品（抓取中途留下的）不算占位 ——
+            # 那是脏数据，integrity() 会单独报出来，不能混进占位视图。
+            where.append("COALESCE(a.content_empty,0) = 1")
 
         q = (q or "").strip()
         mode = "none"
@@ -348,6 +368,11 @@ class Database:
             # 避免 "清朗 专项行动" 这种组合词半边走索引半边走扫描导致漏结果
             toks = [t for t in re.split(r'[\s,，、;；]+', q) if t]
             use_fts = all(len(t) >= min_fts_chars for t in toks)
+            if only_empty:
+                # 占位条目没有正文 → 不在 FTS 索引里，走 FTS 必然 0 结果。
+                # 强制退回标题 LIKE，否则用户在占位视图里搜什么都是空的，
+                # 会误以为是功能坏了。
+                use_fts = False
             if use_fts:
                 join = ("JOIN articles_fts f ON f.rowid = a.id "
                         "AND articles_fts MATCH ?")
@@ -356,8 +381,12 @@ class Database:
             else:
                 mode = "like"
                 for t in toks:
-                    where.append("(a.title LIKE ? OR a.content_text LIKE ?)")
-                    args += [f"%{t}%", f"%{t}%"]
+                    if only_empty:
+                        where.append("a.title LIKE ?")
+                        args.append(f"%{t}%")
+                    else:
+                        where.append("(a.title LIKE ? OR a.content_text LIKE ?)")
+                        args += [f"%{t}%", f"%{t}%"]
 
         if sort == "date_asc":
             order = "a.pub_day ASC, a.id ASC"
@@ -365,6 +394,10 @@ class Database:
             order = "a.chars DESC"
         elif sort == "chars_asc":
             order = "a.chars ASC"
+        elif sort == "retry_first":
+            # 占位视图专用：最早入库的排前面 —— 那批通常也是
+            # 站点改版导致解析器失效、值得优先重抓的。
+            order = "a.first_seen ASC, a.id ASC"
         else:
             order = "a.pub_day DESC, a.id DESC"
 
@@ -385,6 +418,10 @@ class Database:
             "mode": mode,
             "items": [dict(r) for r in rows],
             "took_ms": int((time.time() - t0) * 1000),
+            "only_empty": bool(only_empty),
+            # 占位视图里「有多少条能按标题搜到」是用户最常问的
+            # 「为什么搜不到」，直接给数字，别让人自己猜。
+            "title_searchable": not only_empty or mode == "like",
         }
 
     def get_article(self, article_id: int, with_html: bool = False) -> Optional[dict]:

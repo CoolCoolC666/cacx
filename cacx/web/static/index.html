@@ -207,8 +207,16 @@
       <label>日期 <input type="date" id="date_from" style="width:145px">
         → <input type="date" id="date_to" style="width:145px"></label>
       <label>最少字数 <input type="number" id="min_chars" style="width:90px" placeholder="0"></label>
-      <label><input type="checkbox" id="skip_empty" checked> 隐藏空正文</label>
+      <label title="列表页/栏目页/站外链接/公众号不在这里 —— 它们从来就不是文章">
+        <input type="checkbox" id="skip_empty" checked> 隐藏正文未入库</label>
+      <label style="color:#c9a;display:flex;align-items:center;gap:4px"
+        title="显示「列表抓到、正文没入库」的条目：可看字段、可跳原文、可指定补抓">
+        <input type="checkbox" id="only_empty" onchange="onOnlyEmptyChange()">
+        只看正文未入库（占位）</label>
     </div>
+    <div id="ph_note" style="display:none;font-size:12px;color:var(--dim);
+         margin-bottom:8px;padding:7px 10px;border:1px solid var(--line);
+         border-radius:6px"></div>
     <div class="bar">
       <button class="btn" onclick="go(1)">检索</button>
       <button class="btn" onclick="doExport('csv')">↓ 导出 CSV</button>
@@ -665,7 +673,30 @@ function params(){
   add('sort',$('sort').value); add('date_from',$('date_from').value);
   add('date_to',$('date_to').value); add('min_chars',$('min_chars').value);
   if($('skip_empty').checked) p.set('skip_empty','true');
+  // 占位视图与「隐藏空正文」互斥：只保留一个语义，
+  // 否则同时传两个会让后端拿到矛盾条件（后端已做 only_empty 优先，
+  // 但前端就不该制造这种歧义）
+  if($('only_empty').checked) p.set('only_empty','true');
   return p;
+}
+
+/* 占位视图开关：切过去时把「隐藏空正文」置为未勾。
+   两个勾同时亮着对用户是没有意义的。 */
+function onOnlyEmptyChange(){
+  if($('only_empty').checked){
+    $('skip_empty').checked = false;
+    // 按重抓优先级排：最早入库的通常也是最该补的
+    const s=$('sort'); if(s && !s.dataset.userSet){
+      s.value='retry_first';
+      if(![...s.options].some(o=>o.value==='retry_first')){
+        const o=document.createElement('option');
+        o.value='retry_first'; o.textContent='按重抓优先级';
+        s.appendChild(o);
+      }
+    }
+    $('min_chars').value='';   // 字数筛选对空正文条目无意义
+  }
+  go(1);
 }
 
 let COLUMN_OPTIONS=[];   // [{name,label,n}] 当前站点下的栏目
@@ -708,8 +739,13 @@ function renderColumnHints(keep){
 async function loadFacets(){
   const f=await (await fetch('/api/facets')).json();
   FACETS_ALL=f;
-  $('stat').innerHTML=`<b>${f.total.toLocaleString()}</b> 篇文章 · `+
+  $('stat').innerHTML=`<b>${(f.total-f.empty).toLocaleString()}</b> 篇有正文 · `+
     `<b>${(f.chars/10000).toFixed(0)}</b> 万字 · ${f.days} 天 · `+
+    // 占位与站外分开列：它们性质不同 ——
+    //   占位 = 是文章但正文没进来（缺口）
+    //   站外 = 从来就不是文章（分流留痕）
+    // 混成一个「28999 篇」会让读者以为语料是完整的，实际缺了 f.empty 条。
+    `<span style="color:#c9a" title="列表抓到、正文未入库的文章">${f.empty} 占位</span> · `+
     `${f.external} 条站外`;
   for(const s of f.sites){
     const o=document.createElement('option');
@@ -733,13 +769,43 @@ async function go(page){
               : r.mode==='like' ? '<span class="pill" style="color:var(--warn)">LIKE 扫描（词过短）</span>'
               : '<span class="pill">浏览</span>';
   $('meta').innerHTML=`命中 <b class="n">${r.total.toLocaleString()}</b> 条 · ${pill} · ${r.took_ms}ms`;
+  const isPh = !!r.only_empty;
+  // 占位视图的说明条：把「不含什么」写清楚。
+  // 用户特意提过不能被导航一类的失败干扰 —— 所以要显式说明
+  // 这些条目根本不在这里，而不是让人自己猜。
+  const note=$('ph_note');
+  if(isPh){
+    note.style.display='block';
+    note.innerHTML = `当前是<b>占位条目</b>视图：列表页抓到了，但正文没入库。
+      字段（标题/日期/栏目/来源）可用，能跳原文，也可以指定补抓正文。
+      <span style="color:#c9a">不含</span>导航/栏目首页、站外链接、微信公众号、脏数据
+      —— 它们从来就不是文章，不算「缺口」。占位条目没有正文，因此只能按<b>标题</b>搜索。`;
+  } else { note.style.display='none'; }
+
   const L=$('list');
   if(!r.items.length){
-    L.innerHTML='<div class="empty">没有命中。换个词，或放宽筛选条件。</div>';
+    L.innerHTML= isPh
+      ? '<div class="empty">没有正文未入库的条目。换个词，或切回普通检索。</div>'
+      : '<div class="empty">没有命中。换个词，或放宽筛选条件。</div>';
   } else {
     L.innerHTML=r.items.map(it=>{
       const snip = it.snippet
         ? `<div class="s">${mark(it.snippet, it.highlights)}</div>` : '';
+      if(it.content_empty){
+        // 占位卡片：不给「N 字」，改说「正文未入库」，并给补抓入口
+        return `<div class="card" onclick="detail(${it.id})">
+          <div class="t">${esc(it.title)}</div>
+          <div class="m">
+            <span class="tag">${esc(it.site_name||it.site)}</span>
+            <span class="tag">${esc(it.column_name||'')}</span>
+            <span>${(it.pub_date||'').slice(0,10)}</span>
+            <span class="tag" style="color:#c9a;border-color:#5a4a6a">正文未入库</span>
+            ${it.source_text?`<span>来源 ${esc(it.source_text)}</span>`:''}
+            <span class="grow"></span>
+            <button class="btn" style="padding:2px 9px;font-size:11.5px"
+              onclick="event.stopPropagation();backfillOne(${it.id})">补抓正文</button>
+          </div>${snip}</div>`;
+      }
       return `<div class="card" onclick="detail(${it.id})">
         <div class="t">${mark(it.title, it.highlights)}</div>
         <div class="m">
@@ -765,6 +831,40 @@ function doExport(fmt){
   toast(`正在导出 ${fmt.toUpperCase()}…`);
 }
 
+/* 补抓单篇正文。
+   两阶段跟 purge 一个思路：先 dry_run 看这篇能不能补上（不发请求，
+   只说明会抓哪篇 + 失败原因推测），再真抓。默认不弹「你确定吗」——
+   补抓**不是删除**，失败了最多是这篇文章仍然没有正文，
+   没有不可逆后果，所以确认门槛放在 dry_run 结果的展示上就够了。 */
+async function backfillOne(id){
+  try{
+    const dry=await (await fetch('/api/backfill',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({article_ids:[id], dry_run:true})
+    })).json();
+    if(dry.todo===0){
+      toast(dry.skipped_has_content && dry.skipped_has_content.includes(id)
+        ? '这篇已有正文，不需补抓'
+        : (dry.not_found && dry.not_found.includes(id) ? '找不到这篇' : '无需补抓'), true);
+      return;
+    }
+    const info = dry.results[0] || {};
+    if(!confirm(`将补抓第 ${id} 号文章的正文：\n\n`
+      + (info.would_fetch||'')+'\n\n若源站已改版或链接失效，抓回来仍会是空。继续？')) return;
+    const r=await (await fetch('/api/backfill',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({article_ids:[id], dry_run:false})
+    })).json();
+    const one=(r.results||[])[0]||{};
+    if(one.status==='ok'){
+      toast(`已补回正文（${one.chars} 字）`);
+      go(PAGE); detail(id);
+    }else{
+      toast('补抓失败：'+(one.error||'未知原因'), true);
+    }
+  }catch(e){ toast('补抓出错：'+e.message, true); }
+}
+
 async function detail(id){
   const a=await (await fetch('/api/article/'+id)).json();
   const ai=a.ai&&a.ai.summarize;
@@ -777,15 +877,32 @@ async function detail(id){
       <span>${(a.chars||0).toLocaleString()} 字</span>
       ${a.source_text?`<span>来源 ${esc(a.source_text)}</span>`:''}
     </div>
-    ${a.content_empty?'<div class="aibox"><h3>注意</h3>本文正文在源站即为空（转载占位条目），非抓取失败。</div>':''}
+    ${a.content_empty?`<div class="aibox" style="border-color:#5a4a6a">
+      <h3>正文未入库（占位条目）</h3>
+      <div style="font-size:13px;line-height:1.7">
+        这条是<b>列表页抓到了、但正文没入库</b>的文章。下面这些字段照常可用，
+        也可以点右上角「跳转原文」直接去源站看。<br>
+        它不参与全文检索、不参与 AI 摘要 —— 统计语料量时请把它算作缺口，
+        不要当成「有正文的文章」。<br>
+        <span style="color:var(--dim)">注意：导航页/栏目首页/站外链接/公众号不
+        属于这一类，它们从来就不是文章。</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" onclick="backfillOne(${a.id})">⟳ 指定补抓这篇正文</button>
+        <span style="color:var(--dim);font-size:12px">
+          会重新请求源站；若源站已改版，抓回来仍可能是空</span>
+      </div>
+    </div>`:''}
     <div class="row" style="margin-bottom:14px">
       <a class="link" href="/open?id=${a.id}" target="_blank" rel="noopener">↗ 跳转原文</a>
       <a href="${esc(a.url)}" target="_blank" rel="noopener"
          style="color:var(--dim);font-size:12.5px">直接打开</a>
       <div class="grow"></div>
-      <button class="btn" onclick="aiSum(${a.id})"
+      ${a.content_empty
+        ? '<span style="color:var(--dim);font-size:12px">正文未入库，无法生成摘要</span>'
+        : `<button class="btn" onclick="aiSum(${a.id})"
         ${ready?'':'title="AI 未配置，先 cacx config set ai.* "'}>
-        ${ready?'✨ 生成摘要':'✨ AI 未配置'}</button>
+        ${ready?'✨ 生成摘要':'✨ AI 未配置'}</button>`}
     </div>
     <div id="aiout"></div>
     ${ai?`<div class="aibox"><h3>AI 摘要（已落库）</h3>
@@ -793,7 +910,13 @@ async function detail(id){
         ${(ai.tags||[]).length?`<div style="margin-top:7px">${
           ai.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join(' ')}</div>`:''}
       </div>`:''}
-    <div class="body">${esc(a.content_text||'（无正文）')}</div>`;
+    <div class="body">${a.content_empty
+      ? '<div style="color:var(--dim);padding:26px 0;text-align:center;'
+        + 'border:1px dashed var(--line);border-radius:6px">'
+        + '此处没有正文 —— 这是一条占位条目<br>'
+        + '<span style="font-size:12px">可点上方「指定补抓」，或直接'
+        + '「跳转原文」到源站阅读</span></div>'
+      : esc(a.content_text||'（无正文）')}</div>`;
   $('drawer').classList.add('on');
 }
 

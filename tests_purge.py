@@ -165,6 +165,39 @@ class TestRefuse(PurgeBase):
         self.assertEqual(self.n("SELECT COUNT(*) FROM ai_annotations"), 3)
 
 
+class TestIdsFilter(PurgeBase):
+    """--ids 路径：曾因 JOIN 歧义整条坏掉，且当时没有任何测试覆盖"""
+
+    def test_ids_filter_with_cascade_stats(self):
+        """⚠ 回归：早先 _stats_articles 的 where 用裸列名（id/site/chars…），
+        单独查 articles 没问题，但级联统计那段要拼到
+        `ai_annotations x JOIN articles a` 后面 —— 此时裸 `id`
+        同时匹配 x 和 a，SQLite 报 ambiguous column name。
+        只有 site 侥幸能过（site 只在 articles 上），
+        于是「除 site 外的所有条件」在带级联统计时全是坏的，
+        而这条路径当时根本没被实测过。
+        """
+        f = dict(ids=self.ids[:2])
+        st = preview_purge(self.d, "articles", **f)
+        self.assertEqual(st["matches"], 2)
+        self.assertEqual(st["cascade"]["ai_annotations"], 1)
+
+    def test_ids_execute_matches_preview(self):
+        """预览说几条就必须删几条（两份条件实现漂移会静默删错）"""
+        f = dict(ids=[self.ids[3], self.ids[4]])
+        st = preview_purge(self.d, "articles", **f)
+        r = execute_purge(self.d, "articles", st["confirm_token"], **f)
+        self.assertEqual(r["before"], st["matches"])
+        self.assertEqual(r["deleted"]["articles"], st["matches"])
+        self.assertEqual(self.n("SELECT COUNT(*) FROM articles"), 4)
+
+    def test_ids_with_site_and_year_combined(self):
+        """组合条件在 JOIN 下也必须成立"""
+        f = dict(ids=self.ids, site="cac", year="2019")
+        st = preview_purge(self.d, "articles", **f)
+        self.assertEqual(st["matches"], 2)
+
+
 class TestLimit(PurgeBase):
     """条件分级上限：宁可拒绝，也不给「一键清空」"""
 
