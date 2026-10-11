@@ -439,6 +439,56 @@
       </div>
     </div>
 
+    <!-- ============ 批量删除 ============ -->
+    <div class="box" style="margin-bottom:12px;border-color:#5a2a2a">
+      <h3>批量删除
+        <span style="color:#d98; font-weight:400;font-size:12px">
+          ⚠ 不可逆。先「预览影响面」看清要删什么，再在弹窗里输入确认才真正执行</span>
+      </h3>
+      <div class="form">
+        <label>删除对象
+          <select id="pg_target">
+            <option value="annotations">AI 摘要（正文保留）</option>
+            <option value="articles">文章正文（会连带删掉它的摘要）</option>
+            <option value="external_links">失败 / 站外条目登记</option>
+          </select>
+        </label>
+        <div class="row" id="pg_f_common">
+          <label>站点 <select id="pg_site"><option value="">（不限）</option></select></label>
+          <label>年份 <input type="number" id="pg_year" placeholder="如 2019" style="width:100px"></label>
+          <label>日期止 <input type="date" id="pg_to" style="width:150px"></label>
+        </div>
+        <div class="row" id="pg_f_ann" style="display:none">
+          <label>摘要任务
+            <select id="pg_task">
+              <option value="">（不限）</option>
+              <option value="summarize">summarize</option>
+              <option value="sentiment">sentiment</option>
+            </select>
+          </label>
+          <label>按内容包含 <input type="text" id="pg_like" placeholder="result 含此串" style="width:150px"></label>
+        </div>
+        <div class="row" id="pg_f_ext" style="display:none">
+          <label>失败类型
+            <select id="pg_kind">
+              <option value="">（不限）</option>
+              <option value="timeout">timeout</option>
+              <option value="not_found">not_found</option>
+              <option value="parse_failed">parse_failed</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <button class="btn" onclick="pgPreview()">🔍 预览影响面（安全，不删任何东西）</button>
+          <button class="btn" id="pg_go" disabled
+            style="background:#8b2020;border-color:#8b2020;color:#fff"
+            onclick="pgAskConfirm()">🗑 执行删除</button>
+          <span id="pg_msg" style="font-size:12.5px"></span>
+        </div>
+        <div id="pg_out" style="margin-top:10px"></div>
+      </div>
+    </div>
+
     <div id="ai_list" class="list"></div>
     <div class="pager" id="ai_pager"></div>
   </section>
@@ -1230,11 +1280,179 @@ async function loadBatchSites(){
       wrap.appendChild(lab);
     }
     wrap.dataset.loaded='1';
+    // 删除面板的站点下拉复用同一份注册表
+    const sel=$('pg_site');
+    if(sel && !sel.dataset.loaded){
+      for(const s of (r.items||[])){
+        if(!s.enabled) continue;
+        const o=document.createElement('option');
+        o.value=s.code; o.textContent=(s.name||s.code);
+        sel.appendChild(o);
+      }
+      sel.dataset.loaded='1';
+    }
   }catch(e){ /* 服务未起，静默降级 */ }
 }
 
 function bgSiteAll(v){
   document.querySelectorAll('.bg_site_cb').forEach(cb=>{ cb.checked=!!v; });
+}
+
+/* ============================================================
+   批量删除：预览 → 输入确认 → 执行
+   ------------------------------------------------------------
+   为什么不用 confirm() 就够了：
+   confirm() 只问「你确定吗」，用户答「确定」时的心理状态往往还是
+   「我刚点了预览，它说 295 条」—— 没真正看过是哪 295 条。
+   所以这里做成两步：先把命中清单 + 样本 + 警告全部渲染出来，
+   再要求用户**手打「删除」两个字**，才放行执行按钮。
+   二次确认的目的不是拦手滑，是逼人把「删什么」读一遍。
+   ============================================================ */
+let PG_TOKEN = null;      // 预览返回的凭据；条件一变就作废
+let PG_PREVIEW_N = 0;
+
+/* 条件一变立刻作废 token：预览的是旧条件，执行是新条件 = 没确认过 */
+function pgInvalidate(msg){
+  PG_TOKEN = null; PG_PREVIEW_N = 0;
+  const go = $('pg_go'); if(go) go.disabled = true;
+  if(msg) $('pg_msg').textContent = msg;
+}
+document.addEventListener('DOMContentLoaded', ()=>{
+  const ids = ['pg_target','pg_site','pg_year','pg_to','pg_task','pg_like','pg_kind'];
+  ids.forEach(id=>{ const el=$(id); if(el) el.addEventListener('change', ()=>pgInvalidate('条件已改，请重新预览')); });
+  const t=$('pg_target'); if(t) t.addEventListener('change', pgToggleFields);
+  pgToggleFields();
+});
+
+function pgToggleFields(){
+  const t = $('pg_target').value;
+  $('pg_f_ann').style.display = (t==='annotations') ? '' : 'none';
+  $('pg_f_ext').style.display = (t==='external_links') ? '' : 'none';
+  $('pg_f_common').style.display = (t==='external_links') ? 'none' : '';
+}
+
+function pgBody(){
+  const t = $('pg_target').value;
+  const b = { target: t };
+  const add = (k,v)=>{ if(v!=='' && v!=null) b[k]=v; };
+  if(t!=='external_links'){
+    add('site', $('pg_site').value);
+    add('year', $('pg_year').value);
+    add('date_to', $('pg_to').value);
+  }
+  if(t==='annotations'){
+    add('task', $('pg_task').value);
+    add('result_like', $('pg_like').value);
+  }
+  if(t==='external_links'){ add('fail_kind', $('pg_kind').value); }
+  return b;
+}
+
+async function pgPreview(){
+  const b = pgBody();
+  $('pg_msg').textContent = '统计中…';
+  $('pg_out').innerHTML = '';
+  pgInvalidate('');
+  try{
+    const r = await fetch('/api/purge/preview', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(b)
+    });
+    const j = await r.json();
+    if(!r.ok){
+      // 后端按规则拒绝属正常业务结果（400 + refused），当提示展示
+      const msg = (j.detail && (j.detail.message || j.detail)) || j.message || '预览失败';
+      $('pg_msg').textContent = '';
+      $('pg_out').innerHTML = '<div style="color:#d98;font-size:12.5px">'+esc(msg)+'</div>';
+      return;
+    }
+    PG_TOKEN = j.confirm_token; PG_PREVIEW_N = j.matches;
+    $('pg_msg').textContent = '命中 '+j.matches+' 条 —— 请核对下面清单';
+    $('pg_go').disabled = false;
+    $('pg_out').innerHTML = pgRenderPreview(j);
+  }catch(e){ $('pg_msg').textContent=''; toast('预览失败：'+e.message, true); }
+}
+
+function pgRenderPreview(j){
+  let h = '';
+  h += '<div style="border:1px solid #5a2a2a;border-radius:6px;padding:10px;background:#160d0d">';
+  h += '<div style="font-weight:600;margin-bottom:6px">将删除 <span style="color:#e66">'+j.matches+'</span> 条'
+     + '<span style="color:var(--dim);font-weight:400">（'+esc(j.target)+'）</span></div>';
+  const dist = j.by_site || j.by_task || j.by_kind || [];
+  if(dist.length){
+    h += '<div style="font-size:12.5px;color:var(--dim);margin-bottom:6px">分布：'
+      + dist.map(x=>{
+          if(x.site!=null) return esc(x.site)+' '+x.n+' 篇'
+              + (x.a? '（'+esc(x.a)+' ~ '+esc(x.b)+'）':'');
+          if(x.task!=null) return esc(x.task)+' '+x.n+' 条';
+          return esc(x.fail_kind)+' '+x.n+' 条';
+        }).join('　') + '</div>';
+  }
+  if(j.cascade && j.cascade.ai_annotations){
+    h += '<div style="font-size:12.5px;color:#d98;margin-bottom:6px">'
+      + '⚠ 其中 '+j.cascade.ai_annotations+' 条是文章自带的 AI 摘要，将一并删除</div>';
+  }
+  (j.warnings||[]).forEach(w=>{ h += '<div style="font-size:12.5px;color:#d98;margin-bottom:4px">'+esc(w)+'</div>'; });
+  if((j.sample||[]).length){
+    h += '<div style="font-size:12.5px;margin-top:8px">样本（最多 8 条）：</div><ul style="margin:4px 0 0 18px;font-size:12px;color:var(--dim)">';
+    j.sample.forEach(s=>{
+      const label = s.title || s.fail_kind || ('#'+s.article_id);
+      h += '<li>'+esc(String(s.pub_day||''))+' '+esc(label)+'</li>';
+    });
+    h += '</ul>';
+  }
+  h += '<div style="font-size:11.5px;color:var(--dim);margin-top:8px">'
+     + '凭据 '+esc(j.confirm_token)+'（条件一改就失效）</div>';
+  h += '</div>';
+  return h;
+}
+
+/* 二次确认：手打「删除」才放行。不是 confirm()，是刻意多一步。 */
+function pgAskConfirm(){
+  if(!PG_TOKEN){ toast('请先预览影响面', true); return; }
+  const n = PG_PREVIEW_N;
+  const txt = prompt(
+    '即将**永久删除 '+n+' 条**数据，无法撤销。\n' +
+    '若确认，请在下方输入两个字：删除\n\n' +
+    '（直接关掉对话框 = 取消，什么都不会发生）',
+    '');
+  if(txt === null) return;
+  if(txt.trim() !== '删除'){
+    $('pg_msg').textContent = '未输入「删除」，已取消';
+    return;
+  }
+  pgExecute();
+}
+
+async function pgExecute(){
+  const b = pgBody();
+  b.yes = true; b.confirm_token = PG_TOKEN;
+  $('pg_msg').textContent = '删除中…';
+  $('pg_go').disabled = true;
+  try{
+    const r = await fetch('/api/purge/execute', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(b)
+    });
+    const j = await r.json();
+    if(!r.ok){
+      const msg = (j.detail && (j.detail.message || j.detail)) || j.message || '删除失败';
+      $('pg_msg').textContent='';
+      $('pg_out').innerHTML = '<div style="color:#d98;font-size:12.5px">'+esc(msg)+'</div>';
+      return;
+    }
+    const d = j.deleted||{};
+    let detail = Object.entries(d).map(([k,v])=>esc(k)+' '+v).join('　');
+    $('pg_msg').textContent='';
+    $('pg_out').innerHTML = '<div style="border:1px solid #2a5a2a;border-radius:6px;padding:10px;background:#0d160d">'
+      + '<div style="color:#6c6;font-weight:600">已删除 '+j.total+' 条（原 '+j.before+' 条）</div>'
+      + '<div style="font-size:12px;color:var(--dim);margin-top:4px">'+detail+'</div></div>';
+    PG_TOKEN = null; PG_PREVIEW_N = 0;
+    toast('已删除 '+j.total+' 条');
+    // 摘要数会变，刷一下统计与列表
+    if(typeof loadAiStats === 'function') loadAiStats();
+    if(typeof loadAiList === 'function') loadAiList();
+  }catch(e){ $('pg_msg').textContent=''; toast('删除失败：'+e.message, true); }
 }
 
 function collectBatchBody(dry_run){

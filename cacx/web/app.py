@@ -17,6 +17,9 @@ FastAPI 检索服务
     GET  /api/events           行为埋点统计（检索/跳转/导出）
     GET  /api/ai/status        AI 配置状态
 
+    POST /api/purge/preview    批量删除：影响面预览（只读，返 confirm_token）
+    POST /api/purge/execute    批量删除：真删（需 yes=true + 正确的 token）
+
 约定
     · 只读接口一律不写库；写操作（AI 落库）需显式 ?commit=1
     · 原文跳转走本服务中转，方便记录「哪篇被检索后跳走了」
@@ -893,6 +896,78 @@ def api_sites_delete(code: str):
 def api_sites_toggle(code: str, enabled: bool = True):
     from .. import sites as S
     return {"ok": S.set_enabled(code, enabled), "code": code, "enabled": enabled}
+
+
+# ---------------------------------------------------------------- 批量删除
+class PurgeIn(BaseModel):
+    """删除条件。字段名与 purge.py 的 filters 一一对应。
+
+    ⚠ 白名单刻意收窄：只接受能落到明确列上的条件，
+    不接受任何形如 "sql" / "where" 的自由文本 ——
+    那等于把 DELETE 的 WHERE 交给前端填。"""
+    target: str
+    site: Optional[str] = None
+    site_like: Optional[str] = None
+    column_name: Optional[str] = None
+    year: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    q: Optional[str] = None
+    chars_below: Optional[int] = None
+    empty_content_only: Optional[bool] = None
+    before_synced_at: Optional[str] = None
+    ids: Optional[List[int]] = None
+    # annotations
+    task: Optional[str] = None
+    provider: Optional[str] = None
+    result_like: Optional[str] = None
+    created_before: Optional[str] = None
+    # external_links
+    fail_kind: Optional[str] = None
+    is_own_site: Optional[bool] = None
+    # 执行闸门
+    confirm_token: Optional[str] = None
+    yes: bool = False
+
+    def filters(self) -> Dict[str, Any]:
+        f = self.model_dump()
+        for k in ("target", "confirm_token", "yes"):
+            f.pop(k, None)
+        # 统一交给 purge._clean：False 与空串/空列表一样都是「没给条件」，
+        # 两处各写一套过滤逻辑必然走偏（历史上已经错过一次）。
+        from ..purge import _clean
+        return _clean(f)
+
+
+@app.post("/api/purge/preview")
+def api_purge_preview(req: PurgeIn):
+    """删除前的影响面预览。**只读，不动任何数据。**"""
+    from ..purge import PurgeRefused, preview_purge
+    try:
+        return preview_purge(DB, req.target, **req.filters())
+    except PurgeRefused as e:
+        # 400 而不是 500：这是「按规则拒绝」，属于正常业务结果，
+        # 前端要把它当可读提示展示，不是崩溃。
+        raise HTTPException(400, {"message": str(e), "refused": True})
+
+
+@app.post("/api/purge/execute")
+def api_purge_execute(req: PurgeIn):
+    """真删。必须同时满足：yes=true + 带 preview 返回的 confirm_token。"""
+    from ..purge import PurgeRefused, execute_purge
+    if not req.yes:
+        raise HTTPException(400, {"message":
+            "未确认：删除是不可逆操作，需显式传 yes=true",
+            "refused": True})
+    if not req.confirm_token:
+        raise HTTPException(400, {"message":
+            "缺少 confirm_token，请先调用 /api/purge/preview 看清影响面",
+            "refused": True})
+    try:
+        return execute_purge(DB, req.target, req.confirm_token,
+                             **req.filters())
+    except PurgeRefused as e:
+        raise HTTPException(400, {"message": str(e), "refused": True})
 
 
 # ---------------------------------------------------------------- 配置

@@ -302,6 +302,129 @@ def cmd_api_check(args):
     return 0
 
 
+# ---------------------------------------------------------------- 批量删除
+def cmd_purge(args):
+    """
+    批量删除：文章 / AI 摘要 / 站外条目登记。
+
+    删本地语料不可逆（文章要重新 sync 才抓得回来，摘要要重烧配额），
+    所以这里是**两阶段**：先 --preview 看影响面，真删必须加 --yes，
+    且要带上 --token（就是 preview 给的那串）。
+    """
+    from .. import purge as PG
+
+    cfg = C.load()
+    d = D.open_db(cfg)
+    filters = {}
+    for k in ("site", "column", "year", "date_from", "date_to",
+              "task", "provider", "kind", "created_before", "result_like",
+              "chars_below", "q"):
+        v = getattr(args, k, None)
+        if v not in (None, "", []):
+            filters[{"kind": "fail_kind", "column": "column_name"}.get(k, k)] = v
+    if getattr(args, "empty_only", False):
+        filters["empty_content_only"] = True
+    if getattr(args, "ids", None):
+        try:
+            filters["ids"] = [int(x) for x in args.ids.split(",") if x.strip()]
+        except ValueError:
+            print("--ids 必须是逗号分隔的整数")
+            d.close()
+            return 2
+
+    try:
+        pv = PG.preview_purge(d, args.target, **filters)
+    except PG.PurgeRefused as e:
+        print(f"拒绝执行：{e}")
+        d.close()
+        return 1
+
+    if args.json:
+        print(json.dumps(pv, ensure_ascii=False, indent=2, default=str))
+        d.close()
+        return 0
+
+    print("=" * 68)
+    print(f"删除预览 · 目标={pv['target']} · 将影响 {pv['matches']} 条")
+    print("=" * 68)
+    print("筛选条件：")
+    for k, v in pv["filters"].items():
+        print(f"  {k:20s} = {v}")
+
+    if pv.get("by_site"):
+        print("\n按站点分布：")
+        for r in pv["by_site"]:
+            print(f"  {r['site']:12s} {r['n']:7d} 篇   "
+                  f"{r['a']} ~ {r['b']}   约 {r.get('chars', 0) // 10000} 万字")
+    if pv.get("by_task"):
+        print("\n按任务类型：")
+        for r in pv["by_task"]:
+            print(f"  {r['task']:20s} {r['n']:7d} 条")
+    if pv.get("by_kind"):
+        from ..collector.classify import KIND_LABEL
+        print("\n按失败类型：")
+        for r in pv["by_kind"]:
+            print(f"  {KIND_LABEL.get(r['fail_kind'], r['fail_kind']):20s} "
+                  f"{r['n']:7d} 条")
+
+    if pv.get("cascade", {}).get("ai_annotations"):
+        print(f"\n⚠ 其中 {pv['cascade']['ai_annotations']} 条文章带 AI 摘要，"
+              "会一起被删掉（重新生成要再烧配额）")
+
+    if pv.get("sample"):
+        print("\n样本（前 8 条）：")
+        for r in pv["sample"]:
+            if pv["target"] == "articles":
+                print(f"  [{r.get('id')}] {r.get('pub_day')} "
+                      f"{r.get('site')} {str(r.get('title'))[:34]}")
+            elif pv["target"] == "annotations":
+                print(f"  [文章 {r.get('article_id')}] {r.get('task')} "
+                      f"{r.get('created_at')} {str(r.get('title'))[:26]}")
+            else:
+                print(f"  [{r.get('fail_kind')}] {str(r.get('title'))[:34]} "
+                      f"→ {str(r.get('list_url'))[:40]}")
+
+    if pv.get("warnings"):
+        print("\n" + "!" * 68)
+        for w in pv["warnings"]:
+            print(f"! {w}")
+        print("!" * 68)
+
+    # ---- 二次确认闸门 ----
+    if not args.yes:
+        print("\n这是预览，什么都没删。")
+        print(f"确认要删，执行时加上：")
+        print(f"  --yes --token {pv['confirm_token']}")
+        d.close()
+        return 0
+
+    if not args.token:
+        print("\n拒绝执行：--yes 还不够，必须同时带 --token "
+              f"{pv['confirm_token']}")
+        print("（token 来自上一步预览，确认你看过影响面）")
+        d.close()
+        return 1
+
+    try:
+        res = PG.execute_purge(d, args.target, args.token, **filters)
+    except PG.PurgeRefused as e:
+        print(f"\n拒绝执行：{e}")
+        d.close()
+        return 1
+
+    print("\n" + "=" * 68)
+    print("已删除：")
+    for k, v in res["deleted"].items():
+        if k == "fts_optimized":
+            if v:
+                print("  （已优化 FTS 索引）")
+            continue
+        print(f"  {k:20s} {v:7d} 条")
+    print("=" * 68)
+    d.close()
+    return 0
+
+
 # ---------------------------------------------------------------- 非文章条目查询
 def cmd_links(args):
     """
@@ -807,6 +930,39 @@ def build_parser():
     sp.add_argument("--site", help="限定站点")
     sp.add_argument("-n", "--limit", type=int, default=40)
     sp.set_defaults(func=cmd_links)
+
+    # ---- 批量删除（两阶段：先预览影响面，再带 token 真删）----
+    sp = sub.add_parser(
+        "purge",
+        help="批量删除：文章 / AI 摘要 / 站外条目（默认只预览，不删）")
+    sp.add_argument("target", choices=["articles", "annotations",
+                                       "external_links"],
+                    help="删什么：articles=文章正文（连带其摘要）"
+                         "/ annotations=AI 摘要 / external_links=站外条目登记")
+    sp.add_argument("--site", help="限定站点，如 cac / zjwx")
+    sp.add_argument("--column", help="限定栏目名")
+    sp.add_argument("--year", help="限定年份，如 2024")
+    sp.add_argument("--date-from", help="发布日期 >= YYYY-MM-DD")
+    sp.add_argument("--date-to", help="发布日期 <= YYYY-MM-DD")
+    sp.add_argument("--q", help="按关键词筛（走既有 FTS 索引）")
+    sp.add_argument("--task", help="annotations 专用：summarize / tag")
+    sp.add_argument("--provider", help="annotations 专用：AI 供应商")
+    sp.add_argument("--result-like", help="annotations 专用：结果含某关键词")
+    sp.add_argument("--created-before", help="annotations 专用：创建时间 < YYYY-MM-DD")
+    sp.add_argument("--kind", help="external_links 专用："
+                                    "index_page/external/wechat/dirty")
+    sp.add_argument("--chars-below", type=int,
+                    help="articles 专用：只删正文字数少于 N 的")
+    sp.add_argument("--empty-only", action="store_true",
+                    help="articles 专用：只删空正文的")
+    sp.add_argument("--ids", help="按 id 删除，逗号分隔（最精确）")
+    sp.add_argument("--yes", action="store_true",
+                    help="确认要删（不加只预览）")
+    sp.add_argument("--token",
+                    help="预览返回的 confirm_token —— 二次确认闸门，"
+                         "证明你看过影响面")
+    sp.add_argument("--json", action="store_true", help="输出完整 JSON")
+    sp.set_defaults(func=cmd_purge)
 
     sp = sub.add_parser("site", help="站点管理：添加 / 试抓 / 删除自定义站点")
     ssub = sp.add_subparsers(dest="action", required=True)

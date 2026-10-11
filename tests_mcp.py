@@ -47,9 +47,13 @@ REQUIRED_TOOLS = [
     "cacx_sync", "cacx_summarize",
     "cacx_summarize_batch", "cacx_ai_config",
     "cacx_doctor",
+    # 删数据的工具排在最后：它不烧钱但**不可逆**，
+    # 放在只读工具后面是为了让默认的探索路径永远不会碰到它。
+    "cacx_purge",
 ]
 WRITE_TOOLS = {"cacx_sync", "cacx_summarize",
-               "cacx_summarize_batch", "cacx_ai_config"}
+               "cacx_summarize_batch", "cacx_ai_config",
+               "cacx_purge"}
 
 # 人造「真实格式」密钥：长得像 MiniMax key，但完全是测试用假串。
 FAKE_KEY = "sk-TESTKEY-abcdef0123456789XYZ"
@@ -95,7 +99,7 @@ def test_tools_registered():
 
     tools = asyncio.run(_names())
     names = [t[0] for t in tools]
-    check("工具总数 == 12", len(names) == 12, f"实际 {len(names)}: {names}")
+    check("工具总数 == 13", len(names) == 13, f"实际 {len(names)}: {names}")
     for want in REQUIRED_TOOLS:
         check(f"已注册 {want}", want in names, f"现有 {names}")
 
@@ -129,7 +133,7 @@ def test_tools_registered():
     section("5. dry_run 默认 True（从 input_schema 读）")
     schemas = {t[0]: t[2] for t in tools}
     for tn in ("cacx_sync", "cacx_summarize",
-               "cacx_summarize_batch", "cacx_ai_config"):
+               "cacx_summarize_batch", "cacx_ai_config", "cacx_purge"):
         props = (schemas.get(tn) or {}).get("properties") or {}
         dr = props.get("dry_run") or {}
         check(f"{tn}.dry_run 默认 True", dr.get("default") is True,

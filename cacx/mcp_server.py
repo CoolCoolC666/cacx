@@ -647,6 +647,98 @@ def cacx_doctor(
         return _err(e)
 
 
+@mcp.tool()
+def cacx_purge(
+    target: str,
+    site: str = "",
+    site_like: str = "",
+    column_name: str = "",
+    year: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    q: str = "",
+    chars_below: int = 0,
+    empty_content_only: bool = False,
+    before_synced_at: str = "",
+    ids: Optional[List[int]] = None,
+    task: str = "",
+    provider: str = "",
+    result_like: str = "",
+    created_before: str = "",
+    fail_kind: str = "",
+    is_own_site: Optional[bool] = None,
+    confirm_token: str = "",
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """
+    批量删除本地数据（文章正文 / AI 摘要 / 失败条目登记）。
+
+    ⚠⚠ 删除不可逆，**两道闸门都必须过**：
+
+        闸门一 dry_run（默认 True）
+            第一次调用保持默认，只返回影响面：命中多少条、按什么维度分布、
+            样本长什么样、连带会删掉多少摘要，外加一个 confirm_token。
+            此时**一个字节都没删**。
+
+        闸门二 confirm_token
+            真删必须把上一步的 confirm_token 原样传回来。
+            token 由「条件 + 命中数」算出 —— 如果预览之后库变了
+            （又同步了几篇、或者条件被改动），token 就对不上，执行会被拒绝。
+            防止「我看的是 100 条的预览，实际删掉了 150 条」。
+
+    正确用法（两次调用）：
+        1. cacx_purge(target="annotations", site="zjwx", dry_run=True)
+           → 读 matches / sample / warnings，把 confirm_token 念给用户听
+        2. cacx_purge(target="annotations", site="zjwx",
+                       confirm_token="<上一步的>", dry_run=False)
+
+    参数：
+        target: articles | annotations | external_links（**没有** meta /
+                sync_runs —— 那是库的血缘，删了会破坏追溯）。
+        其余均为筛选条件，至少给一个，否则拒绝。
+        条件越精确允许删的量越大（只给 site 上限 200 条，
+        给了年份/栏目/日期区间则到 2000 条）。
+
+    返回：dry_run 时是影响面报告；真删时是
+          {target, before, deleted:{articles,ai_annotations,events,...}, total}
+    """
+    try:
+        from .purge import (PurgeRefused, _clean, execute_purge,
+                           preview_purge)
+        f = _clean({
+            "site": site, "site_like": site_like, "column_name": column_name,
+            "year": year, "date_from": date_from, "date_to": date_to, "q": q,
+            "chars_below": chars_below, "empty_content_only": empty_content_only,
+            "before_synced_at": before_synced_at, "ids": ids,
+            "task": task, "provider": provider, "result_like": result_like,
+            "created_before": created_before, "fail_kind": fail_kind,
+            "is_own_site": is_own_site,
+        })
+        if not f:
+            return {"refused": True,
+                    "message": "没有给任何筛选条件。删除必须限定范围，"
+                               "请至少给 site / date_from+date_to / task / "
+                               "fail_kind / ids 之一。"}
+        if not dry_run and not confirm_token:
+            return {"refused": True,
+                    "message": "缺少 confirm_token。请先用 dry_run=True 调一次"
+                               "看影响面，把返回的 confirm_token 传回来再删。"
+                               "（删除不可逆，这是设计上的二次确认闸门）"}
+        with _db() as d:
+            if dry_run:
+                rep = preview_purge(d, target, **f)
+                rep["dry_run"] = True
+                rep["next_step"] = (
+                    "确认无误后，把 confirm_token 与完全相同的条件原样传回，"
+                    "并设 dry_run=false 执行删除。")
+                return rep
+            return execute_purge(d, target, confirm_token, **f)
+    except PurgeRefused as e:
+        return {"refused": True, "message": str(e)}
+    except Exception as e:
+        return _err(e)
+
+
 # ---------------------------------------------------------------- 入口
 if __name__ == "__main__":
     mcp.run()
