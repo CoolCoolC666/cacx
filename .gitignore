@@ -29,6 +29,7 @@ Thumbs.db
 # ---- 抓取缓存 ----
 _cache/
 *.log
+_serve.err
 
 # ---- 一次性临时脚本（调试用，跑完即弃）----
 _tmp*.py

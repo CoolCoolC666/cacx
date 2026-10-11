@@ -829,7 +829,7 @@ function renderSyncColumns(cols){
       <span class="m">${c.listed||0} 条`+
         (c.state==='done'&&c.new!=null?` · 新增 ${c.new}`:'')+
         (c.state==='done'&&c.failed?` · <b class="e">失败 ${c.failed}</b>`:'')+
-      (running?' <span class="spin">…</span>':'')+'</span></div>`;
+      (running?' <span class="spin">…</span>':'')+'</span></div>';
   }).join('')+'</div>';
 }
 

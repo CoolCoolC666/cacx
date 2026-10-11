@@ -615,6 +615,56 @@ def test_fetcher_header_merge():
           str(seen.get("headers")))
 
 
+# ---------------------------------------------------------------- 8. 前端
+def test_frontend_js_syntax():
+    """
+    内联 JS 必须能被解析器接受。
+
+    起因：renderSyncColumns 的模板串拼接末尾多了一个反引号，
+    整个 <script> 块解析失败 —— 页面照常渲染出完整 DOM，
+    但**一行 JS 都没执行**：站点/年份下拉全空、统计栏空白，
+    控制台只有一条 SyntaxError。而后端 API 全部正常，
+    光看接口测试与页面结构都发现不了。
+    """
+    import re
+    import shutil
+    import subprocess
+
+    html_path = (Path(__file__).resolve().parent / "cacx" / "web" /
+                 "static" / "index.html")
+    check("前端页面存在", html_path.exists(), str(html_path))
+    if not html_path.exists():
+        return
+
+    html = html_path.read_text(encoding="utf-8")
+    blocks = re.findall(r"<script[^>]*>([\s\S]*?)</script>", html)
+    check("页面里有内联脚本", len(blocks) >= 1, f"n={len(blocks)}")
+
+    node = shutil.which("node")
+    if not node:
+        print("  skip 未装 node，跳过 JS 语法校验")
+        return
+
+    checker = (
+        "const fs=require('fs');"
+        "const html=fs.readFileSync(process.argv[1],'utf8');"
+        "const m=[...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/g)];"
+        "let bad=0;"
+        "m.forEach((s,i)=>{try{new Function(s[1]);}"
+        "catch(e){bad++;console.log('block '+i+': '+e.message);}});"
+        "process.exit(bad?1:0);"
+    )
+    r = subprocess.run([node, "-e", checker, str(html_path)],
+                       capture_output=True, text=True, timeout=60)
+    check("内联 JS 语法正确（node 实解析）", r.returncode == 0,
+          (r.stdout + r.stderr).strip()[:300])
+
+    # 反引号个数为奇数一定是漏了闭合
+    for i, js in enumerate(blocks):
+        check(f"第{i + 1}块反引号成对",
+              js.count("`") % 2 == 0, f"count={js.count('`')}")
+
+
 # ---------------------------------------------------------------- main
 def main():
     print("=" * 62)
@@ -623,7 +673,8 @@ def main():
     for fn in (test_classify, test_dates, test_dig, test_sites_registry,
                test_runner_diversion, test_early_stop, test_decode,
                test_list_inference, test_api_candidates, test_generic_build,
-               test_jpaas_json_column, test_fetcher_header_merge):
+               test_jpaas_json_column, test_fetcher_header_merge,
+               test_frontend_js_syntax):
         try:
             fn()
         except Exception:
