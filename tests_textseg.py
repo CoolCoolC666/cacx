@@ -181,6 +181,23 @@ class TestNormalize(unittest.TestCase):
         for good in ("中央网信办", "公安部", "工业和信息化部", "清华大学"):
             self.assertTrue(textseg.org_like(good), f"「{good}」该被认成机构")
 
+    def test_时政要闻里的活动报道不算机构(self):
+        """⚠ 回归：真实跑 cac 时政要闻栏目时挖出来的是
+        「习近平给中国农业大学」「北京看望慰问基层干部」「前瞻布局」
+        ——都以机构后缀结尾，却根本不是发文机关。
+        所以判据必须是「**任意位置**含动词成分」，只挡首尾不够。
+
+        ⚠ 但别误伤「全国人大常委会国务院」——那是标题里两个真机构
+        连写（「全国人大常委会 国务院 举行…」），只挡动词即可。"""
+        for bad in ("习近平给中国农业大学", "前瞻布局",
+                    "北京看望慰问基层干部", "赴任考察省部级"):
+            self.assertFalse(textseg.org_like(bad), f"「{bad}」不该被当机构")
+        # 同栏目里真正的机构不能被误伤（含两个机构连写的情形）
+        for good in ("全国人大常委会", "国务院", "最高人民检察院",
+                     "国家发展改革委", "中央网信办",
+                     "全国人大常委会国务院"):
+            self.assertTrue(textseg.org_like(good), f"「{good}」被误伤了")
+
 
 class TestQuery(unittest.TestCase):
     def test_长查询切词(self):

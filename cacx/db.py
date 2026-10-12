@@ -161,6 +161,51 @@ CREATE TABLE IF NOT EXISTS ai_failures (
     UNIQUE (article_id, task)
 );
 CREATE INDEX IF NOT EXISTS idx_ai_fail_retryable ON ai_failures(retryable, created_at);
+
+-- ============================================================ 实体 / 关系
+-- 这两张表是「实体关系抽取」（作业 R1）与「关系图谱」（R2）的落地，
+-- 由 AI 通过 MCP 写入，不靠人工录入。
+--
+-- ⚠ 设计要点：**每条实体、每条关系都必须带 article_id（证据出处）**。
+--   老师明确要求演示时「点关系能回溯到原文」，没有出处的关系
+--   在图谱上就是无法验证的孤证，答辩时一问就塌。
+--   复合主键 (name, article_id) 让同一机构在不同文章里各自留痕，
+--   同时天然去重（AI 重复提交同一条不会产生重复行）。
+CREATE TABLE IF NOT EXISTS entities (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,          -- 机构 / 政策 / 治理问题 / 措施
+    type        TEXT NOT NULL,          -- org / policy / problem / measure
+    article_id  INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    aliases     TEXT,                   -- JSON 数组：归并前的其他写法
+    evidence    TEXT,                   -- 原文片段（回溯用）
+    extractor   TEXT,                   -- 谁抽的：human / gpt / doubao…
+    confidence  REAL DEFAULT 0,
+    created_at  TEXT,
+    UNIQUE (name, type, article_id)
+);
+CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
+CREATE INDEX IF NOT EXISTS idx_entities_article ON entities(article_id);
+
+CREATE TABLE IF NOT EXISTS relations (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    src_name     TEXT NOT NULL,
+    dst_name     TEXT NOT NULL,
+    rel_type     TEXT NOT NULL,         -- co_issue / regulate / cite / belong…
+    article_id   INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    evidence     TEXT,                  -- 支撑这句话的原文片段
+    weight       REAL DEFAULT 1.0,      -- 共现强度（同一篇出现多次可加权）
+    extractor    TEXT,
+    created_at   TEXT,
+    -- 同一条关系在同一篇文章里只能有一条。⚠ 不能只对
+    -- (src,dst,type) 建唯一约束：那会把「甲乙联合发文」在
+    -- 10 篇文章里的 10 条证据压成 1 条，恰好抹掉最该保留的共现强度。
+    UNIQUE (src_name, dst_name, rel_type, article_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rel_src ON relations(src_name);
+CREATE INDEX IF NOT EXISTS idx_rel_dst ON relations(dst_name);
+CREATE INDEX IF NOT EXISTS idx_rel_article ON relations(article_id);
+CREATE INDEX IF NOT EXISTS idx_rel_type ON relations(rel_type);
 """
 
 
@@ -1169,6 +1214,208 @@ class Database:
                 f"SELECT substr(pub_day,1,4) y, COUNT(*) n "
                 f"FROM articles WHERE {' AND '.join(where)} "
                 f"GROUP BY y ORDER BY y", args)]
+
+    # ------------------------------------------------- 实体 / 关系（写入）
+    ENTITY_TYPES = ("org", "policy", "problem", "measure")
+
+    def upsert_entities(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        AI 批量写入实体。rows 每项：
+            {name, type, article_id, evidence?, aliases?, extractor?, confidence?}
+
+        返回 {written, skipped, errors:[...]}。
+        重复提交同一篇的同一实体走 ON CONFLICT 更新证据，不产生重复行 ——
+        AI 重跑一次不会把图谱撑成双倍。
+        """
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        written = skipped = 0
+        errors: List[str] = []
+        with self._lock:
+            try:
+                self.conn.execute("BEGIN")
+                for r in rows:
+                    name = (r.get("name") or "").strip()
+                    etype = (r.get("type") or "").strip()
+                    aid = r.get("article_id")
+                    if not name or not aid:
+                        skipped += 1
+                        errors.append(f"缺 name 或 article_id：{r!r}")
+                        continue
+                    if etype not in self.ENTITY_TYPES:
+                        skipped += 1
+                        errors.append(
+                            f"未知实体类型 {etype!r}，可选 {self.ENTITY_TYPES}")
+                        continue
+                    # article_id 必须真实存在，否则外键会炸；
+                    # 先验一次，把报错变成可读提示
+                    ok = self.conn.execute(
+                        "SELECT 1 FROM articles WHERE id=?",
+                        (int(aid),)).fetchone()
+                    if not ok:
+                        skipped += 1
+                        errors.append(f"文章 {aid} 不存在")
+                        continue
+                    al = r.get("aliases") or []
+                    if isinstance(al, str):
+                        try:
+                            al = json.loads(al)
+                        except Exception:
+                            al = [al]
+                    self.conn.execute(
+                        "INSERT INTO entities"
+                        "(name,type,article_id,aliases,evidence,extractor,"
+                        " confidence,created_at) VALUES(?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(name,type,article_id) DO UPDATE SET "
+                        "evidence=excluded.evidence, aliases=excluded.aliases, "
+                        "extractor=excluded.extractor, "
+                        "confidence=excluded.confidence",
+                        (name, etype, int(aid), json.dumps(al, ensure_ascii=False),
+                         r.get("evidence") or "", r.get("extractor") or "ai",
+                         float(r.get("confidence") or 0), now))
+                    written += 1
+                self.conn.commit()
+            except Exception as e:
+                self.conn.rollback()
+                raise
+        return {"written": written, "skipped": skipped,
+                "errors": errors[:20], "error_count": len(errors)}
+
+    def upsert_relations(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        AI 批量写入关系。rows 每项：
+            {src_name, dst_name, rel_type, article_id, evidence?, weight?}
+
+        ⚠ weight 累加而不是覆盖：同一对机构在 10 篇文章里联合发文，
+        权重就该是 10 —— 合作网络的强弱正是这么来的。
+        但只对**同一 article_id** 去重，跨文章的证据全部保留。
+        """
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        written = skipped = 0
+        errors: List[str] = []
+        with self._lock:
+            try:
+                self.conn.execute("BEGIN")
+                for r in rows:
+                    s = (r.get("src_name") or "").strip()
+                    t = (r.get("dst_name") or "").strip()
+                    rt = (r.get("rel_type") or "").strip()
+                    aid = r.get("article_id")
+                    if not s or not t or not rt or not aid:
+                        skipped += 1
+                        errors.append(f"缺字段：{r!r}")
+                        continue
+                    if s == t:
+                        skipped += 1
+                        errors.append(f"自环关系（{s}→{s}），跳过")
+                        continue
+                    ok = self.conn.execute(
+                        "SELECT 1 FROM articles WHERE id=?",
+                        (int(aid),)).fetchone()
+                    if not ok:
+                        skipped += 1
+                        errors.append(f"文章 {aid} 不存在")
+                        continue
+                    self.conn.execute(
+                        "INSERT INTO relations"
+                        "(src_name,dst_name,rel_type,article_id,evidence,weight,"
+                        " extractor,created_at) VALUES(?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(src_name,dst_name,rel_type,article_id) "
+                        "DO UPDATE SET evidence=excluded.evidence, "
+                        "weight=relations.weight+excluded.weight",
+                        (s, t, rt, int(aid), r.get("evidence") or "",
+                         float(r.get("weight") or 1.0),
+                         r.get("extractor") or "ai", now))
+                    written += 1
+                self.conn.commit()
+            except Exception as e:
+                self.conn.rollback()
+                raise
+        return {"written": written, "skipped": skipped,
+                "errors": errors[:20], "error_count": len(errors)}
+
+    # ------------------------------------------------- 实体 / 关系（读取）
+    def list_entities(self, type: str = "", q: str = "", article_id: Optional[int] = None,
+                      limit: int = 200) -> List[dict]:
+        """实体清单。type 为空=全部；q 对 name 做模糊匹配"""
+        where, args = [], []
+        if type:
+            where.append("type=?"); args.append(type)
+        if q:
+            where.append("name LIKE ?"); args.append(f"%{q}%")
+        if article_id:
+            where.append("article_id=?"); args.append(int(article_id))
+        w = (" WHERE " + " AND ".join(where)) if where else ""
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(
+                f"SELECT e.id,e.name,e.type,e.article_id,e.aliases,e.evidence,"
+                f"e.extractor,e.confidence,a.title AS article_title,"
+                f"a.pub_day,a.url "
+                f"FROM entities e LEFT JOIN articles a ON a.id=e.article_id"
+                f"{w} ORDER BY e.type, e.name LIMIT ?",
+                args + [int(limit)])]
+
+    def list_relations(self, name: str = "", rel_type: str = "",
+                       article_id: Optional[int] = None,
+                       limit: int = 200) -> List[dict]:
+        """关系清单。name 非空时只看与该实体相连的关系（图谱点开一个点用）"""
+        where, args = [], []
+        if name:
+            where.append("(r.src_name=? OR r.dst_name=?)")
+            args += [name, name]
+        if rel_type:
+            where.append("r.rel_type=?"); args.append(rel_type)
+        if article_id:
+            where.append("r.article_id=?"); args.append(int(article_id))
+        w = (" WHERE " + " AND ".join(where)) if where else ""
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(
+                f"SELECT r.*, a.title AS article_title, a.pub_day, a.url "
+                f"FROM relations r LEFT JOIN articles a ON a.id=r.article_id"
+                f"{w} ORDER BY r.weight DESC LIMIT ?",
+                args + [int(limit)])]
+
+    def graph(self, limit: int = 300) -> Dict[str, Any]:
+        """
+        关系图谱：节点 + 边。边按「跨多少篇文章」聚合 —— 这就是权重。
+
+        ⚠ 刻意把 article_ids 全部带出来：答辩时要能「点一条关系
+        回溯原文」，前端拿到的是文章 id 列表，直接跳原文即可。
+        """
+        with self._lock:
+            nodes = [dict(r) for r in self.conn.execute(
+                "SELECT type, name, COUNT(*) n FROM entities "
+                "GROUP BY type, name ORDER BY n DESC LIMIT ?", (int(limit),))]
+            edges = [dict(r) for r in self.conn.execute(
+                "SELECT src_name, dst_name, rel_type, COUNT(*) n, "
+                "GROUP_CONCAT(article_id) article_ids, "
+                "SUM(weight) weight "
+                "FROM relations GROUP BY src_name,dst_name,rel_type "
+                "ORDER BY n DESC LIMIT ?", (int(limit),))]
+        for e in edges:
+            e["article_ids"] = [int(x) for x in (e.get("article_ids") or "").split(",") if x]
+        return {"nodes": nodes, "edges": edges}
+
+    def graph_stats(self) -> Dict[str, Any]:
+        """图谱概览：节点数、边数、类型分布、证据覆盖率"""
+        with self._lock:
+            def one(sql, args=()):
+                return self.conn.execute(sql, args).fetchone()[0]
+            return {
+                "entity_total": one("SELECT COUNT(*) FROM entities"),
+                "entity_orgs": one("SELECT COUNT(DISTINCT name) FROM entities WHERE type='org'"),
+                "relation_total": one("SELECT COUNT(*) FROM relations"),
+                "rel_pairs": one("SELECT COUNT(*) FROM (SELECT 1 FROM relations "
+                                 "GROUP BY src_name,dst_name,rel_type)"),
+                "by_type": [dict(r) for r in self.conn.execute(
+                    "SELECT type, COUNT(DISTINCT name) n FROM entities "
+                    "GROUP BY type ORDER BY n DESC")],
+                "by_rel": [dict(r) for r in self.conn.execute(
+                    "SELECT rel_type, COUNT(*) n, COUNT(DISTINCT src_name||'→'||dst_name) pairs "
+                    "FROM relations GROUP BY rel_type ORDER BY n DESC")],
+                # 证据覆盖：没有 article_id 的关系等于无法验证，答辩时一问就塌
+                "no_evidence": one("SELECT COUNT(*) FROM relations "
+                                   "WHERE evidence IS NULL OR evidence=''"),
+            }
 
 
 def open_db(cfg: Dict[str, Any]) -> Database:
