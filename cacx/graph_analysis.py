@@ -96,7 +96,12 @@ def analyze(G, types: Optional[Dict] = None,
     """
     → {degree, strength, betweenness, pagerank, communities,
        components, summary, by_type}
+
+    ⚠ topn 强制转 int：FastAPI 的 `Query(20, ge=1)` 传进来的是
+    「参数对象」而不是数字，直接拿去切片会报
+    slice indices must be integers。在模块边界就转掉，别指望调用方记得。
     """
+    topn = max(1, int(topn))
     nx = _nx()
     if G.number_of_nodes() == 0:
         return {"nodes": 0, "edges": 0,

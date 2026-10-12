@@ -1503,6 +1503,80 @@ class Database:
                 f"{w} ORDER BY r.weight DESC LIMIT ?",
                 args + [int(limit)])]
 
+    def relation_evidence(self, src_name: str, dst_name: str,
+                          rel_type: str = "",
+                          limit: int = 50) -> List[dict]:
+        """
+        某一对实体之间关系的**原文证据**（图谱点边后右侧面板用）。
+
+        ⚠ 正反向都要查：图是无向的（build_graph 建的 Graph），
+          存的却是 src/dst 有向，所以「A→B」和「B→A」都可能是同一条关系。
+          只按 src= 参数查会漏掉一半证据。
+        """
+        if not src_name or not dst_name:
+            return []
+        where = [("(r.src_name=? AND r.dst_name=?) OR (r.src_name=? AND r.dst_name=?)")]
+        args: list = [src_name, dst_name, dst_name, src_name]
+        if rel_type:
+            where.append("r.rel_type=?")
+            args.append(rel_type)
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(
+                f"SELECT r.*, a.title AS article_title, a.pub_day, a.url "
+                f"FROM relations r LEFT JOIN articles a ON a.id=r.article_id "
+                f"WHERE {' AND '.join(where)} "
+                f"ORDER BY r.weight DESC, r.article_id LIMIT ?",
+                args + [int(limit)])]
+
+    def extract_sources(self, site: str = "", column: str = "",
+                        date_from: str = "2024-01-01",
+                        date_to: str = "2099-12-31",
+                        limit: int = 500,
+                        strategy: str = "stratified") -> List[Dict[str, Any]]:
+        """
+        给抽取引擎用的原文清单（id/title/url/content_text）。
+
+        与 sample_articles 同口径，保证「抽取的分母 == 报告的分母」。
+        """
+        s = self.sample_articles(site=site, column=column,
+                                 date_from=date_from, date_to=date_to,
+                                 limit=limit, strategy=strategy)
+        ids = [a["id"] for a in (s.get("items") or s.get("items_sample") or [])]
+        if not ids:
+            return []
+        q = ",".join("?" * len(ids))
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT id, title, url, COALESCE(content_text,'') FROM articles "
+                f"WHERE id IN ({q})", ids).fetchall()
+        return [{"id": r[0], "title": r[1] or "", "url": r[2] or "",
+                 "content_text": r[3] or ""} for r in rows]
+
+    def clear_graph(self, only: str = "all") -> Dict[str, Any]:
+        """
+        清空实体/关系。⚠ **不可逆**，且默认 dry_run，必须显式 confirm=true。
+
+        存在的理由：规则抽取调参时反复跑，不清库会把旧结果和新结果
+        混在一起，看不清某次改动到底带来了什么。
+        """
+        if only not in ("all", "entities", "relations", "auto"):
+            raise ValueError(f"未知的清理范围 {only!r}")
+        if only == "entities":
+            targets = ["entities"]
+        elif only == "relations":
+            targets = ["relations"]
+        elif only == "auto":
+            # 关系外键指向实体，先删关系；否则会触发 FK 约束失败
+            targets = ["relations", "entities"]
+        else:
+            targets = ["relations", "entities"]
+        n = 0
+        with self._lock:
+            for t in targets:
+                n += self.conn.execute(f"DELETE FROM {t}").rowcount
+            self.conn.commit()
+        return {"deleted": n, "tables": targets}
+
     def graph(self, limit: int = 300) -> Dict[str, Any]:
         """
         关系图谱：节点 + 边。边按「跨多少篇文章」聚合 —— 这就是权重。

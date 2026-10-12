@@ -33,6 +33,8 @@ FastAPI 检索服务
 import csv
 import io
 import json
+import os
+import re
 import threading
 import time
 import uuid
@@ -48,6 +50,8 @@ from pydantic import BaseModel, Field
 
 from .. import config as C
 from .. import db as D
+from .. import extract
+from .. import graph_analysis as GA
 from ..ai import advisory as advisory_run
 from ..ai import diagnose as ai_diagnose
 from ..ai import summarize as ai_summarize
@@ -913,6 +917,236 @@ def api_put_entities(rows: List[EntityIn]):
 def api_put_relations(rows: List[RelationIn]):
     """人工补录/纠错关系"""
     return _db().upsert_relations([r.model_dump() for r in rows])
+
+
+# ------------------------------------------------------- 内置抽取（规则）
+# 四类实体的配色/形状。**不只靠颜色** —— 形状也区分，色盲可读。
+_GRAPH_STYLE = {
+    "org":     {"background": "#4c8dff", "border": "#7ab8ff", "shape": "dot"},
+    "policy":  {"background": "#b48bff", "border": "#c9a8ff", "shape": "square"},
+    "problem": {"background": "#ff6b6b", "border": "#ff9b9b", "shape": "triangle"},
+    "measure": {"background": "#5ddc9a", "border": "#8ff0bb", "shape": "diamond"},
+}
+_GRAPH_STYLE_DEFAULT = {"background": "#9aa3b2", "border": "#c2c8d4",
+                        "shape": "dot"}
+_TYPE_CN = {"org": "机构", "policy": "政策", "problem": "治理问题",
+            "measure": "措施"}
+
+
+def _pyvis_lib_dir() -> Optional[str]:
+    """定位 pyvis 自带的 vis-network 资源目录（内联用的源文件）"""
+    try:
+        import pyvis
+    except ImportError:
+        return None
+    root = Path(pyvis.__file__).parent / "lib"
+    if not root.is_dir():
+        return None
+    for v in sorted(root.glob("vis-*"), reverse=True):
+        if (v / "vis-network.min.js").exists():
+            return str(v)
+    return None
+
+
+def pyvis_html(nodes: List[dict], edges: List[dict],
+               height: str = "620px") -> str:
+    """
+    nodes/edges → **零 CDN** 的单文件 HTML（pyvis + 内联 vis.js）。
+
+    ⚠ 三件事必须都做，否则教室没网时只会白屏：
+      ① vis-network.min.js / .css 换成内联（pyvis 默认走 CDN）
+      ② bootstrap 的 css/js 引用必须**删掉** —— 我们不用它的布局，
+         自己写样式，混进来只会让页面变形
+      ③ re.sub 的替换串必须用 lambda：vis.js 源码里有 \\d，
+         直接当替换模板会被当转义序列，报 bad escape \\d
+    """
+    lib = _pyvis_lib_dir()
+    if not lib:
+        raise RuntimeError(
+            "找不到 vis-network 资源（pyvis 未安装或包内缺文件）。\n"
+            "  修复：pip install pyvis")
+    try:
+        from pyvis.network import Network
+    except ImportError:
+        raise RuntimeError("缺少 pyvis。修复：pip install pyvis")
+
+    g = Network(height=height, width="100%", directed=False,
+                notebook=False, bgcolor="#0f1115", font_color="#e6e8ee")
+    # pyvis 的 groups 是唯一能同时定「颜色+形状」的地方，
+    # 因为 vis-network 的图例与配色都按 group 取
+    g.options_groups = {k: dict(v) for k, v in _GRAPH_STYLE.items()}
+
+    for n in nodes:
+        gid = n.get("group") or ""
+        if gid not in _GRAPH_STYLE:
+            gid = "org"          # 未知类型先归机构，形状颜色统一
+        g.add_node(n["id"], label=n.get("label") or n["id"], group=gid,
+                   size=n.get("size", 16), title=n.get("title", ""))
+
+    for e in edges:
+        w = float(e.get("weight") or 1)
+        g.add_edge(e["from"], e["to"], value=max(w, 0.1),
+                   title=e.get("title", ""),
+                   color="#3a4a63", width=max(w * 0.7, 0.6))
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "g.html")
+        g.write_html(p, notebook=False, local=True)
+        html = Path(p).read_text(encoding="utf-8")
+
+    js = Path(lib, "vis-network.min.js").read_text(encoding="utf-8")
+    css = Path(lib, "vis-network.css").read_text(encoding="utf-8")
+    html = re.sub(r'<script[^>]+src="[^"]*vis-network\.min\.js"[^>]*></script>',
+                  lambda _m: "<script>" + js + "</script>", html)
+    html = re.sub(r'<link[^>]+href="[^"]*vis-network\.min\.css"[^>]*>',
+                  lambda _m: "<style>" + css + "</style>", html)
+    # bootstrap 只删 <script>/<link> 标签，保留页面其余部分
+    html = re.sub(r'<script[^>]+src="[^"]*bootstrap[^"]*"[^>]*></script>', "", html)
+    html = re.sub(r'<link[^>]+href="[^"]*bootstrap[^"]*"[^>]*>', "", html)
+    # ⚠ 再兜一层：任何漏网的外链 js/css 一律去掉，
+    #   保证「零外链」是硬保证而不是「基本没有」
+    html = re.sub(r'<script[^>]+src="https?://[^"]*"[^>]*></script>', "", html)
+    html = re.sub(r'<link[^>]+href="https?://[^"]*"[^>]*>', "", html)
+    return html
+
+
+class ExtractReq(BaseModel):
+    site: str = ""
+    column: str = ""
+    date_from: str = "2024-01-01"
+    date_to: str = "2099-12-31"
+    limit: int = 500                 # 与报告分母一致（已拍板：默认样本口径）
+    strategy: str = "stratified"     # ⚠ 别用 recent：会把 2024 整年丢掉
+    with_measures: bool = True
+    write: bool = False              # ⚠ 默认只预览不落库
+    clear_first: bool = False        # ⚠ 清库不可逆，必须显式开
+    confirm_clear: bool = False
+
+
+@app.post("/api/extract/run")
+def api_extract_run(req: ExtractReq):
+    """
+    规则抽取实体关系（老师追问「这个数怎么来的」时可当场重跑）。
+
+    ⚠ 默认 write=false 只返回结果不落库 —— 抽取要跑几十秒，
+      误触就写库会污染主库。
+    ⚠ clear_first 会**删光**实体和关系，必须同时 confirm_clear=true。
+    """
+    d = _db()
+    if req.clear_first:
+        if not req.confirm_clear:
+            return {"error": "clear_first 不可逆，必须同时传 confirm_clear=true"}
+        d.clear_graph(only="auto")
+
+    arts = d.extract_sources(site=req.site, column=req.column,
+                             date_from=req.date_from, date_to=req.date_to,
+                             limit=req.limit, strategy=req.strategy)
+    if not arts:
+        return {"error": "这个口径下没有文章，检查栏目名与时间区间"}
+
+    t0 = time.time()
+    res = extract.extract_batch(arts, with_measures=req.with_measures)
+    res["elapsed"] = round(time.time() - t0, 1)
+    res["scope"] = {"site": req.site, "column": req.column,
+                    "date_from": req.date_from, "date_to": req.date_to,
+                    "limit": req.limit, "strategy": req.strategy,
+                    "articles_found": len(arts)}
+
+    if req.write:
+        # 只写高置信（不进图谱的那些低置信仍写库，便于复核与后续分析）
+        e = d.upsert_entities(res["entities"])
+        r = d.upsert_relations(res["relations"])
+        res["written"] = {"entities": e, "relations": r}
+    else:
+        res["written"] = None
+        res["hint"] = "这是预览结果，未写入数据库。确认无误后把 write 改成 true 再跑一次。"
+
+    # 样本分布，供前端显示口径
+    res["types"] = {}
+    for x in res["entities"]:
+        res["types"][x["type"]] = res["types"].get(x["type"], 0) + 1
+    res["rel_types"] = {}
+    for x in res["relations"]:
+        res["rel_types"][x["rel_type"]] = res["rel_types"].get(x["rel_type"], 0) + 1
+    # 别把上万条实体塞进 HTTP 响应
+    res.pop("entities", None)
+    res.pop("relations", None)
+    return res
+
+
+def _graph_payload(min_degree: int, limit: int, min_weight: float,
+                   topn: int) -> Dict[str, Any]:
+    """
+    关联分析的**内部实现**（路由和 pyvis 产物都调它）。
+
+    ⚠ 必须抽成独立函数，不能让 api_graph_vis 直接调 api_graph_analysis：
+      路由函数的参数是 `Query(20, ge=1)` **参数对象**，不是数字。
+      走 HTTP 时框架会替换掉，走内部调用时不会 —— int() 直接炸
+      （TypeError: int() argument must be ... not 'Query'）。
+      把 Query 对象的取值逻辑留在路由边界，函数内部只收纯数字。
+    """
+    d = _db()
+    rows = d.list_relations(limit=5000)
+    if not rows:
+        return {"nodes": 0, "edges": 0, "degree": [], "strength": [],
+                "betweenness": [], "pagerank": [], "communities": [],
+                "summary": "没有关系数据", "by_type": [], "graph": {"nodes": [], "edges": []}}
+
+    # 低置信实体不进图（与 build_graph 的口径一致）
+    ents = d.list_entities(limit=5000)
+    blocked = GA.blocked_names(ents, {"measure"})
+    G, types = GA.build_graph(rows, min_weight=min_weight,
+                              blocked_nodes=blocked)
+    r = GA.analyze(G, types, topn=topn)
+    # node_community 是内部用的，去掉以免响应过大
+    ne = GA.to_pyvis_nodes_edges(r, G, types, min_degree=min_degree,
+                                 limit=limit)
+    r.pop("node_community", None)
+    r["graph"] = ne
+    r["blocked_count"] = len(blocked)
+    return r
+
+
+@app.get("/api/graph/analysis")
+def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
+                       limit: int = Query(300, ge=1, le=1000),
+                       min_weight: float = 1.0,
+                       topn: int = Query(20, ge=1, le=100)):
+    """
+    关联指标（networkx）：度/加权度/介数/PageRank/Louvain 社区。
+
+    这是「权责边界」的直接论据 —— 度中心性只能说明谁出现最多，
+    **介数**才说明谁在协作网络里居中协调。
+    """
+    return _graph_payload(int(min_degree), int(limit), float(min_weight),
+                          int(topn))
+
+
+@app.get("/api/graph/evidence")
+def api_graph_evidence(src: str, dst: str, rel_type: str = "",
+                       limit: int = Query(50, ge=1, le=200)):
+    """点一条边 → 列出支撑它的原文句子与可点链接（老师要求的「点边看原文」）"""
+    return {"items": _db().relation_evidence(src, dst, rel_type=rel_type,
+                                             limit=limit)}
+
+
+@app.get("/api/graph/vis")
+def api_graph_vis(min_degree: int = Query(1, ge=1, le=50),
+                  limit: int = Query(300, ge=1, le=1000)):
+    """
+    产出 pyvis 用的单文件 HTML（vis.js **内联**，零 CDN）。
+
+    为什么必须内联：教室没网，任何 <script src="https://cdn..."> 都只会
+    白屏。vis-network 的 js/css 就在 pyvis 包里，直接读进来即可。
+    """
+    data = _graph_payload(int(min_degree), int(limit), 1.0, 20)
+    g = data.get("graph") or {}
+    if not g.get("nodes"):
+        return {"error": "没有可显示的节点"}
+    html = pyvis_html(g["nodes"], g["edges"])
+    return {"html": html, "nodes": len(g["nodes"]),
+            "edges": len(g["edges"]), "bytes": len(html)}
 
 
 # ---------------------------------------------------------------- AI
