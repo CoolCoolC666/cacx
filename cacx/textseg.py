@@ -131,11 +131,39 @@ def _get():
             if len(parts) >= 2 and parts[1].isdigit():
                 jieba.add_word(parts[0], freq=int(parts[1]))
         _jieba = jieba
+        _load_userdict(jieba)
     except Exception:
         # 没装 jieba 不是致命错误 —— 全文检索会退化，但程序照常跑
         _load_failed = True
         _jieba = None
     return _jieba
+
+
+def _load_userdict(j):
+    """
+    启动时把用户词典加载进来 —— **「自学习」闭环的关键一步**。
+
+    ⚠ 缺这一步，自学习就是假的：采纳的新词只写进了磁盘文件，
+      而 jieba 的 add_word 只对**当前进程**有效，
+      下次重启词典就白写了。用户会以为采纳没生效。
+    ⚠ 路径不能在 import 时算：那时 PROJECT_ROOT 未必就绪。
+      这里在 _get() 里才算，是第一次真正要用分词器的时候。
+    ⚠ 读失败不能让分词整体挂掉 —— 词典只是增强，不是必需。
+    """
+    try:
+        import os
+        from . import config as C
+        from . import newwords as NW
+        p = NW.userdict_path(str(C.PROJECT_ROOT / "data"))
+        if os.path.exists(p):
+            # ⚠ 必须自己开关文件：jieba.load_userdict 用 open() 读完就扔了句柄，
+            #   不关的话 Windows 上会一直占着这个文件（测试里直接报
+            #   ResourceWarning: unclosed file），分发到别人机器上还可能
+            #   变成「词典文件被占用」。
+            with open(p, "r", encoding="utf-8") as f:
+                j.load_userdict(f)
+    except Exception:
+        pass
 
 
 def add_word(word: str, freq: int = 100000):

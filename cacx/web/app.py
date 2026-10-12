@@ -52,6 +52,8 @@ from .. import config as C
 from .. import db as D
 from .. import extract
 from .. import graph_analysis as GA
+from .. import newwords as NW
+from .. import textseg
 from ..ai import advisory as advisory_run
 from ..ai import diagnose as ai_diagnose
 from ..ai import summarize as ai_summarize
@@ -1227,6 +1229,104 @@ def api_annotations(
 @app.get("/api/annotations/stats")
 def api_annotations_stats():
     return _db().annotation_stats()
+
+
+# ------------------------------------------------------- 分词实验室（新词自学习）
+# 闭环：语料 → 新词候选（统计法） → 人工勾选 → 写进 jieba 用户词典 → 下次检索更准
+
+
+def _userdict_path() -> str:
+    """用户词典落点。与数据库同目录，整体备份/迁移时一起带走。"""
+    return NW.userdict_path(str(C.PROJECT_ROOT / "data"))
+
+
+def _known_words() -> set:
+    """当前分词器已认识的词：内置领域词表 + jieba 词典 + 已回流词。
+
+    ⚠ 必须三份都算：漏一份就会把「中央网信办」这种早就有的词
+      当成新词报给用户，用户以为程序发现了新东西，其实是它自己已有的。
+    """
+    known = set()
+    for line in textseg._BASE_TERMS.strip().splitlines():
+        parts = line.split()
+        if parts:
+            known.add(parts[0])
+    j = textseg._get()
+    if j is not None:
+        try:
+            known |= set(j.dictionary.dictionary.keys())
+        except Exception:
+            pass
+    known |= set(NW.read_userdict(_userdict_path()))
+    return known
+
+
+class NewWordsReq(BaseModel):
+    limit: int = Field(600, ge=20, le=2000)   # 取多少篇文章来统计
+    max_chars: int = Field(5000, ge=500, le=20000)  # 每篇取多少字
+    min_count: int = Field(8, ge=2, le=200)
+    topn: int = Field(60, ge=10, le=300)
+
+
+@app.post("/api/newwords/discover")
+def api_newwords_discover(req: NewWordsReq):
+    """从语料里挖新词候选（只读，不改任何东西）"""
+    d = _db()
+    rows = d.conn.execute(
+        "SELECT content_text FROM articles "
+        "WHERE content_text IS NOT NULL AND length(content_text) > 200 "
+        "LIMIT ?", (req.limit,)).fetchall()
+    if not rows:
+        return {"error": "语料里没有可用正文，先抓一些文章"}
+    texts = [r[0][:req.max_chars] for r in rows]
+    known = _known_words()
+    t0 = time.time()
+    cands = NW.discover_new_words(texts, min_count=req.min_count,
+                                  topn=req.topn, known=known)
+    for c in cands:
+        c["hint"] = NW.domain_hint(c["word"]) or ""
+    return {"items": cands, "articles": len(texts),
+            "known_size": len(known), "elapsed": round(time.time() - t0, 1)}
+
+
+class AdoptReq(BaseModel):
+    words: List[str] = []
+
+
+@app.get("/api/newwords/adopted")
+def api_newwords_adopted():
+    """已回流进词典的词"""
+    return {"words": NW.read_userdict(_userdict_path()),
+            "path": _userdict_path()}
+
+
+@app.post("/api/newwords/adopt")
+def api_newwords_adopt(req: AdoptReq):
+    """
+    把选中的新词写进 jieba 用户词典。
+
+    ⚠ 落盘是**追加**，不覆盖 —— 文件里可能有手工加过的词。
+    ⚠ 写完立刻 add_word 让**当前进程**也生效，
+      否则用户点了采纳却发现分词没变化，会以为功能坏了。
+    """
+    words = [w.strip() for w in (req.words or []) if w and w.strip()]
+    if not words:
+        return {"error": "没有选中任何词"}
+    path = _userdict_path()
+    added = NW.write_userdict(path, words)
+    for w in words:
+        textseg.add_word(w)
+    return {"added": added, "total": len(NW.read_userdict(path)),
+            "path": path, "applied_now": True}
+
+
+@app.get("/api/segment")
+def api_segment(text: str, limit: int = Query(50, ge=1, le=200)):
+    """试切分：看某个串在**当前词典**下被切成什么（采纳后应变化）"""
+    if not text:
+        return {"items": []}
+    return {"text": text, "tokens": textseg.cut(text)[:limit],
+            "jieba": textseg.available()}
 
 
 @app.get("/api/ai/status")

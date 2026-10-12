@@ -188,6 +188,7 @@
   <button class="btn" id="tab_panel" onclick="showTab('panel')">数据面板</button>
   <button class="btn" id="tab_sample" onclick="showTab('sample')">样本配置器</button>
   <button class="btn" id="tab_graph" onclick="showTab('graph')">关系图谱</button>
+  <button class="btn" id="tab_seg" onclick="showTab('seg')">🧪 分词实验室</button>
   <button class="btn" id="tab_set" onclick="showTab('set')">⚙ 设置</button>
   <button class="btn" id="tab_ai" onclick="showTab('ai')">✦ AI 摘要 <span
     id="ai_badge" style="color:var(--dim)"></span></button>
@@ -345,6 +346,69 @@
     <div class="box" style="margin-top:12px">
       <h3>边（共现强度）<span id="gp_cnt2" style="font-weight:400;color:var(--dim);font-size:12px"></span></h3>
       <div id="gp_edges" style="max-height:320px;overflow:auto"></div>
+    </div>
+  </section>
+
+  <!-- ============ 分词实验室（新词自学习） ============ -->
+  <section id="v_seg" style="display:none">
+    <div class="box" style="margin-bottom:12px;padding:12px 14px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:6px">
+        新词自学习 —— 让分词器认识本领域的新说法</div>
+      <div style="font-size:12.5px;color:var(--dim);line-height:1.75">
+        中文分词靠词典，但网信领域的说法一直在变（新出现的治理术语、
+        新设的机构简称），词典不更新就会被切碎，
+        检索时按词组匹配不到，统计时词频也被稀释。<br>
+        这里用<b>无监督统计法</b>（凝固度 + 邻字自由度 + 可切分性）从
+        语料里挖候选词，<b>由你勾选</b>后写进 jieba 用户词典 ——
+        写完<b>立即生效且重启后仍在</b>。
+      </div>
+    </div>
+
+    <div class="row" style="gap:12px;flex-wrap:wrap;margin-bottom:12px">
+      <label style="font-size:12.5px">语料篇数
+        <input type="number" id="nw_limit" value="600" min="20" max="2000"
+               style="width:76px"></label>
+      <label style="font-size:12.5px">最低频次
+        <input type="number" id="nw_minc" value="8" min="2" max="200"
+               style="width:66px"></label>
+      <label style="font-size:12.5px">返回条数
+        <input type="number" id="nw_topn" value="60" min="10" max="300"
+               style="width:70px"></label>
+      <!-- ⚠ 这三个按钮必须有 id：原来只有 onclick，无头脚本/端到端测试
+           没法稳定定位，只能靠按钮文案，中文一改测试就断。 -->
+      <button class="btn on" id="nwDiscover" style="padding:6px 16px"
+              onclick="nwDiscover()">🔍 挖掘新词</button>
+      <button class="btn" id="nwAdoptBtn" style="padding:6px 14px"
+              onclick="nwAdopt()"
+              title="把勾选的词写进用户词典，立即生效">✅ 采纳勾选</button>
+      <button class="btn" id="nwClearBtn" style="padding:6px 12px"
+              onclick="nwClear()">清空勾选</button>
+      <div class="grow"></div>
+      <label style="font-size:12.5px">试切分
+        <input id="nw_probe" placeholder="输入一句话看切成什么样"
+               onkeydown="if(event.key==='Enter')nwProbe()"
+               style="width:230px"></label>
+    </div>
+
+    <div class="box" id="nw_adopted" style="margin-bottom:12px"></div>
+    <div class="box" id="nw_probe_out" style="display:none;margin-bottom:12px"></div>
+    <div class="box" id="nw_result" style="display:none">
+      <h3>新词候选 <span id="nw_cnt" style="font-weight:400;color:var(--dim);
+        font-size:12px"></span></h3>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:10px;line-height:1.7">
+        三个指标：<b>凝固度</b>越高说明这个词「该粘在一起」；
+        <b>邻字熵</b>越高说明左右能接的字越杂（真词特征）；
+        <b>领域</b>是本项目加权（网信术语/机构后缀优先上浮）。
+        <b>这是候选不是结论</b>——统计能保证「大概率是词」，
+        保证不了「这个领域该收」，所以由你定夺。<br>
+        门槛是「凝固度 <b>或</b> 邻字熵」过线即可，收敛得比较宽；
+        熵显示 <b>—</b> 表示该侧熵为 0，有两种成因：
+        候选正好在句子首/末（那侧没有相邻字），或该侧邻字全都相同
+        （说明它总出现在同一个固定上下文里，更像短语片段）。
+        两种都是真实取值，不是算错了。
+      </div>
+      <div id="nw_msg"></div>
+      <div id="nw_list" style="max-height:520px;overflow:auto"></div>
     </div>
   </section>
 
@@ -1846,11 +1910,166 @@ async function dlGraphHtml(){
   }catch(e){ toast('生成失败：'+(e.message||e)); }
 }
 
+/* ---------------- 分词实验室（新词自学习） ---------------- */
+let NW_ITEMS = [];        // 候选列表
+let NW_PICK = new Set();  // 勾选的词
+
+async function nwDiscover(){
+  const box = $('nw_result');
+  box.style.display = 'block';
+  // ⚠ **绝不能覆盖 box.innerHTML** —— 容器里有 #nw_cnt 和 #nw_list，
+  //   整个替换掉它们就消失了，后面 $('nw_cnt') 拿到 null 直接抛
+  //   "Cannot set properties of null"，页面永远停在「挖掘失败」。
+  //   要提示就写进独立的 #nw_msg。
+  $('nw_msg').innerHTML = `<div style="font-size:12.5px;color:var(--acc2)">
+    正在统计…要扫几百篇正文，约十几秒。</div>`;
+  NW_PICK = new Set();
+  try{
+    const r = await fetch('/api/newwords/discover', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        limit: parseInt($('nw_limit').value||'600',10)||600,
+        max_chars: 5000,
+        min_count: parseInt($('nw_minc').value||'8',10)||8,
+        topn: parseInt($('nw_topn').value||'60',10)||60,
+      }),
+    }).then(x=>x.json());
+    if(r.error){ $('nw_msg').innerHTML =
+      `<div style="color:var(--err);font-size:12.5px">✗ ${esc(r.error)}</div>`;
+      return; }
+    NW_ITEMS = r.items || [];
+    $('nw_cnt').textContent = `（扫了 ${r.articles} 篇，`+
+      `当前词典 ${r.known_size} 词，用时 ${r.elapsed}s）`;
+    if(!NW_ITEMS.length){
+      $('nw_msg').innerHTML = `<div class="dim">没挖到新候选。
+        可以把「最低频次」调小，或把「语料篇数」调大再试。</div>`;
+      return;
+    }
+    $('nw_msg').innerHTML = '';
+    nwRenderList();
+  }catch(e){
+    $('nw_msg').innerHTML = `<div style="color:var(--err);font-size:12.5px">
+      ✗ 挖掘失败：${esc(e.message||e)}</div>`;
+  }
+}
+
+function nwRenderList(){
+  $('nw_list').innerHTML = NW_ITEMS.map((c,i)=>{
+    const on = NW_PICK.has(c.word);
+    const badge = c.hint
+      ? `<span style="color:var(--acc2);font-size:11px">${esc(c.hint)}</span>`
+      : '';
+    // ⚠ 熵为 0 **不代表出错**：候选串出现在句子末尾时右边没有字，
+    //   右熵必然是 0。直接显示「0」会被误读成「指标算错了」，
+    //   所以标成 —。
+    const L = c.left_entropy ? c.left_entropy : '—';
+    const R = c.right_entropy ? c.right_entropy : '—';
+    return `<div class="row" style="gap:8px;padding:6px 8px;
+        border-bottom:1px solid var(--line);align-items:flex-start">
+      <!-- ⚠ value 必须给词本身：原来只靠 onchange 里的下标定位，
+           复选框 value 缺省是 "on"，无头测试和读屏都读不出这是哪个词 -->
+      <input type="checkbox" value="${esc(c.word)}" ${on?'checked':''}
+        onchange="nwToggle('${i}', this.checked)" style="margin-top:3px">
+      <span style="flex:1;min-width:0;font-size:13px">${esc(c.word)}</span>
+      <span style="color:var(--dim);font-size:11.5px;flex:none">
+        ×${c.count}</span>
+      <span style="color:var(--dim);font-size:11.5px;flex:none;width:62px;
+        text-align:right">凝 ${c.cohesion}</span>
+      <span style="color:var(--dim);font-size:11.5px;flex:none;width:88px;
+        text-align:right">熵 ${L} / ${R}</span>
+      ${badge ? `<span style="flex:none">${badge}</span>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function nwToggle(i, on){
+  const w = NW_ITEMS[i] && NW_ITEMS[i].word;
+  if(!w) return;
+  if(on) NW_PICK.add(w); else NW_PICK.delete(w);
+}
+
+function nwClear(){ NW_PICK = new Set(); nwRenderList(); }
+
+async function nwAdopt(){
+  const words = Array.from(NW_PICK);
+  if(!words.length){ toast('还没勾选任何词'); return; }
+  try{
+    const r = await fetch('/api/newwords/adopt', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({words}),
+    }).then(x=>x.json());
+    if(r.error){ toast(r.error); return; }
+    toast(r.added
+      ? `已采纳 ${r.added} 个词，立即生效（重启后仍在）`
+      : '这些词已在词典里，无需重复添加');
+    NW_PICK = new Set();
+    nwRenderList();
+    nwLoadAdopted();
+    // 立刻用采纳的词验一次，让用户看见「真的生效了」
+    const p = $('nw_probe');
+    if(p && p.value.trim()) nwProbe();
+  }catch(e){ toast('采纳失败：'+(e.message||e)); }
+}
+
+async function nwProbe(){
+  const q = $('nw_probe').value.trim();
+  if(!q) return;
+  // ⚠ 结果写进**独立容器** #nw_probe_out，不能 append 到 #nw_adopted：
+  //   每按一次回车都追加一段的话，框会越堆越长，把词表挤出视野；
+  //   而且 #nw_adopted 会被 nwLoadAdopted() 整体重写，一追加就丢了。
+  const out = $('nw_probe_out');
+  out.style.display = 'block';
+  out.innerHTML = `<div style="font-size:12.5px"><b>试切分</b>：
+    <span style="color:var(--dim)">…</span></div>`;
+  try{
+    const r = await fetch('/api/segment?text='+encodeURIComponent(q))
+      .then(x=>x.json());
+    const t = r.tokens || [];
+    // ⚠ 直接往 out 写，不再单独取 #nw_tok：
+    //   实测接口返回了数据，界面却停在「…」——
+    //   内联模板里带换行缩进的 <span> 按 id 取值会拿到 null，
+    //   而 catch 又把它吞了，于是**控制台零报错、界面永远不动**。
+    //   少一次 getElementById，就少一个这类静默失败点。
+    out.innerHTML = `<div style="font-size:12.5px"><b>试切分</b>：
+      ${t.length
+        ? t.map(x=>`<span style="display:inline-block;padding:2px 7px;
+            margin:2px;border-radius:3px;background:var(--line)">${esc(x)}</span>`).join('')
+        : '<span class="dim">（没切出内容）</span>'}
+      ${!r.jieba ? `<div style="color:var(--warn);margin-top:6px">
+        ⚠ 没装 jieba，当前是按标点粗切，装上后本页才有意义</div>` : ''}
+    </div>`;
+  }catch(e){
+    out.innerHTML = `<div style="color:var(--err);font-size:12.5px">
+      试切分失败：${esc(e.message||e)}</div>`;
+  }
+}
+
+async function nwLoadAdopted(){
+  try{
+    const r = await fetch('/api/newwords/adopted').then(x=>x.json());
+    const w = r.words || [];
+    $('nw_adopted').innerHTML = `
+      <h3>已回流词典 <span style="font-weight:400;color:var(--dim);
+        font-size:12px">（${w.length} 个，重启后仍生效）</span></h3>
+      <div style="font-size:12.5px;line-height:1.9">
+        ${w.length
+          ? w.map(x=>`<span class="ln">${esc(x)}</span>`).join('　')
+          : '<span class="dim">还没有采纳过新词。'
+            +'挖出候选后勾选、点「采纳勾选」即可。</span>'}
+      </div>
+      <div style="font-size:11.5px;color:var(--dim);margin-top:8px">
+        落盘位置：<code>${esc(r.path||'')}</code>
+        （随数据库一起备份迁移）</div>`;
+  }catch(e){
+    $('nw_adopted').innerHTML = `<div class="dim">词典读取失败</div>`;
+  }
+}
+
 function showTab(t){
   const map={search:'v_search',panel:'v_panel',sample:'v_sample',graph:'v_graph',
-             set:'v_set',ai:'v_ai',sync:'v_sync'};
+             seg:'v_seg',set:'v_set',ai:'v_ai',sync:'v_sync'};
   for(const k in map) $(map[k]).style.display = (k===t)?'block':'none';
-  const tabs=['tab_search','tab_panel','tab_sample','tab_graph',
+  const tabs=['tab_search','tab_panel','tab_sample','tab_graph','tab_seg',
              'tab_set','tab_ai','tab_sync'];
   for(const k of tabs){ $(k).className='btn'+(k==='tab_'+t?' on':''); }
   if(t==='panel'){ /* 缓存必须清：否则切走再切回时，PN_CACHE 里还是
@@ -1858,6 +2077,7 @@ function showTab(t){
     PN_CACHE={}; loadPanel(); }
   if(t==='sample'){ loadSampleOptions(); }
   if(t==='graph'){ loadGraph(); }
+  if(t==='seg'){ nwLoadAdopted(); }
   if(t==='set') loadCfg();
   if(t==='ai'){ loadAiBadge(); loadAnns(); loadBatchSites(); loadFailures(); }
   if(t==='sync'){ loadSyncSites(); loadRuns(); loadSitesList(); pollSync(); }
