@@ -30,6 +30,8 @@ FastAPI 检索服务
     · 原文跳转走本服务中转，方便记录「哪篇被检索后跳走了」
 """
 
+import csv
+import io
 import json
 import threading
 import time
@@ -310,8 +312,86 @@ def _host(url: str) -> str:
 
 
 @app.get("/api/events")
-def api_events(days: int = Query(30, ge=1, le=365)):
-    return _db().event_stats(days)
+def api_events(days: int = Query(30, ge=1, le=365), site: str = ""):
+    """行为统计。site 可按站点过滤。
+
+    ⚠ search / export 两类事件**天然没有站点归属**：
+    检索是跨站的，导出也可能一次导了两站的事件。
+    所以按站点过滤时，这两类会被排除，而不是给出「半个口径」的数字 ——
+    混合着报会让人以为「浙江的检索次数是 0」，实际只是它不可归属。
+    响应里用 site_applicable 明说这件事。
+    """
+    return _db().event_stats(days, site=site)
+
+
+# ---------------------------------------------------------------- 图表数据导出
+@app.get("/api/panel/export")
+def api_panel_export(which: str, site: str = "",
+                     granularity: str = "month", days: int = 30,
+                     limit: int = Query(12, ge=1, le=200)):
+    """
+    把面板上的图表数据导成 CSV。
+
+    为什么单独开这个口而不是让前端拼：论文里要的是**能直接进表格/统计软件
+    的数据**，不是截���图片。而「界面看到的数字」与「导出的数字」必须是
+    同一份 —— 前端拼 CSV 就必然有「改了筛选条件忘了同步」的隐患。
+    这里直接复用面板那几个接口的取数逻辑，口径天然一致。
+    """
+    which = (which or "").lower()
+    d = _db()
+    if which == "trend":
+        src = api_trend(site=site, granularity=granularity)
+        rows = [{"period": r["k"], "articles": r["n"],
+                 "chars": r.get("c") or 0} for r in src["items"]]
+        period_cn = "年份" if granularity == "year" else "月份"
+        # 表头是中文、rows 的 key 是英文，两边对不上就会整列写空。
+        # 所以这里存的是 (表头, key) 的显式映射，而不是 split 表头去猜。
+        cols = [(period_cn, "period"), ("文章数", "articles"), ("字数", "chars")]
+        title = f"{granularity}_trend"
+    elif which == "columns":
+        f = api_facets(site=site)
+        # 筛选了站点就直接给满 limit —— 再除以站点数就成「单站只画 6 个」，
+        # 那是「全部站点时两站平分名额」的逻辑，单站不该再分一次。
+        per = limit if site else max(4, limit // max(1, len(f["sites"])))
+        by_site: Dict[str, List[dict]] = {}
+        for c in f["columns"]:
+            by_site.setdefault(c["site"], []).append(c)
+        rank = []
+        for s in f["sites"]:
+            tag = s["site_name"] or s["site"]
+            for c in (by_site.get(s["site"]) or [])[:per]:
+                rank.append({"site": s["site"], "site_name": tag,
+                             "column": c["column_name"], "articles": c["n"]})
+        rank.sort(key=lambda x: -x["articles"])
+        rows = rank
+        cols = [("站点", "site"), ("站点名", "site_name"),
+                ("栏目", "column"), ("文章数", "articles")]
+        title = "columns_top"
+    elif which == "events":
+        e = d.event_stats(days, site=site)
+        rows = [{"kind": r["kind"], "count": r["n"]} for r in e["by_kind"]]
+        cols = [("行为类型", "kind"), ("次数", "count")]
+        title = f"events_{days}d"
+    else:
+        raise HTTPException(400, {"message": f"不支持的图表: {which}",
+                                  "refused": True})
+
+    site_name = {"cac": "中国网信办", "zjwx": "浙江网信网"}.get(site, "全部站点")
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    fname = f"cacx_{title}_{site_name}_{stamp}.csv"
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([h for h, _ in cols])
+    for r in rows:
+        w.writerow([r.get(k, "") for _, k in cols])
+    d.record_event("export", detail=f"panel:{which}",
+                   meta=f"site={site} n={len(rows)}")
+    return Response(
+        content=buf.getvalue().encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f"attachment; filename*=UTF-8''{quote(fname)}",
+                 "X-Export-Count": str(len(rows))})
 
 
 # ---------------------------------------------------------------- AI
