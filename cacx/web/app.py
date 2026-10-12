@@ -1262,13 +1262,32 @@ class NewWordsReq(BaseModel):
     site: str = ""                            # 空 = 两站都算
 
 
+#: 语料底账的短缓存。
+#: corpus_profile() 要对 3823 万字跑 SUM(length) 与两次 GROUP BY，
+#: 本身就不便宜；而口径预览是「输入框每敲一下就发一次」的高频调用。
+#: 语料不会秒级变化，缓存 30 秒既让预览变成毫秒级，
+#: 又不至于让用户看到过期数据。
+_CORPUS_TTL = 30.0
+_CORPUS_CACHE: Dict[str, Any] = {"ts": 0.0, "key": None, "val": None}
+
+
+def _corpus_profile_cached(site: str = ""):
+    key = site
+    now = time.time()
+    if _CORPUS_CACHE["key"] == key and now - _CORPUS_CACHE["ts"] < _CORPUS_TTL:
+        return _CORPUS_CACHE["val"]
+    val = _db().corpus_profile(site=site)
+    _CORPUS_CACHE.update(ts=now, key=key, val=val)
+    return val
+
+
 def _nw_corpus(limit: int = 1200, strategy: str = "stratified",
                site: str = ""):
     """取样 + 口径清单。预览与真挖掘共用这一个函数，
     避免「预览说覆盖 2 个站、挖出来只有 1 个站」这种对不上的情况。"""
     d = _db()
     s = d.sample_content_text(limit=limit, site=site, strategy=strategy)
-    prof = d.corpus_profile(site=site)
+    prof = _corpus_profile_cached(site)
     cover = {
         "pool": s["pool"], "pool_chars": s["pool_chars"],
         "n": s["n"], "chars": s["chars"],

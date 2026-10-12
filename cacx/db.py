@@ -1238,8 +1238,18 @@ class Database:
     CORPUS_MIN_CHARS = 200
 
     def _corpus_where(self, site: str = "", min_chars: int = 0) -> tuple:
+        """可统计正文的筛选条件。
+
+        ⚠ 必须写 `chars > ?` 而不是 `length(content_text) > ?`：
+        length() 是函数，SQLite 得**把每个字段的文本都读出来**才能算长度。
+        本库正文共 3823 万字，于是每做一次层查询就等于全量扫一遍文本；
+        再叠加「轮转补齐时一层只取 1 篇」的上千次查询，
+        实测一次口径预览要 9.6 秒 —— 而预览是输入框每敲一下就发一次的。
+        `chars` 是入库时算好的普通列，实测两者筛出的篇数完全一致
+        （都是 27168 篇），所以这里换成它没有任何口径变化，只有速度差别。
+        """
         mc = int(min_chars or self.CORPUS_MIN_CHARS)
-        w = ["content_text IS NOT NULL", "length(content_text) > ?"]
+        w = ["content_text IS NOT NULL", "chars > ?"]
         a: List[Any] = [mc]
         if site:
             w.append("site=?"); a.append(site)
@@ -1334,18 +1344,23 @@ class Database:
                 left = limit - len(rows)
                 while left > 0:
                     grew = 0
+                    # 一轮给每层都分一份，而不是一层只补 1 篇 ——
+                    # 「每次 1 篇」看着公平，但 limit=1200 时要发上千次
+                    # 层查询，实测把口径预览拖到 9.6 秒。
+                    share = max(1, left // max(1, len(layers))) + 1
                     for k, (s, y, n) in enumerate(layers):
                         if left <= 0:
                             break
-                        if got[k] >= n:
+                        want = min(share, n - got[k], left)
+                        if want <= 0:
                             continue          # 这一层已经取完
-                        batch = fetch(s, y, 1, got[k])
+                        batch = fetch(s, y, want, got[k])
                         if not batch:
                             continue
                         rows += batch
-                        got[k] += 1
-                        left -= 1
-                        grew += 1
+                        got[k] += len(batch)
+                        left -= len(batch)
+                        grew += len(batch)
                     if not grew:
                         break
                 picked = _rollup_picked(rows)

@@ -376,7 +376,7 @@
       <label style="font-size:12.5px">语料篇数
         <input type="number" id="nw_limit" value="1200" min="20" max="3000"
                style="width:76px"
-               oninput="nwPreview()"></label>
+               oninput="nwPreviewSoon()"></label>
       <label style="font-size:12.5px">抽样口径
         <select id="nw_strategy" onchange="nwPreview()"
                 style="width:210px"
@@ -1940,6 +1940,7 @@ let NW_ITEMS = [];        // 候选列表
 let NW_PICK = new Set();  // 勾选的词
 let NW_SCOPE = null;       // 最近一次口径（预览或真挖掘算出来的）
 let NW_PREVIEW_BUSY = false;
+let NW_PREVIEW_TIMER = null;   // 防抖：输入框每敲一下都发一次全库聚合会把服务压垮
 
 // ------------------------------------------------------------ 取样口径
 // 为什么值得单独做一块面板：「语料篇数」是个纯数字，
@@ -1993,11 +1994,24 @@ function nwCoverageHtml(c, opts){
         默认 1200 篇是本项目实测的干净度拐点，写进报告时把这一段口径一起写上。</div>`}`;
 }
 
+function nwPreviewSoon(){
+  // 一次取样要读一百多万字、还要聚合全库，不防抖的话
+  // 输入框敲「1200」三个键就是三次重活，服务会被自己拖垮。
+  clearTimeout(NW_PREVIEW_TIMER);
+  NW_PREVIEW_TIMER=setTimeout(nwPreview, 350);
+}
+
 async function nwPreview(){
   const box=$('nw_scope');
   if(!box) return;
   const lim=parseInt($('nw_limit').value||'1200',10)||1200;
   if(NW_PREVIEW_BUSY) return;
+  // 先把「正在算」摆出来：底账聚合要一秒多，
+  // 空白面板会被当成「没生效」，这正是当初那个 bug 的观感。
+  if(!NW_SCOPE || NW_SCOPE.n!==lim){
+    box.innerHTML='<div style="color:var(--dim)">正在读取语料底账…'
+      +'（要扫一遍全库，约 1–2 秒）</div>';
+  }
   NW_PREVIEW_BUSY=true;
   try{
     const c=await (await fetch(
@@ -3519,3 +3533,4 @@ loadFacets().then(()=>go(1));
 </script>
 </body>
 </html>
+
