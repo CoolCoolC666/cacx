@@ -620,6 +620,57 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
                  f"attachment; filename*=UTF-8''{quote(fname)}"})
 
 
+# ---------------------------------------------------------------- 分析样本
+@app.get("/api/sample/options")
+def api_sample_options(date_from: str = "2024-01-01",
+                       date_to: str = "2099-12-31"):
+    """可配样本的栏目清单（站点/栏目/总量/覆盖年份）"""
+    return {"date_from": date_from, "date_to": date_to,
+            "columns": _db().sample_options(date_from, date_to),
+            "strategies": list(D.Database.SAMPLE_STRATEGIES)}
+
+
+@app.get("/api/sample")
+def api_sample(site: str = "", column: str = "",
+               date_from: str = "2024-01-01", date_to: str = "2099-12-31",
+               limit: int = Query(500, ge=1, le=5000),
+               strategy: str = "stratified",
+               with_items: bool = False):
+    """
+    抽一个分析样本。
+
+    老师要「任选一个栏目，300-500 篇，2024 年以来」——
+    但栏目规模从 14 篇到 1639 篇不等，光选栏目凑不出 300-500。
+    所以规则是：**时间窗给足，篇数用 limit 截，抽样默认按年分层**。
+
+    ⚠ 默认 stratified 而不是「取最近 N 篇」：
+      后者只覆盖末段（实测 cac·网信要闻 取最近 500 篇，2024 年整年丢失），
+      而老师明确要求「发文量与主题随时间的变化」，时间轴不能只剩一年。
+    """
+    d = _db()
+    try:
+        r = d.sample_articles(site, column, date_from, date_to,
+                              limit, strategy)
+    except ValueError as e:
+        raise HTTPException(400, {"message": str(e), "refused": True})
+    items = r.pop("items")
+    if with_items:
+        r["items"] = items
+    else:
+        r["items_sample"] = items[:20]
+        r["items_total"] = len(items)
+    return r
+
+
+@app.get("/api/sample/years")
+def api_sample_years(site: str = "", column: str = "",
+                     date_from: str = "2024-01-01",
+                     date_to: str = "2099-12-31"):
+    """某栏目逐年篇数 —— 抽样依据 + 时间轴底稿"""
+    return {"site": site, "column": column,
+            "years": _db().column_years(site, column, date_from, date_to)}
+
+
 # ---------------------------------------------------------------- AI
 class SummarizeReq(BaseModel):
     id: int
