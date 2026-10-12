@@ -68,6 +68,33 @@ class TestSnapshot(Base):
         self.assertGreaterEqual(self.html.count("<details"), 4)
         self.assertGreaterEqual(self.html.count("<th>"), 10)
 
+    # ------------------------------------------- 三张作业相关的图
+    def test_三张作业图都在导出里(self):
+        """⚠ 必须与网页面板同步。用户拍板：面板 HTML 是要交上去的，
+        屏幕上更新了而导出版还是旧图，答辩时两边数字对不上最难看。"""
+        for t in ("治理问题分布", "高频机构", "联合发文类文章月度趋势"):
+            self.assertIn(t, self.html, f"导出缺区块：{t}")
+
+    def test_作业图带口径说明(self):
+        """三张都是粗筛/机器挖掘，不写口径会被当成精确统计引用进报告。"""
+        self.assertIn("关键词粗筛", self.html)
+        self.assertIn("人工复核", self.html)
+        self.assertIn("非精确统计", self.html)
+
+    def test_机构需复核标记进导出(self):
+        """needs_review 的 ⚠ 必须原样带到 HTML —— 这是给 reviewer 的信号，
+        丢了就等于让可疑的归并结果冒充可信数据。"""
+        self.d.conn.execute("DELETE FROM articles")
+        self.d.conn.execute(
+            "INSERT INTO articles(site,site_name,column_name,column_code,"
+            "title,pub_date,pub_day,url,chars,content_text,year) "
+            "VALUES('cac','中国网信网','网信要闻','c1',?,"
+            "'2025-01-01','2025-01-01','http://x1',10,'正文','2025')",
+            ("中央网信办 联合 公安部 部署专项行动 " * 12,))
+        self.d.conn.commit()
+        h = self.c.get("/api/panel/snapshot?months=12").text
+        self.assertIn("需复核", h, "导出里没有复核列/标记")
+
     # -------------------------------------------------- 筛选
     def test_按站点导出(self):
         h = self.c.get("/api/panel/snapshot?site=cac").text

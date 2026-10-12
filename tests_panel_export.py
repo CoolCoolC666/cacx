@@ -257,6 +257,45 @@ class TestPanelExport(Base):
         self.assertTrue(r.content.startswith(b"\xef\xbb\xbf"),
                         "Excel 打开无 BOM 的 UTF-8 CSV 会乱码")
 
+    # -------------------------------------- 三张作业相关的图
+    def test_problems_导出可用(self):
+        """治理问题分布。这张图服务的是报告主题「角色画像」，
+        而旁边那张「检索行为」服务的是我们自己的操作 —— 两者不能混。"""
+        r = self.c.get("/api/panel/export?which=problems")
+        self.assertEqual(r.status_code, 200, r.text[:200])
+        rows = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+        self.assertEqual(rows[0], ["治理问题", "文章数", "占比%"])
+        self.assertGreater(len(rows), 1, "一行都没有，端点等于没接上")
+
+    def test_orgs_导出带复核标记(self):
+        """⚠ needs_review 必须进 CSV。丢了它，可疑的归并结果
+        就会冒充可信数据被引用进报告。"""
+        r = self.c.get("/api/panel/export?which=orgs")
+        self.assertEqual(r.status_code, 200, r.text[:200])
+        rows = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+        self.assertEqual(rows[0], ["机构", "出现次数", "需人工复核",
+                                   "归并自", "归并依据"])
+
+    def test_joint_导出可用(self):
+        r = self.c.get("/api/panel/export?which=joint")
+        self.assertEqual(r.status_code, 200, r.text[:200])
+        rows = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+        self.assertEqual(rows[0], ["月份", "联合发文类", "当月总数", "占比%"])
+
+    def test_三张图按站点过滤可用(self):
+        for w in ("problems", "orgs", "joint"):
+            r = self.c.get(f"/api/panel/export?which={w}&site=cac")
+            self.assertEqual(r.status_code, 200, f"{w}: {r.text[:120]}")
+
+    def test_接口返回口径说明(self):
+        """这三张全是粗筛，不带口径就会被当精确统计引用进报告"""
+        p = self.c.get("/api/panel/problems").json()
+        self.assertIn("粗筛", p["note"])
+        g = self.c.get("/api/panel/orgs").json()
+        self.assertIn("复核", g["note"])
+        j = self.c.get("/api/panel/joint").json()
+        self.assertIn("粗筛", j["note"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

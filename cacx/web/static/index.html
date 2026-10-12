@@ -368,6 +368,45 @@
         <div id="rank_ev"></div>
       </div>
     </div>
+
+    <h3 style="font-size:13px;margin:16px 0 8px;color:var(--dim)">
+      权责边界 —— 和谁一起发、针对什么问题
+      <span style="font-weight:400;font-size:11.5px">
+        （下面三张图直接对应报告的「角色画像与权责边界」，与上面的检索行为不是一回事）</span>
+    </h3>
+    <div class="panel-grid">
+      <div class="box">
+        <h3>治理问题分布
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlBarsPng('bar_prob','治理问题分布')" title="下载这张图为 PNG 图片">⬇ 图</button>
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlPanel('problems')" title="下载这张图的数据（CSV）">⬇ 数据</button>
+        </h3>
+        <div class="bars" id="bar_prob"></div>
+        <div class="dim" style="font-size:11px;margin-top:6px">
+          关键词粗筛，一篇可命中多类，各行相加会超过总数</div>
+      </div>
+      <div class="box">
+        <h3>高频机构 Top 12
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlBarsPng('rank_org','高频机构Top12')" title="下载这张图为 PNG 图片">⬇ 图</button>
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlPanel('orgs')" title="下载这张图的数据（CSV）">⬇ 数据</button>
+        </h3>
+        <div id="rank_org"></div>
+      </div>
+      <div class="box" style="grid-column:1/-1">
+        <h3>联合发文类文章月度趋势
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlBarsPng('bar_joint','联合发文月度趋势')" title="下载这张图为 PNG 图片">⬇ 图</button>
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlPanel('joint')" title="下载这张图的数据（CSV）">⬇ 数据</button>
+        </h3>
+        <div class="bars" id="bar_joint"></div>
+        <div class="dim" style="font-size:11px;margin-top:6px">
+          按标题含「联合/印发/会同/联发/共同」粗筛；精确数字以 R1 抽取的「联合发文」关系为准</div>
+      </div>
+    </div>
   </section>
 
   <!-- ============ 数据同步 ============ -->
@@ -2655,6 +2694,48 @@ async function loadPanel(){
         + top.slice(0,6).map(x=>`<div class="rank"><span class="t">${esc(x.k)}</span>
            <span class="v">${x.n}</span></div>`).join(''):'')+skipNote
     : `<div class="empty" style="padding:20px">${site?'该站点近 30 天没有行为记录':'还没有行为记录'}</div>`;
+
+  // ---- 三张作业相关的图：直接服务「角色画像与权责边界」 ----
+  const s2 = site ? '?site='+site : '';
+  const prob = await (await fetch('/api/panel/problems'+s2)).json();
+  const pit = prob.items||[];
+  // 复用 drawBars：它会把数据存进 PN_CACHE，于是「⬇ 图」按钮直接可用
+  const pRows = pit.map(x=>({k:x.problem, n:x.articles}));
+  if($('bar_prob')) drawBars($('bar_prob'), pRows);
+
+  const orgs = await (await fetch('/api/panel/orgs'+s2)).json();
+  const oit = orgs.items||[];
+  PN_CACHE['rank_org'] = oit.map(x=>({k:x.org, n:x.count}));
+  $('rank_org').innerHTML = oit.length
+    ? oit.map(x=>`<div class="rank"
+         title="${esc(x.merge_basis||'')} · 归并自 ${(x.aliases||[]).length} 种写法">
+         <span class="t">${x.needs_review
+           ? '<span style="color:var(--warn)" title="归并结果需人工复核">⚠</span> ' : ''}${esc(x.org)}</span>
+         <span class="v">${x.count}</span></div>`).join('')
+      + (orgs.review_count
+        ? `<div style="margin-top:9px;color:var(--warn);font-size:11.5px">
+             有 ${orgs.review_count} 项带 ⚠：机器归并可能把无关机构吸进同一组，
+             引用进报告前必须人工复核</div>` : '')
+      + `<div style="margin-top:6px;color:var(--dim);font-size:11px">
+           机器挖掘的候选，非定论</div>`
+    : '<div class="empty" style="padding:20px">该站点无机构数据</div>';
+
+  const jt = await (await fetch('/api/panel/joint'+s2)).json();
+  const jit = jt.items||[];
+  // 展示占比而非绝对篇数：发文多的月份会淹没趋势，占比才看得出「是不是更常联合发文」
+  const jRows = jit.map(x=>({k:x.month.slice(2), n:Math.round(x.pct*10), pct:x.pct,
+                             raw:x.joint, total:x.total}));
+  if($('bar_joint') && jRows.length){
+    PN_CACHE['bar_joint'] = jRows.map(x=>({k:x.k, n:x.pct}));
+    const mx = Math.max(...jRows.map(r=>r.pct)) || 1;
+    $('bar_joint').innerHTML = jRows.map(r=>
+      `<div class="bar-item" title="${esc(r.k)}：${r.raw}/${r.total} 篇 = ${r.pct}%">
+         <div class="bar-v">${r.pct}</div>
+         <div class="bar-fill" style="height:${Math.max(2,Math.round(r.pct/mx*94))}px"></div>
+         <div class="bar-x">${esc(r.k)}</div></div>`).join('');
+  } else if($('bar_joint')) {
+    $('bar_joint').innerHTML = '<div class="empty" style="padding:20px">无数据</div>';
+  }
 }
 
 $('q').addEventListener('keydown',e=>{ if(e.key==='Enter') go(1); });
