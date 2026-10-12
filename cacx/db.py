@@ -30,6 +30,20 @@ from . import textseg
 
 SCHEMA_VERSION = 1
 
+
+def _rollup_picked(rows: Iterable[tuple]) -> List[Dict[str, Any]]:
+    """把 (site, year, text) 的行汇总成「取了多少、来自哪层」的清单。
+
+    用途只有一个：**让口径能被人看见**。前端要按这个清单渲染
+    「覆盖了哪几个站、哪几年、每层多少篇」，用户在点挖掘之前
+    就能判断这个篇数够不够；没有它，取样对用户就是黑箱。"""
+    agg: Dict[Tuple[str, str], int] = {}
+    for r in rows:
+        k = (r[0] or "", r[1] or "")
+        agg[k] = agg.get(k, 0) + 1
+    return [{"site": s, "year": y, "n": n}
+            for (s, y), n in sorted(agg.items(), key=lambda kv: (kv[0][0], kv[0][1]))]
+
 SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -1194,6 +1208,157 @@ class Database:
             "date_min": min((r["pub_day"] for r in rows), default=""),
             "date_max": max((r["pub_day"] for r in rows), default=""),
             "items": rows,
+        }
+
+    # ------------------------------------------------ 新词挖掘的语料取样
+    #: 新词挖掘的抽样策略。
+    #:  ⚠ 这里踩过一个很隐蔽的坑：原实现是
+    #:    `SELECT content_text FROM articles WHERE ... LIMIT ?`，
+    #:    **没有 ORDER BY**。SQLite 对无 ORDER BY 的 LIMIT 不保证顺序，
+    #:    实测它按 rowid（入库顺序）取 → 等于「取最早入库的 N 篇」：
+    #:      600 篇全是 cac、全是 2024 年，**浙江网信网一篇都没有**。
+    #:    用户以为在挖「网信领域」新词，实际只挖到一家站、一年的用词，
+    #:    而且换个查询计划/重建索引结果就变 —— 既不透明也不可复现。
+    #:  · stratified 按「站点 × 年份」分层取（默认）。
+    #:    网信领域的用词习惯站点之间、年间都有差别，缺任何一维都会漏。
+    #:  · recent 取时间最近的 N 篇 —— 只看最新动态时用，但**只覆盖末段**。
+    #:
+    #: ⚠ 两种口径的「可加性」不一样，别混为一谈：
+    #:    · recent 是纯 ORDER BY + LIMIT → 1200 篇的前 600 篇就是 600 篇取到的，
+    #:      改 limit 只是往后接。
+    #:    · stratified 的每层配额 = limit ÷ 层数，**limit 一变配额就变，
+    #:      于是前一段内容会整体重排**。所以两个不同 limit 的结果**不可直接比较**。
+    #:      要复现或写进报告，必须把 limit 原样记下来。
+    #:      这不是 bug，是「保证每层都有份」的必然代价 —— 要严格前缀就得放弃分层，
+    #:      而放弃分层就会退回「某个站某一年称霸」的老问题。
+    CONTENT_STRATEGIES = ("stratified", "recent")
+
+    #: 有多少字才算一篇「可统计的正文」。低于这个长度多半是通知页、
+    #: 标题页，混进来只会稀释词频统计。
+    CORPUS_MIN_CHARS = 200
+
+    def _corpus_where(self, site: str = "", min_chars: int = 0) -> tuple:
+        mc = int(min_chars or self.CORPUS_MIN_CHARS)
+        w = ["content_text IS NOT NULL", "length(content_text) > ?"]
+        a: List[Any] = [mc]
+        if site:
+            w.append("site=?"); a.append(site)
+        return " WHERE " + " AND ".join(w), a
+
+    def corpus_profile(self, site: str = "", min_chars: int = 0) -> Dict[str, Any]:
+        """语料底账：这个口径下**总共**有多少篇、多少字、分哪些站与哪几年。
+
+        存在的意义：让「取 600 篇」这个数字有分母可对。
+        用户判断篇数够不够，依据就是「600 占 27168 的 2.2%」这句话；
+        没有 total，取样就是黑箱。"""
+        w, a = self._corpus_where(site, min_chars)
+        with self._lock:
+            total = self.conn.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(length(content_text)),0) "
+                f"FROM articles{w}", a).fetchone()
+            per_site = [dict(r) for r in self.conn.execute(
+                f"SELECT site, COUNT(*) n, "
+                f"COALESCE(SUM(length(content_text)),0) chars "
+                f"FROM articles{w} GROUP BY site ORDER BY n DESC", a)]
+            per_year = [dict(r) for r in self.conn.execute(
+                f"SELECT year y, COUNT(*) n, "
+                f"COALESCE(SUM(length(content_text)),0) chars "
+                f"FROM articles{w} GROUP BY y ORDER BY y", a)]
+            rng = self.conn.execute(
+                f"SELECT MIN(pub_day), MAX(pub_day) FROM articles{w}", a
+            ).fetchone()
+        layers = len(per_site) * len(per_year) if per_site and per_year else 0
+        return {
+            "n": total[0], "chars": total[1],
+            "date_min": rng[0] or "", "date_max": rng[1] or "",
+            "per_site": per_site, "per_year": per_year,
+            "layers": layers,
+        }
+
+    def sample_content_text(self, limit: int = 1200, site: str = "",
+                            min_chars: int = 0,
+                            strategy: str = "stratified") -> Dict[str, Any]:
+        """按**站点 × 年份**分层取正文，供新词统计用。
+
+        与 sample_articles 的区别：那套按年份分层、返回元数据（给分析样本）；
+        这套多切一维「站点」、返回正文文本（给分词统计），口径必须独立说明，
+        两者混用会让「样本口径」和「新词口径」悄悄变成两个东西。"""
+        if strategy not in self.CONTENT_STRATEGIES:
+            raise ValueError(
+                f"未知抽样策略 {strategy}，可选：{self.CONTENT_STRATEGIES}")
+        limit = max(1, min(int(limit), 3000))
+        mc = int(min_chars or self.CORPUS_MIN_CHARS)
+        w, a = self._corpus_where(site, mc)
+        # 排序键固定 → 同一个 limit 永远取到同一批，可复现、可在报告里写清口径
+        ORD = " ORDER BY pub_day, id"
+
+        with self._lock:
+            total = self.conn.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(length(content_text)),0) "
+                f"FROM articles{w}", a).fetchone()
+            pool, pool_chars = total[0], total[1]
+            rows: List[tuple] = []
+
+            if strategy == "recent":
+                rows = self.conn.execute(
+                    f"SELECT site, year y, content_text ct "
+                    f"FROM articles{w} ORDER BY pub_day DESC, id DESC LIMIT ?",
+                    a + [limit]).fetchall()
+                picked = _rollup_picked(rows)
+            else:
+                # ⚠ 分层条件必须写 `year=?` 而不是 `substr(pub_day,1,4)=?`：
+                #   后者是函数表达式，idx_articles_year 用不上，每次分层查询
+                #   都退化成全表扫描（实测单层 count 就要好几秒）。
+                layers = self.conn.execute(
+                    f"SELECT site, year y, COUNT(*) n "
+                    f"FROM articles{w} GROUP BY site, y ORDER BY site, y", a
+                ).fetchall()
+
+                def fetch(s, y, take, off):
+                    return self.conn.execute(
+                        f"SELECT site, year y, content_text ct "
+                        f"FROM articles{w} AND site=? AND year=?"
+                        + ORD + f" LIMIT ? OFFSET ?",
+                        a + [s, y, take, off]).fetchall()
+
+                # 每层先保底，再把余额在层间轮转补齐。
+                # 「按层计数」而不是「按年份计数」——同一年里可能有好几个站，
+                # 用年份计数会让先来的站把配额吃光，小站直接消失。
+                per = max(1, limit // max(1, len(layers)))
+                got = {}
+                for k, (s, y, n) in enumerate(layers):
+                    take = min(per, n)
+                    got[k] = take
+                    if take > 0:
+                        rows += fetch(s, y, take, 0)
+                left = limit - len(rows)
+                while left > 0:
+                    grew = 0
+                    for k, (s, y, n) in enumerate(layers):
+                        if left <= 0:
+                            break
+                        if got[k] >= n:
+                            continue          # 这一层已经取完
+                        batch = fetch(s, y, 1, got[k])
+                        if not batch:
+                            continue
+                        rows += batch
+                        got[k] += 1
+                        left -= 1
+                        grew += 1
+                    if not grew:
+                        break
+                picked = _rollup_picked(rows)
+
+            texts = [r[2] for r in rows]
+            chars = sum(len(t) for t in texts)
+        return {
+            "texts": texts, "n": len(texts), "chars": chars,
+            "pool": pool, "pool_chars": pool_chars,
+            "strategy": strategy, "site": site, "limit": limit,
+            "picked": picked,
+            "cover_sites": len({p["site"] for p in picked}),
+            "cover_years": len({p["year"] for p in picked}),
         }
 
     def sample_options(self, date_from: str = "2024-01-01",

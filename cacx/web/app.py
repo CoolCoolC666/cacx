@@ -1252,23 +1252,62 @@ def _known_words() -> set:
 
 
 class NewWordsReq(BaseModel):
-    limit: int = Field(600, ge=20, le=2000)   # 取多少篇文章来统计
+    limit: int = Field(1200, ge=20, le=3000)   # 取多少篇文章来统计
     max_chars: int = Field(5000, ge=500, le=20000)  # 每篇取多少字
     min_count: int = Field(8, ge=2, le=200)
     topn: int = Field(60, ge=10, le=300)
+    #: 抽样策略。⚠ 默认必须是 stratified —— 见 db.sample_content_text
+    #: 里的说明：原来的「无 ORDER BY 的 LIMIT」实际只取到 cac + 单一年份。
+    strategy: str = Field("stratified")
+    site: str = ""                            # 空 = 两站都算
+
+
+def _nw_corpus(limit: int = 1200, strategy: str = "stratified",
+               site: str = ""):
+    """取样 + 口径清单。预览与真挖掘共用这一个函数，
+    避免「预览说覆盖 2 个站、挖出来只有 1 个站」这种对不上的情况。"""
+    d = _db()
+    s = d.sample_content_text(limit=limit, site=site, strategy=strategy)
+    prof = d.corpus_profile(site=site)
+    cover = {
+        "pool": s["pool"], "pool_chars": s["pool_chars"],
+        "n": s["n"], "chars": s["chars"],
+        "pct_articles": round(100.0 * s["n"] / s["pool"], 2) if s["pool"] else 0,
+        "pct_chars": round(100.0 * s["chars"] / s["pool_chars"], 2)
+        if s["pool_chars"] else 0,
+        "strategy": s["strategy"], "site": site,
+        "cover_sites": s["cover_sites"], "cover_years": s["cover_years"],
+        "picked": s["picked"],
+        "pool_sites": len(prof["per_site"]),
+        "pool_years": len(prof["per_year"]),
+        "date_min": prof["date_min"], "date_max": prof["date_max"],
+    }
+    return s, cover
+
+
+@app.get("/api/newwords/corpus")
+def api_newwords_corpus(limit: int = Query(1200, ge=20, le=3000),
+                        strategy: str = Query("stratified"),
+                        site: str = Query("")):
+    """**只报口径、不做统计** —— 让用户在点「挖掘」之前
+    先看见「这个篇数会覆盖哪些站、哪几年、多少字」。"""
+    try:
+        _, cover = _nw_corpus(limit, strategy, site)
+    except ValueError as e:
+        return {"error": str(e)}
+    return cover
 
 
 @app.post("/api/newwords/discover")
 def api_newwords_discover(req: NewWordsReq):
     """从语料里挖新词候选（只读，不改任何东西）"""
-    d = _db()
-    rows = d.conn.execute(
-        "SELECT content_text FROM articles "
-        "WHERE content_text IS NOT NULL AND length(content_text) > 200 "
-        "LIMIT ?", (req.limit,)).fetchall()
-    if not rows:
+    try:
+        s, cover = _nw_corpus(req.limit, req.strategy, req.site)
+    except ValueError as e:
+        return {"error": str(e)}
+    if not s["texts"]:
         return {"error": "语料里没有可用正文，先抓一些文章"}
-    texts = [r[0][:req.max_chars] for r in rows]
+    texts = [t[:req.max_chars] for t in s["texts"]]
     known = _known_words()
     t0 = time.time()
     cands = NW.discover_new_words(texts, min_count=req.min_count,
@@ -1276,7 +1315,8 @@ def api_newwords_discover(req: NewWordsReq):
     for c in cands:
         c["hint"] = NW.domain_hint(c["word"]) or ""
     return {"items": cands, "articles": len(texts),
-            "known_size": len(known), "elapsed": round(time.time() - t0, 1)}
+            "known_size": len(known), "elapsed": round(time.time() - t0, 1),
+            "coverage": cover}
 
 
 class AdoptReq(BaseModel):
