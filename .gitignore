@@ -49,3 +49,7 @@ _[a-z0-9]*.txt
 同步最新文章.bat
 # ---- 自定义站点配置（json 模式下 headers 里可能带鉴权 token，同 settings.json 处理）----
 config/sites.d/*.json
+
+# ---- 组员数据包里的数据库（46 MB，派生物，可由 _export_pack.py 重新生成）
+# 文档/CSV 照常入库，只有体积大的 db 挡掉
+组员数据包/*.db
