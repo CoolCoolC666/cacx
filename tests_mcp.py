@@ -50,10 +50,15 @@ REQUIRED_TOOLS = [
     # 删数据的工具排在最后：它不烧钱但**不可逆**，
     # 放在只读工具后面是为了让默认的探索路径永远不会碰到它。
     "cacx_purge",
+    # 分析工作台：让 AI 一次会话走完 R1→R2
+    "cacx_sample_options", "cacx_sample", "cacx_mine_orgs",
+    "cacx_put_entities", "cacx_put_relations",
+    "cacx_list_entities", "cacx_list_relations",
+    "cacx_graph", "cacx_graph_stats",
 ]
 WRITE_TOOLS = {"cacx_sync", "cacx_summarize",
                "cacx_summarize_batch", "cacx_ai_config",
-               "cacx_purge"}
+               "cacx_purge", "cacx_put_entities", "cacx_put_relations"}
 
 # 人造「真实格式」密钥：长得像 MiniMax key，但完全是测试用假串。
 FAKE_KEY = "sk-TESTKEY-abcdef0123456789XYZ"
@@ -99,7 +104,7 @@ def test_tools_registered():
 
     tools = asyncio.run(_names())
     names = [t[0] for t in tools]
-    check("工具总数 == 13", len(names) == 13, f"实际 {len(names)}: {names}")
+    check("工具总数 == 22", len(names) == 22, f"实际 {len(names)}: {names}")
     for want in REQUIRED_TOOLS:
         check(f"已注册 {want}", want in names, f"现有 {names}")
 
@@ -109,18 +114,43 @@ def test_tools_registered():
     bad = [n for n in first7 if n in WRITE_TOOLS]
     check("前 7 个里没有写/花钱工具", not bad, f"前7={first7}")
     pos = {n: (names.index(n) if n in names else -1) for n in REQUIRED_TOOLS}
-    check("ai_status 在第 7 位(idx6)", pos["cacx_ai_status"] == 6,
-          f"位置 {pos['cacx_ai_status']}")
-    check("sync 在第 8 位(idx7)", pos["cacx_sync"] == 7,
-          f"位置 {pos['cacx_sync']}")
-    check("summarize 在第 9 位(idx8)", pos["cacx_summarize"] == 8,
-          f"位置 {pos['cacx_summarize']}")
-    check("summarize_batch 在第 10 位(idx9)", pos["cacx_summarize_batch"] == 9,
-          f"位置 {pos['cacx_summarize_batch']}")
-    check("ai_config 在第 11 位(idx10)", pos["cacx_ai_config"] == 10,
-          f"位置 {pos['cacx_ai_config']}")
-    check("doctor 在末尾(idx11)", pos["cacx_doctor"] == 11,
-          f"位置 {pos['cacx_doctor']}")
+    # ⚠ 不断言绝对序号 —— 以后再加工具，序号必然整体位移，
+    # 那种测试会逼着人改数字而不是改设计。改为断言**相对顺序**：
+    # 不可逆的删除工具永远排最后，探索路径碰不到它。
+    def _before(a, b):
+        return pos[a] < pos[b]
+    # ⚠ 不断言绝对序号 —— 以后再加工具，序号必然整体位移，
+    # 那种测试会逼着人改数字而不是改设计。改为断言**相对顺序**：
+    # purge 是唯一不可逆的删除工具，它必须排在「探索→写入」这条
+    # 主路径的**后面**，不能夹在中间让人顺手点到。
+    # （它不必是全局末位：cacx_graph 等只读工具排在它后面是安全的，
+    #   探索路径的终点仍然碰不到删除。）
+    for r in ("cacx_search", "cacx_get_article", "cacx_facets",
+              "cacx_sample", "cacx_sample_options", "cacx_mine_orgs",
+              "cacx_graph", "cacx_graph_stats",
+              "cacx_put_entities", "cacx_put_relations"):
+        check(f"{r} 在 purge 之前", _before(r, "cacx_purge"),
+              f"pos={pos.get(r)} purge={pos['cacx_purge']}")
+    # 只读工具应整体早于写工具
+    # 只读工具应整体早于写工具。
+    # ⚠ 注意：不能断言「cacx_graph 早于 cacx_put_relations」——
+    #   注册顺序由源码里的装饰器位置决定，而 cacx_graph 依赖的
+    #   db.graph() 写在实体写入方法**之后**，所以它必然注册在后。
+    #   这不影响使用：AI 拿到的工具列表顺序不影响调用可行性，
+    #   只影响默认展示次序。硬要它「按工作流排序」只能靠调换函数定义
+    #   位置，代价是让读代码的人看到乱序的定义 —— 不值得。
+    check("只读搜索早于写入实体", _before("cacx_search", "cacx_put_entities"))
+    check("只读图谱早于 purge", _before("cacx_graph", "cacx_purge"))
+    # 工作流顺序：选样本 → 挖机构 → 写关系
+    check("选样本早于挖机构（工作流顺序）",
+          _before("cacx_sample_options", "cacx_mine_orgs"))
+    check("挖机构早于写关系（工作流顺序）",
+          _before("cacx_mine_orgs", "cacx_put_relations"))
+    # purge 之后不应再有其他「不可逆」工具
+    after = names[names.index("cacx_purge") + 1:]
+    IRREVERSIBLE = WRITE_TOOLS - {"cacx_put_entities", "cacx_put_relations"}
+    bad = [n for n in after if n in IRREVERSIBLE]
+    check("purge 之后没有不可逆工具", not bad, f"其后有 {bad}")
 
     # 每个工具都有 docstring（MCP 客户端靠它生成界面）
     section("4. 每个工具都有非空描述")

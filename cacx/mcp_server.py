@@ -108,6 +108,8 @@ def cacx_search(
     sort: str = "date_desc",
     limit: int = 20,
     offset: int = 0,
+    tokenize: bool = False,
+    op: str = "AND",
 ) -> Dict[str, Any]:
     """
     组合检索文章（只读）。
@@ -121,6 +123,14 @@ def cacx_search(
         min_chars:    最小正文字数；skip_empty: 是否跳过空正文（默认 True）。
         sort:         date_desc / date_asc / chars_desc / chars_asc。
         limit / offset: 分页。
+        tokenize:     中文分词检索。**默认 False**。
+                      置 True 时用 jieba 把查询切成词组，配合 op="OR"。
+                      实测「清朗网络谣言」精确检索 0 篇，分词 OR 命中 2807 篇
+                      （FTS 用 trigram 分词器，整串匹配经常落空）。
+                      但 OR 会放大结果集：查「中央网信办 专项行动」这类
+                      精确组合时**不要**开，OR 会捞进无关文章。
+        op:           AND（默认，所有词都要有）/ OR（任一词命中即可）。
+                      只在 tokenize=True 时有意义。
 
     返回：{total, mode(fts|like|none), took_ms, items:[{id,site,title,pub_date,url,chars,...}]}
     """
@@ -132,7 +142,8 @@ def cacx_search(
                 q=q, site=site, column_code=column_code, column_name=column_name,
                 year=year, date_from=date_from, date_to=date_to,
                 min_chars=min_chars, skip_empty=skip_empty, sort=sort,
-                limit=limit, offset=offset, min_fts_chars=min_fts)
+                limit=limit, offset=offset, min_fts_chars=min_fts,
+                tokenize=tokenize, op=op)
     except Exception as e:
         return _err(e)
 
@@ -647,6 +658,256 @@ def cacx_doctor(
         return _err(e)
 
 
+# ============================================== 3. 分析工作台（AI 调用的入口）
+# 这一组是给「AI 一键生成报告/图谱」用的。顺序刻意如此：
+#   选样本 → 挖机构 → 抽实体关系 → 写库 → 出图
+# 这样 AI 一次会话就能走完 R1→R2，不需要人去中间搬数据。
+@mcp.tool()
+def cacx_sample_options(date_from: str = "2024-01-01",
+                        date_to: str = "2099-12-31") -> List[Dict[str, Any]]:
+    """
+    列出可配样本的栏目及各有多少篇（**第一步总是先调这个**）。
+
+    老师要「任选一个栏目，300-500 篇，2024 年以来」，但库里栏目从
+    14 篇到 1600 多篇都有，光「选栏目」凑不出 300-500。所以规则是
+    **时间窗给足 + 篇数用 limit 截**，任何一个栏目都能配出合规样本。
+
+    返回：[{site, column, n(区间内篇数), years(跨几年), d0, d1}, ...]
+    """
+    try:
+        with _db() as d:
+            return d.sample_options(date_from, date_to)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def cacx_sample(
+    site: str = "",
+    column: str = "",
+    date_from: str = "2024-01-01",
+    date_to: str = "2099-12-31",
+    limit: int = 500,
+    strategy: str = "stratified",
+    with_text: bool = False,
+) -> Dict[str, Any]:
+    """
+    抽一个**分析样本**（只读）。
+
+    参数：
+        site / column: 都可空；column 传栏目名（如「网信要闻」）。
+        date_from / date_to: 闭区间。默认 2024 至今 —— **不要**收窄到
+            2025 或更晚，老师要「2024 年以来」的全貌。
+        limit: 篇数上限（1~5000）。
+        strategy: stratified（默认，按年份分层，保证每年都被抽到）
+                  / recent（取最近 N 篇）
+            ⚠ **除非明确只要最新动态，否则别用 recent**：
+            取最近 500 篇会只覆盖 2025-03 之后，**2024 整年丢失**，
+            「发文量与主题随时间的变化」这条要求直接作废。
+        with_text: 是否带上正文全文。默认 False（500 篇全文很大），
+            需要读正文抽实体时再置 True，或按需用 cacx_get_article 分批取。
+
+    返回：{n, n_usable, total_pool, years_taken:{年:篇数}, date_min/max,
+          items:[{id,title,pub_day,url,column_name}]}
+    """
+    try:
+        with _db() as d:
+            r = d.sample_articles(site=site, column=column,
+                                  date_from=date_from, date_to=date_to,
+                                  limit=limit, strategy=strategy)
+            if with_text and r["items"]:
+                ids = [x["id"] for x in r["items"]]
+                q = ("SELECT id, content_text FROM articles "
+                     "WHERE id IN (%s)" % ",".join("?" * len(ids)))
+                txt = {int(i): t for i, t in d.conn.execute(q, ids)}
+                for x in r["items"]:
+                    x["content_text"] = txt.get(x["id"], "")
+            return r
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def cacx_mine_orgs(
+    site: str = "",
+    column: str = "",
+    date_from: str = "2024-01-01",
+    date_to: str = "2099-12-31",
+    limit: int = 3000,
+    min_count: int = 3,
+    merge: bool = True,
+) -> Dict[str, Any]:
+    """
+    从标题里挖掘**机构候选词**（只读），可选归并同一家机构。
+
+    为什么需要它：articles 表**没有发文机关字段**，联合发文只能从
+    title + content 抽。这一步给出「哪些串像机构名、出现多少次、
+    归并后归到谁名下」，是关系抽取的输入清单。
+
+    ⚠ 这是**辅助**，不是结论。它只保证候选「像机构」，
+    真正判断「这是不是发文机关」仍要人复核 —— 别把输出直接当定论写进报告。
+
+    ⚠ 已知的边界（实测出来的，别指望它全自动）：
+      · 「APEC 峰会」「二十国集团峰会」这类**会议/峰会**会以「会」结尾被收进来，
+        它们不是发文机关，做联合发文分析时要自己剔掉。
+      · 「全国人大常委会国务院」这种**两个真机构在标题里连写**会被当成一个实体，
+        归并后仍需人工拆开。
+      · 「时政要闻」栏目多是领导人活动报道，噪声比「网信要闻」「治理监管」高得多；
+        做机构网络分析优先选后两个栏目。
+
+    参数：
+        limit:      扫描多少篇标题（按时间倒序取最近 N 篇）
+        min_count:  出现几次才算候选，默认 3
+        merge:      True 时把「中央网信办网络局 / 举报中心 / ……公安部」
+                    这类同一机构的多种写法归并成一个主名（推荐 True）
+
+    返回：{scanned, raw_n, merged_n, orgs:[{org,count,aliases,variants,
+          example_title}]}
+    """
+    try:
+        from . import textseg as TS
+        with _db() as d:
+            where, args = ["pub_day>=?", "pub_day<=?",
+                           "COALESCE(content_empty,0)=0"], [date_from, date_to]
+            if site:
+                where.append("site=?"); args.append(site)
+            if column:
+                where.append("column_name=?"); args.append(column)
+            titles = [r[0] for r in d.conn.execute(
+                f"SELECT title FROM articles WHERE {' AND '.join(where)} "
+                f"ORDER BY pub_day DESC, id DESC LIMIT ?",
+                args + [int(limit)])]
+            raw = TS.mine_orgs(titles, min_count=min_count, topn=400)
+            out = TS.normalize_orgs(raw) if merge else [
+                {"org": x["org"], "count": x["count"],
+                 "example_title": x["example_title"], "aliases": [],
+                 "variants": [x["org"]]} for x in raw]
+        return {"scanned": len(titles), "raw_n": len(raw),
+                "merged_n": len(out), "merged": bool(merge), "orgs": out}
+    except Exception as e:
+        return _err(e)
+
+
+# ------------------------------------------------ 实体 / 关系（写入）
+@mcp.tool()
+def cacx_put_entities(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    写入实体（**写操作**，作业 R1 的产物落库处）。
+
+    rows 每项：
+        name:       实体名，如「中央网信办」
+        type:       org（机构）/ policy（政策）/ problem（治理问题）/ measure（措施）
+        article_id: **出处文章的 id** —— 必填，不是可选项
+        evidence:   支撑这一条的原文片段（推荐填）
+        aliases:    其他写法，如 ["市场监管总局"]
+        extractor:  谁抽的，默认 "ai"
+        confidence: 0~1
+
+    ⚠ 为什么 article_id 是硬要求：老师要求演示「点一条关系回溯原文」。
+       没有出处的关系在图谱上就是无法验证的孤证，答辩时一问就塌。
+
+    幂等：同一篇的同一实体重复提交只更新证据，不产生重复行，
+          所以 AI 重跑一遍不会把图谱撑成双倍。
+
+    返回：{written, skipped, errors[], error_count}
+    """
+    try:
+        with _db() as d:
+            return d.upsert_entities(rows)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def cacx_put_relations(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    写入关系（**写操作**，作业 R2 的产物落库处）。
+
+    rows 每项：
+        src_name:   起点实体名
+        dst_name:   终点实体名
+        rel_type:   co_issue（联合发文）/ regulate（监管）/ cite（引用）
+                    / belong（隶属）/ implement（落实）……
+        article_id: **出处文章 id** —— 必填
+        evidence:   支撑这句话的原文片段
+        weight:     权重，默认 1.0
+
+    同名对 + 同类型 + 同一篇文章 = 同一行，重复提交 weight **累加**。
+    但跨文章的证据**全部保留** —— 合作网络的强弱正是这么统计出来的。
+
+    返回：{written, skipped, errors[], error_count}
+    """
+    try:
+        with _db() as d:
+            return d.upsert_relations(rows)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def cacx_list_entities(type: str = "", q: str = "",
+                       article_id: Optional[int] = None,
+                       limit: int = 200) -> List[Dict[str, Any]]:
+    """
+    实体清单（只读）。type 为 org/policy/problem/measure，空=全部。
+    每条都带 article_title 与 url —— 供前端「点实体回溯原文」。
+    """
+    try:
+        with _db() as d:
+            return d.list_entities(type=type, q=q, article_id=article_id,
+                                   limit=limit)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def cacx_list_relations(name: str = "", rel_type: str = "",
+                        article_id: Optional[int] = None,
+                        limit: int = 200) -> List[Dict[str, Any]]:
+    """
+    关系清单（只读）。name 非空时只看与该实体相连的关系（**含入边与出边**），
+    即「在图谱上点开一个节点」的场景。
+    """
+    try:
+        with _db() as d:
+            return d.list_relations(name=name, rel_type=rel_type,
+                                    article_id=article_id, limit=limit)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def cacx_graph(limit: int = 300) -> Dict[str, Any]:
+    """
+    关系图谱数据（只读）：{nodes:[{name,type,n}], edges:[{src,dst,rel_type,
+    n(跨几篇), weight, article_ids[]}]}
+
+    edges 里刻意带 article_ids —— 前端拿到后即可实现「点一条关系
+    跳到支持它的原文」。这就是老师要的现场演示动作。
+    """
+    try:
+        with _db() as d:
+            return d.graph(limit=limit)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def cacx_graph_stats() -> Dict[str, Any]:
+    """
+    图谱概览（只读）：实体总数/机构数、关系条数/去重后边数、
+    按类型分布、以及 **no_evidence**（没有原文证据的关系数）。
+
+    no_evidence 是答辩风险指标 —— 别让它停在高位。
+    """
+    try:
+        with _db() as d:
+            return d.graph_stats()
+    except Exception as e:
+        return _err(e)
+
+
+# ============================================== 4. 删除（不可逆，排最后）
 @mcp.tool()
 def cacx_purge(
     target: str,
