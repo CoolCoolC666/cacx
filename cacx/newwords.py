@@ -225,6 +225,31 @@ def discover_new_words(texts: Iterable[str],
         #   这条必须放在打分**之前**，否则短语的高熵会把它顶进结果里。
         if _splittable(w, uni, total_chars):
             continue
+        # ⚠ **邻字熵必须独立生效**，不能和 score 混在一个条件里。
+        #   原来写的是 `if score < min_cohesion and min(le,re_) < min_entropy`，
+        #   看起来是两个条件与，实际等于**什么都不筛**：
+        #     score = cohesion + 0.6*min(le,re_) + domain_weight
+        #     而 cohesion 在公文里普遍 10+，阈值只有 4.0
+        #   ⇒ score 永远大于 min_cohesion ⇒ 第一个条件恒为假 ⇒ 整条筛选是死代码。
+        #   实测后果：300 个候选里 **55 个（18%）邻字熵为 0 照样放行**，
+        #   而「江大数据交」「共同维护清朗」「央委员会的委」这类
+        #   长短语被切出的内部窗口，熵全是 0 —— 它们本该是最该被淘汰的一批。
+        #
+        #   邻字熵 = 0 的含义很硬：这个串**只在一个固定上下文里出现过**。
+        #   真正的词会被不同句子、不同搭配包围；只有被长词夹在中间的
+        #   碎片才会永远只有同一个左邻和同一个右邻。
+        #
+        #   ⚠ 这里**故意不对机构名开后门**。曾经按「命中机构后缀就放行」
+        #   处理低熵，实测反而放进来 7 个全是碎片：
+        #     央委员会的委 ← 中央委员会委员
+        #     全和信息化委 ← 全国信息化委员会
+        #     央行征信中心 ← 中国人民银行征信中心
+        #     市传媒中心 ← 湖州市传媒中心
+        #   因为机构后缀本身也是长短语的尾巴。而真正的机构称谓
+        #   （如「研究院副院长」熵=1.0）本来就够自由，不需要开后门。
+        #   统计判据只看邻字分布，不看词类 —— 这是它比任何白名单可靠的地方。
+        if min(le, re_) < min_entropy:
+            continue
         # ⚠ **分词器已经认识的词不是「新词」**，必须直接剔除。
         #   只在结果里标一个 in_dict 字段是不够的 —— 实测里
         #   「中央网信办」这种内置词典早就收录的词照样排进了候选，
@@ -233,7 +258,7 @@ def discover_new_words(texts: Iterable[str],
         if known_set and w in known_set:
             continue
         score = cohesion + 0.6 * min(le, re_) + domain_weight(w)
-        if score < min_cohesion and min(le, re_) < min_entropy:
+        if score < min_cohesion:
             continue
         out.append({
             "word": w,
