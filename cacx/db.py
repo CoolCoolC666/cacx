@@ -1208,6 +1208,127 @@ class Database:
                 "GROUP BY site, column_name ORDER BY n DESC",
                 (date_from, date_to))]
 
+    # ------------------------------------------- 面板：作业相关的三张图
+    # 这三张图服务的是「网信办角色画像与权责边界」这个报告主题，
+    # 而不是「我们这个工具被用了多少次」。后者是自用数据，
+    # 答辩时跟作业主线对不上。
+    #: 治理问题分类词表。⚠ 词是「问题」不是「措施」——
+    #: 「清朗」是行动名（措施），「网络谣言」才是问题。
+    PROBLEM_TERMS = (
+        ("网络谣言", ("网络谣言", "谣言", "辟谣")),
+        ("网络诈骗", ("诈骗", "电诈", "杀猪盘", "刷单返利")),
+        ("未成年人", ("未成年人", "青少年", "防沉迷")),
+        ("个人信息", ("个人信息", "隐私", "人脸识别", "信息泄露")),
+        ("数据安全", ("数据泄露", "数据安全", "数据出境")),
+        ("网络暴力", ("网络暴力", "网暴", "键盘侠")),
+        ("水军有偿", ("水军", "有偿删帖", "刷量", "黑公关")),
+        ("深度伪造", ("深度伪造", "换脸", "AI 换脸", "虚假信息")),
+        ("算法推荐", ("算法推荐", "算法歧视", "大数据杀熟")),
+        ("生成式AI", ("生成式人工智能", "生成式AI", "大模型", "AI 幻觉")),
+    )
+
+    def problem_distribution(self, site: str = "", date_from: str = "2024-01-01",
+                             date_to: str = "2099-12-31") -> List[dict]:
+        """
+        治理问题关键词分布 —— 直接对应老师要的「角色画像」。
+
+        ⚠ 用一次 SQL 把语料拉出来在 Python 侧计数，而不是 10 条 LIKE 子查询：
+           2.9 万篇 × 10 个关键词 = 30 万次全表扫描，会卡住。
+        """
+        where, args = ["pub_day>=?", "pub_day<=?",
+                       "COALESCE(content_empty,0)=0"], [date_from, date_to]
+        if site:
+            where.append("site=?"); args.append(site)
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT title, COALESCE(content_text,'') FROM articles "
+                f"WHERE {' AND '.join(where)}", args).fetchall()
+        counts = {name: 0 for name, _ in self.PROBLEM_TERMS}
+        for title, body in rows:
+            # 标题权重更高：标题点题，正文里可能只是顺带提一句
+            t, b = (title or ""), (body or "")
+            for name, kws in self.PROBLEM_TERMS:
+                if any(k in t for k in kws):
+                    counts[name] += 1
+                elif any(k in b for k in kws):
+                    counts[name] += 1
+        total = len(rows)
+        out = [{"problem": k, "articles": v,
+                "pct": round(v * 100.0 / total, 1) if total else 0}
+               for k, v in counts.items()]
+        out.sort(key=lambda x: -x["articles"])
+        return out
+
+    def top_orgs(self, site: str = "", date_from: str = "2024-01-01",
+                 date_to: str = "2099-12-31",
+                 limit: int = 12) -> List[dict]:
+        """
+        高频机构 Top —— 直接对应「谁在发文中反复出现」。
+
+        走 textseg.mine_orgs 的候选 + 归并，而不是自己写正则：
+        「中央网信办 / ……公安部 / 公安部：」会被并成一个主体。
+        """
+        from . import textseg as TS
+        where, args = ["pub_day>=?", "pub_day<=?",
+                       "COALESCE(content_empty,0)=0"], [date_from, date_to]
+        if site:
+            where.append("site=?"); args.append(site)
+        with self._lock:
+            titles = [r[0] for r in self.conn.execute(
+                f"SELECT title FROM articles WHERE {' AND '.join(where)}",
+                args)]
+        raw = TS.mine_orgs(titles, min_count=3, topn=400)
+        merged = TS.normalize_orgs(raw)
+        return merged[:limit]
+
+    def joint_issue_trend(self, site: str = "",
+                          date_from: str = "2024-01-01",
+                          date_to: str = "2099-12-31") -> List[dict]:
+        """
+        联合发文类文章的月度趋势。
+
+        ⚠ 这是**粗筛口径**，不是最终统计：只按标题里出现
+        「联合/印发/会同/联发/共同」来判。写清楚这点，
+        否则报告里会把它当成精确数字，而老师一问就露馅。
+        精确数字要看 R1 抽出来的 `联合发文` 关系。
+        """
+        kw = ("联合", "印发", "会同", "联发", "共同")
+        where, args = ["pub_day>=?", "pub_day<=?",
+                       "COALESCE(content_empty,0)=0"], [date_from, date_to]
+        if site:
+            where.append("site=?"); args.append(site)
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT pub_day, title FROM articles "
+                f"WHERE {' AND '.join(where)}", args).fetchall()
+        buckets: Dict[str, List[int]] = {}
+        for day, title in rows:
+            if not any(k in (title or "") for k in kw):
+                continue
+            ym = (day or "")[:7]
+            if len(ym) != 7:
+                continue
+            b = buckets.setdefault(ym, [0, 0])
+            b[0] += 1                     # 联合发文
+            b[1] += 1                     # 该月全部（下面统一算）
+        # 再取一次分母：每月总篇数
+        with self._lock:
+            allrows = self.conn.execute(
+                f"SELECT pub_day FROM articles WHERE {' AND '.join(where)}",
+                args).fetchall()
+        total: Dict[str, int] = {}
+        for (day,) in allrows:
+            ym = (day or "")[:7]
+            if len(ym) == 7:
+                total[ym] = total.get(ym, 0) + 1
+        out = []
+        for ym in sorted(buckets):
+            out.append({"month": ym, "joint": buckets[ym][0],
+                        "total": total.get(ym, 0),
+                        "pct": round(buckets[ym][0] * 100.0 / total[ym], 1)
+                        if total.get(ym) else 0.0})
+        return out
+
     def column_years(self, site: str = "", column: str = "",
                      date_from: str = "2024-01-01",
                      date_to: str = "2099-12-31") -> List[dict]:

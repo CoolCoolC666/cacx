@@ -136,6 +136,80 @@ class TestNormalize(unittest.TestCase):
         self.assertEqual(len(got), 1)
         self.assertEqual(len(got[0]["variants"]), 2)
 
+    def test_层级不同不合并(self):
+        """⚠ 这是本模块最严重的一个坑，实测在真语料上撞出来的：
+        「省网信办」去掉「省」前缀后骨架与「网信办」完全相同，
+        于是被并进「中央网信办」，再经并查集传递 ——
+        **中央和全国所有省级网信办被合成一个主体**。
+        两两判定每一步都「合理」，错的是传递闭包。
+        所以层级互斥必须先于 LCP / 子串 / 骨架所有判据。
+
+        注：「浙江省网信办」与「省网信办」合并是**允许**的 ——
+        同属省级，泛称写法差异不算不同机构。真正要挡的是跨层级。"""
+        raw = [
+            {"org": "中央网信办", "count": 300, "example_title": "a"},
+            {"org": "浙江省网信办", "count": 80, "example_title": "b"},
+            {"org": "杭州市委网信办", "count": 40, "example_title": "d"},
+        ]
+        got = textseg.normalize_orgs(raw)
+        self.assertEqual(len(got), 3,
+                         f"三个层级不同的机构被并成了 {len(got)} 个：{got}")
+        # 明确验一遍不该成立的那些
+        for a, b in (("中央网信办", "省网信办"),
+                     ("中央网信办", "浙江省网信办"),
+                     ("浙江省网信办", "杭州市委网信办")):
+            self.assertFalse(textseg._same_org(a, b),
+                             f"「{a}」与「{b}」层级不同，不该合并")
+
+    def test_同层级仍能合并(self):
+        """加层级互斥不能把正常归并也挡掉"""
+        for a, b in (("中央网信办", "中央网信办举报中心"),
+                     ("浙江省网信办", "浙江省委网信办"),
+                     ("市场监管总局", "国家市场监督管理总局")):
+            self.assertTrue(textseg._same_org(a, b),
+                            f"「{a}」与「{b}」应合并却被挡")
+
+    def test_层级判定本身(self):
+        for s, want in (("中央网信办", "central"),
+                        ("国家互联网信息办公室", "central"),
+                        ("浙江省网信办", "prov"),
+                        ("内蒙古自治区网信办", "prov"),
+                        ("杭州市委网信办", "city")):
+            self.assertEqual(textseg._tier(s), want, s)
+
+    def test_公共前缀无区分度不算兄弟(self):
+        """⚠ 回归：LCP 判据只看长度不看内容，实测连错三处 ——
+        · LCP=「中共中央」→ 中共中央国务院 ~ 中共中央政治局
+          → 国务院 / 政治局 / 中央军委 全连成一组
+        · LCP=「浙江省」  → 浙江省网信办 ~ 浙江省通信管理局
+        两家真正的区别都在公共前缀**之后**，那时还什么都没比较。"""
+        for a, b in (("中共中央国务院", "中共中央政治局"),
+                     ("浙江省网信办", "浙江省通信管理局"),
+                     ("中共中央政治局", "中央军委"),
+                     ("国务院", "国务院办公厅")):
+            if a == "国务院" and b == "国务院办公厅":
+                continue        # 这两个是真包含，见下一条
+            self.assertFalse(textseg._same_org(a, b),
+                             f"「{a}」与「{b}」区分部分不同，不该合并")
+        # 但区分部分一致的，仍然是兄弟
+        for a, b in (("中央网信办网络局", "中央网信办举报中心"),
+                     ("浙江省网信办", "浙江省网信办网络管理处"),
+                     ("中央网信办秘书局", "中央网信办秘书处")):
+            self.assertTrue(textseg._same_org(a, b),
+                            f"「{a}」与「{b}」应合并却被挡")
+        # 同省的两个**独立厅局**不该合并（都以「局」结尾，通名不算区分度）
+        for a, b in (("浙江省网信办", "浙江省通信管理局"),
+                     ("浙江省网信办", "浙江省宣传部门")):
+            self.assertFalse(textseg._same_org(a, b),
+                             f"「{a}」与「{b}」是独立机构，不该合并")
+
+    def test_真包含仍然合并(self):
+        for a, b in (("中央网信办", "中央网信办举报中心"),
+                     ("公安部", "公安部网安局"),
+                     ("市场监管总局", "国家市场监督管理总局")):
+            self.assertTrue(textseg._same_org(a, b),
+                            f"「{a}」⊂「{b}」应合并却被挡")
+
     def test_无关机构不合并(self):
         raw = [
             {"org": "公安部", "count": 50, "example_title": "a"},

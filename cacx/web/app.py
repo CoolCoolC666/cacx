@@ -329,6 +329,58 @@ def api_events(days: int = Query(30, ge=1, le=365), site: str = ""):
     return _db().event_stats(days, site=site)
 
 
+# --------------------------------------------- 面板：三张作业相关的图
+# 这三张服务的是「网信办角色画像与权责边界」这个报告主题，
+# 与旁边那张「检索行为」（我们自己的操作记录）是两回事。
+_PANEL_D0 = "2024-01-01"
+_PANEL_D1 = "2099-12-31"
+
+
+@app.get("/api/panel/problems")
+def api_panel_problems(site: str = ""):
+    """
+    治理问题关键词分布 —— 直接对应老师要的「角色画像」。
+
+    ⚠ 这是**关键词粗筛口径**，不是人工标注的分类。
+    一个议题可能同时命中两类（既是网络暴力又涉及未成年人），
+    所以各行相加会超过总数。报告里必须写明这一点。
+    """
+    return {"site": site, "items": _db().problem_distribution(
+        site=site, date_from=_PANEL_D0, date_to=_PANEL_D1),
+        "note": "关键词粗筛，一篇可命中多类，各行相加会超过总数；"
+                "精确分类需按 R1 抽取结果人工复核"}
+
+
+@app.get("/api/panel/orgs")
+def api_panel_orgs(site: str = "", limit: int = Query(12, ge=1, le=50)):
+    """
+    高频机构 Top —— 直接对应「谁在发文中反复出现」。
+
+    ⚠ 每条带 needs_review 标记：归并算法基于「前缀 / 包含 / 去噪骨架」，
+    会把部分无关机构吸进同一组（尤其「XX会 / XX大会 / XX峰会」这类会议名，
+    它们以机构后缀结尾但不是发文机关）。**带 ⚠ 的必须人工复核后再引用。**
+    """
+    items = _db().top_orgs(site=site, date_from=_PANEL_D0, date_to=_PANEL_D1,
+                           limit=limit)
+    return {"site": site, "items": items,
+            "review_count": sum(1 for i in items if i.get("needs_review")),
+            "note": "机器挖掘的候选，非定论；带 ⚠ 的组需人工复核"}
+
+
+@app.get("/api/panel/joint")
+def api_panel_joint(site: str = ""):
+    """
+    联合发文类文章月度趋势 —— 权责边界的直接证据。
+
+    ⚠ 粗筛口径：只按标题出现「联合/印发/会同/联发/共同」判定，
+    会有误召（正文提到但标题没有的会漏，标题顺带提及的会误召）。
+    精确数字要看 R1 抽出来的「联合发文」关系。
+    """
+    return {"site": site, "items": _db().joint_issue_trend(
+        site=site, date_from=_PANEL_D0, date_to=_PANEL_D1),
+        "note": "按标题关键词粗筛，非精确统计；精确值以 R1 的联合发文关系为准"}
+
+
 # ---------------------------------------------------------------- 图表数据导出
 @app.get("/api/panel/export")
 def api_panel_export(which: str, site: str = "",
@@ -377,6 +429,30 @@ def api_panel_export(which: str, site: str = "",
         rows = [{"kind": r["kind"], "count": r["n"]} for r in e["by_kind"]]
         cols = [("行为类型", "kind"), ("次数", "count")]
         title = f"events_{days}d"
+    elif which == "problems":
+        src = api_panel_problems(site=site)
+        rows = [{"problem": r["problem"], "articles": r["articles"],
+                 "pct": r["pct"]} for r in src["items"]]
+        cols = [("治理问题", "problem"), ("文章数", "articles"),
+                ("占比%", "pct")]
+        title = "problem_distribution"
+    elif which == "orgs":
+        src = api_panel_orgs(site=site, limit=limit)
+        rows = [{"org": r["org"], "count": r["count"],
+                 "needs_review": "是" if r.get("needs_review") else "",
+                 "aliases": "|".join(r.get("aliases") or []),
+                 "basis": r.get("merge_basis", "")} for r in src["items"]]
+        cols = [("机构", "org"), ("出现次数", "count"),
+                ("需人工复核", "needs_review"), ("归并自", "aliases"),
+                ("归并依据", "basis")]
+        title = "top_orgs"
+    elif which == "joint":
+        src = api_panel_joint(site=site)
+        rows = [{"month": r["month"], "joint": r["joint"],
+                 "total": r["total"], "pct": r["pct"]} for r in src["items"]]
+        cols = [("月份", "month"), ("联合发文类", "joint"),
+                ("当月总数", "total"), ("占比%", "pct")]
+        title = "joint_issue_trend"
     else:
         raise HTTPException(400, {"message": f"不支持的图表: {which}",
                                   "refused": True})
@@ -575,6 +651,37 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
     if site and e.get("note"):
         note = f'<div class="note">{_esc(e["note"])}</div>'
 
+    # ---- 三张作业相关的图（与网页端同源，保证「看到的 = 交出去的」）----
+    prob = api_panel_problems(site=site)
+    orgg = api_panel_orgs(site=site, limit=top)
+    joint = api_panel_joint(site=site)
+
+    prob_rows = [{"k": r["problem"], "n": r["articles"]} for r in prob["items"]]
+    pmx = max((x["n"] for x in prob_rows), default=0) or 1
+    prob_html = "".join(
+        f'<div class="rank"><span class="t">{_esc(x["k"])}</span>'
+        f'<span class="bar"><i style="width:{max(2, round(x["n"]/pmx*100))}%">'
+        f'</i></span><span class="v">{x["n"]:,}</span></div>' for x in prob_rows
+    ) or '<div class="empty">无数据</div>'
+
+    org_rows = [{"k": r["org"], "n": r["count"],
+                 "warn": r.get("needs_review")} for r in orgg["items"]]
+    omx = max((x["n"] for x in org_rows), default=0) or 1
+    org_html = "".join(
+        f'<div class="rank"><span class="t">'
+        f'{"⚠ " if x["warn"] else ""}{_esc(x["k"])}</span>'
+        f'<span class="bar"><i style="width:{max(2, round(x["n"]/omx*100))}%">'
+        f'</i></span><span class="v">{x["n"]:,}</span></div>' for x in org_rows
+    ) or '<div class="empty">无数据</div>'
+
+    # 联合发文画占比而不是绝对篇数：发文多的月份会淹没趋势
+    jit = joint["items"]
+    jmx = max((r["pct"] for r in jit), default=0) or 1
+    joint_bars = _svg_bars(
+        [{"k": r["month"], "n": round(r["pct"], 1)} for r in jit],
+        " %", label_every=max(1, len(jit)//12)) if jit else \
+        '<div class="empty">无数据</div>'
+
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -606,6 +713,29 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
 {ev_html or f'<div class="empty">该站点近 {days} 天没有行为记录</div>'}
 {note}
 {_table(["行为类型", "次数"], [[x["k"], f'{x["n"]:,}'] for x in ev])}
+</div>
+
+<div class="card"><h2>治理问题分布</h2>
+{prob_html}
+{_table(["治理问题", "文章数", "占比%"],
+        [[r["problem"], f'{r["articles"]:,}', r["pct"]] for r in prob["items"]])}
+<div class="note">{_esc(prob["note"])}</div>
+</div>
+
+<div class="card"><h2>高频机构 Top {len(org_rows)}</h2>
+{org_html}
+{_table(["机构", "出现次数", "需复核", "归并依据"],
+        [[r["org"], f'{r["count"]:,}',
+          "⚠ 是" if r.get("needs_review") else "",
+          r.get("merge_basis", "")] for r in orgg["items"]])}
+<div class="note">{_esc(orgg["note"])}</div>
+</div>
+
+<div class="card" style="grid-column:1/-1"><h2>联合发文类文章月度趋势（占比 %）</h2>
+{joint_bars}
+{_table(["月份", "联合发文类", "当月总数", "占比%"],
+        [[r["month"], r["joint"], r["total"], r["pct"]] for r in jit])}
+<div class="note">{_esc(joint["note"])}</div>
 </div>
 
 </div>
