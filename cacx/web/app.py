@@ -1080,7 +1080,10 @@ def api_extract_run(req: ExtractReq):
 
 
 def _graph_payload(min_degree: int, limit: int, min_weight: float,
-                   topn: int) -> Dict[str, Any]:
+                   topn: int, max_degree: int = 0, rel_types: str = "",
+                   keyword: str = "", focus: str = "", hop: int = 1,
+                   site: str = "", date_from: str = "", date_to: str = ""
+                   ) -> Dict[str, Any]:
     """
     关联分析的**内部实现**（路由和 pyvis 产物都调它）。
 
@@ -1091,24 +1094,105 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
       把 Query 对象的取值逻辑留在路由边界，函数内部只收纯数字。
     """
     d = _db()
-    rows = d.list_relations(limit=5000)
+    # ⚠ 站点/日期是**关系来源文章**的筛选，必须在建图之前做。
+    #   事后挑边的话，边还在但权重已经是全时期的共现强度，
+    #   「只看 2024 年」时那个权重并不是 2024 年的强度。
+    rows = d.list_relations(limit=5000, site=site,
+                            date_from=date_from, date_to=date_to)
+    rows_all = None
+    if (site or date_from or date_to):
+        rows_all = d.list_relations(limit=5000)
     if not rows:
         return {"nodes": 0, "edges": 0, "degree": [], "strength": [],
                 "betweenness": [], "pagerank": [], "communities": [],
-                "summary": "没有关系数据", "by_type": [], "graph": {"nodes": [], "edges": []}}
+                "summary": "没有关系数据", "by_type": [], "graph": {"nodes": [], "edges": []},
+                "filters": {"min_degree": min_degree,
+                            "max_degree": int(max_degree or 0),
+                            "rel_types": sorted(
+                                {t.strip() for t in (rel_types or "").split(",")
+                                 if t.strip()}),
+                            "keyword": keyword, "focus": focus, "hop": hop,
+                            "site": [s.strip() for s in (site or "").split(",") if s.strip()],
+                            "date_from": date_from, "date_to": date_to,
+                            "graph_nodes_all": 0, "graph_edges_all": 0,
+                            "graph_nodes_typed": 0, "graph_edges_typed": 0,
+                            "by_type_all": {}, "by_site_all": {},
+                            "rel_rows_all": len(rows_all or []),
+                            "rel_rows": 0,
+                            "scope_note": "", "scope_nodes": 0,
+                            "scope_edges": 0}}
+
+    want = {t.strip() for t in (rel_types or "").split(",") if t.strip()}
 
     # 低置信实体不进图（与 build_graph 的口径一致）
     ents = d.list_entities(limit=5000)
     blocked = GA.blocked_names(ents, {"measure"})
     G, types = GA.build_graph(rows, min_weight=min_weight,
-                              blocked_nodes=blocked)
-    r = GA.analyze(G, types, topn=topn)
-    # node_community 是内部用的，去掉以免响应过大
+                              blocked_nodes=blocked,
+                              rel_types=want or None)
+    # ⚠ 只有真的筛过才需要再建一张未筛的图来报底数 ——
+    #   build_graph 要把 5000 条关系全过一遍，无条件建两次纯属白干。
+    if want or rows_all is not None:
+        base_rows = rows if rows_all is None else rows_all
+        G_all, _ = GA.build_graph(base_rows, min_weight=min_weight,
+                                  blocked_nodes=blocked)
+        n_all, e_all = G_all.number_of_nodes(), G_all.number_of_edges()
+    else:
+        n_all, e_all = G.number_of_nodes(), G.number_of_edges()
+    r_all = GA.analyze(G, types, topn=topn)
+
+    # ⚠ 介数/PageRank/度数排名必须和画出来的图是**同一张图**。
+    #   排名表来自 analyze()，画图来自 to_pyvis_nodes_edges() ——
+    #   若 analyze 跑全图、画图裁子图，界面上就会同时出现两套口径的数字，
+    #   而口径面板明明写着「介数只在这张子图里算」，那就是骗用户。
+    #   所以这里裁一次子图，两边共用同一份分析结果。
+    sub, scope_note = GA.crop_scope(G, focus=focus,
+                                    keyword=keyword, hop=hop)
+    if sub.number_of_nodes():
+        r = GA.analyze(sub, types, topn=topn)
+    else:
+        # 空子图（焦点查无此机构）：analyze 在空图上会退化，
+        # 宁可把排名清空，也不能拿全图数字冒充子图数字
+        r = dict(r_all)
+        for k in ("degree", "strength", "betweenness", "pagerank"):
+            r[k] = []
     ne = GA.to_pyvis_nodes_edges(r, G, types, min_degree=min_degree,
-                                 limit=limit)
-    r.pop("node_community", None)
+                                 limit=limit, max_degree=max_degree,
+                                 keyword=keyword, focus=focus, hop=hop)
+    r.pop("node_community", None)   # 内部用的，去掉以免响应过大
     r["graph"] = ne
     r["blocked_count"] = len(blocked)
+    # ---- 口径回显：界面必须能说清「这些数字是在什么范围里算的」----
+    #  ⚠ 不回显的话，用户会把聚焦子图里的介数和全图介数直接比大小，
+    #    那是两个不同口径的数字，没有可比性。
+    by_type_all: Dict[str, int] = {}
+    for x in rows:
+        by_type_all[x.get("rel_type") or ""] = \
+            by_type_all.get(x.get("rel_type") or "", 0) + 1
+    # 站点分布同样要回显：筛了站之后，用户得知道"全库本来有哪些站"
+    by_site_all: Dict[str, int] = {}
+    for x in (rows_all if rows_all is not None else rows):
+        k = (x.get("site") or "") or "（站点未标注）"
+        by_site_all[k] = by_site_all.get(k, 0) + 1
+    r["filters"] = {
+        "min_degree": min_degree,
+        "max_degree": int(max_degree or 0),
+        "rel_types": sorted(want),
+        "keyword": keyword, "focus": focus, "hop": hop,
+        "site": [s.strip() for s in (site or "").split(",") if s.strip()],
+        "date_from": date_from, "date_to": date_to,
+        "graph_nodes_all": n_all,
+        "graph_edges_all": e_all,
+        "graph_nodes_typed": G.number_of_nodes(),
+        "graph_edges_typed": G.number_of_edges(),
+        "by_type_all": by_type_all,
+        "by_site_all": by_site_all,
+        "rel_rows_all": len(rows_all if rows_all is not None else rows),
+        "rel_rows": len(rows),
+        "scope_note": ne.get("scope_note", ""),
+        "scope_nodes": ne.get("scope_nodes", 0),
+        "scope_edges": ne.get("scope_edges", 0),
+    }
     return r
 
 
@@ -1116,15 +1200,91 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
 def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
                        limit: int = Query(300, ge=1, le=1000),
                        min_weight: float = 1.0,
-                       topn: int = Query(20, ge=1, le=100)):
+                       topn: int = Query(20, ge=1, le=100),
+                       max_degree: int = Query(0, ge=0, le=500),
+                       rel_types: str = "",
+                       keyword: str = "",
+                       focus: str = "",
+                       hop: int = Query(1, ge=1, le=4),
+                       site: str = "",
+                       date_from: str = "",
+                       date_to: str = ""):
     """
     关联指标（networkx）：度/加权度/介数/PageRank/Louvain 社区。
 
     这是「权责边界」的直接论据 —— 度中心性只能说明谁出现最多，
     **介数**才说明谁在协作网络里居中协调。
+
+    筛选：
+      · rel_types  逗号分隔的关系类型（co_issue/issue/target）
+      · max_degree 度数上限（0 = 不限），用来压掉「一颗星把整张图盖住」
+      · keyword    只保留名称含此词的节点
+      · focus+hop  只看以某节点为中心 hop 跳的邻域（指标在子图上重算）
+      · site       逗号分隔的来源站点（关系所在文章的站点）
+      · date_from/date_to 关系来源文章的发表日期范围，支持 YYYY 或 YYYY-MM
     """
     return _graph_payload(int(min_degree), int(limit), float(min_weight),
-                          int(topn))
+                          int(topn), int(max_degree), rel_types,
+                          keyword, focus, int(hop),
+                          site, date_from, date_to)
+
+
+@app.get("/api/graph/facets")
+def api_graph_facets(limit: int = Query(20, ge=1, le=60)):
+    """筛选器的候选项：有哪些关系类型、各有多少条；哪些节点适合当焦点。
+
+    ⚠ 这些数字来自**未加任何筛选**的全图 —— 它们是筛子的选项说明，
+      不是筛选后的结果。混了就会把「全库有多少条 issue」说成
+      「筛完还有多少条 issue」。
+    """
+    d = _db()
+    rows = d.list_relations(limit=5000)
+    by_type: Dict[str, int] = {}
+    for x in rows:
+        t = x.get("rel_type") or ""
+        by_type[t] = by_type.get(t, 0) + 1
+    ents = d.list_entities(limit=5000)
+    blocked = GA.blocked_names(ents, {"measure"})
+    G, _ = GA.build_graph(rows, blocked_nodes=blocked)
+    deg = dict(G.degree())
+    # ⚠ 焦点候选必须按 name **去重**：同一个机构在多篇文章里会被反复抽成
+    #   多条实体记录（每条一个 id），不去重时下拉框里会出现五个
+    #   「中央网信办」，用户点哪个都一样。
+    #   同名节点的度相同（无向图里度由邻接决定），取 max 即可。
+    # 焦点候选只给机构类里度最高的那些 —— 随便点一个长尾节点
+    # 邻域里可能只有 1 个点，图就空了。
+    best: Dict[str, int] = {}
+    for e in ents:
+        n = (e.get("name") or "").strip()
+        if e.get("type") != "org" or not n or n in blocked:
+            continue
+        best[n] = max(best.get(n, 0), deg.get(n, 0))
+    cands = [{"name": n, "degree": dv} for n, dv in best.items()
+             if dv >= 2]
+    cands.sort(key=lambda x: -x["degree"])
+    # 站点与年份：让「网站 / 日期范围」两个筛选器的候选项有据可查，
+    # 而不是在前端硬编码。硬编码过一次，站点改名就静默筛空了。
+    by_site: Dict[str, int] = {}
+    by_year: Dict[str, int] = {}
+    for x in rows:
+        s = (x.get("site") or "") or ""
+        if s:
+            by_site[s] = by_site.get(s, 0) + 1
+        y = str(x.get("pub_day") or "")[:4]
+        if y:
+            by_year[y] = by_year.get(y, 0) + 1
+    return {
+        "rel_types": [{"key": k, "n": v} for k, v in
+                      sorted(by_type.items(), key=lambda kv: -kv[1])],
+        "focus_candidates": cands[:limit],
+        "graph_nodes": G.number_of_nodes(),
+        "graph_edges": G.number_of_edges(),
+        "degree_max": max(deg.values()) if deg else 0,
+        "sites": [{"key": k, "n": v} for k, v in
+                  sorted(by_site.items(), key=lambda kv: -kv[1])],
+        "years": [{"key": k, "n": v} for k, v in
+                  sorted(by_year.items())],
+    }
 
 
 @app.get("/api/graph/evidence")
@@ -1175,20 +1335,31 @@ def api_graph_vislib_css():
 
 @app.get("/api/graph/vis")
 def api_graph_vis(min_degree: int = Query(1, ge=1, le=50),
-                  limit: int = Query(300, ge=1, le=1000)):
+                  limit: int = Query(300, ge=1, le=1000),
+                  max_degree: int = Query(0, ge=0, le=500),
+                  rel_types: str = "", keyword: str = "",
+                  focus: str = "", hop: int = Query(1, ge=1, le=4),
+                  site: str = "", date_from: str = "", date_to: str = ""):
     """
     产出 pyvis 用的单文件 HTML（vis.js **内联**，零 CDN）。
 
     为什么必须内联：教室没网，任何 <script src="https://cdn..."> 都只会
     白屏。vis-network 的 js/css 就在 pyvis 包里，直接读进来即可。
+
+    ⚠ 参数必须与 /api/graph/analysis **完全对齐**：导出的是「屏幕上
+      看到的那张图」。少接一个筛选参数，用户筛完了导出出来却是全图，
+      交付物和演示当场对不上，而且这种错误极难察觉。
     """
-    data = _graph_payload(int(min_degree), int(limit), 1.0, 20)
+    data = _graph_payload(int(min_degree), int(limit), 1.0, 20,
+                          int(max_degree), rel_types, keyword, focus,
+                          int(hop), site, date_from, date_to)
     g = data.get("graph") or {}
     if not g.get("nodes"):
-        return {"error": "没有可显示的节点"}
+        return {"error": "当前筛选下没有可显示的节点"}
     html = pyvis_html(g["nodes"], g["edges"])
     return {"html": html, "nodes": len(g["nodes"]),
-            "edges": len(g["edges"]), "bytes": len(html)}
+            "edges": len(g["edges"]), "bytes": len(html),
+            "scope_note": g.get("scope_note", "")}
 
 
 # ---------------------------------------------------------------- AI

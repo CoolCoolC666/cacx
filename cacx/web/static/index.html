@@ -311,9 +311,6 @@
         <b style="font-size:13px">关系图谱</b>
         <span style="font-size:12.5px;color:var(--dim)" id="gp_stat"></span>
         <div class="grow"></div>
-        <label style="font-size:12.5px">最小度数
-          <input type="number" id="gp_mindeg" value="2" min="1" max="20"
-                 style="width:58px" onchange="loadGraph()"></label>
         <button class="btn" style="padding:5px 12px" onclick="loadGraph()">刷新</button>
         <button class="btn" style="padding:5px 12px"
                 onclick="dlGraphHtml()" title="把整张图导出成一个独立的 HTML 文件：断网双击即开，可直接交作业">⬇ 图谱 HTML</button>
@@ -321,6 +318,46 @@
                 onclick="showTab('sample')"
                 title="图谱现在是空的？去样本配置器按同一口径跑一次抽取">🔧 去抽取数据</button>
       </div>
+      <!-- 筛选器：原来只有一个「最小度数」，界面上明明**显示着**
+           各关系类型占比却筛不了。加筛选之前先想清楚每个筛子
+           会留下多少 —— 所以下面那块口径回显是跟着一起做的。 -->
+      <div class="row" id="gp_filters"
+           style="gap:10px;flex-wrap:wrap;margin-top:10px;align-items:center">
+        <span style="font-size:12.5px;color:var(--dim)">关系类型</span>
+        <span id="gp_types" style="display:flex;gap:10px;flex-wrap:wrap"></span>
+        <label style="font-size:12.5px">最小度数
+          <input type="number" id="gp_mindeg" value="2" min="1" max="20"
+                 style="width:54px" onchange="loadGraph()"></label>
+        <label style="font-size:12.5px">最大度数
+          <input type="number" id="gp_maxdeg" value="0" min="0" max="200"
+                 style="width:54px" onchange="loadGraph()"
+                 title="0 = 不限。用来压掉一颗超级节点把整张图盖住的情况"></label>
+        <label style="font-size:12.5px">聚焦
+          <input id="gp_focus" list="gp_focus_opts" placeholder="机构名"
+                 style="width:130px" onchange="loadGraph()"
+                 title="只看以它为中心几跳内的协作对象">
+          <datalist id="gp_focus_opts"></datalist></label>
+        <label style="font-size:12.5px">跳数
+          <input type="number" id="gp_hop" value="1" min="1" max="4"
+                 style="width:46px" onchange="loadGraph()"></label>
+        <label style="font-size:12.5px">名称含
+          <input id="gp_kw" placeholder="关键词" style="width:96px"
+                 onchange="loadGraph()"></label>
+        <span style="font-size:12.5px;color:var(--dim)">站点</span>
+        <span id="gp_sites" style="display:flex;gap:10px;flex-wrap:wrap"></span>
+        <label style="font-size:12.5px">日期
+          <input id="gp_dfrom" type="month" style="width:118px"
+                 onchange="loadGraph()"
+                 title="关系的来源文章从哪个月开始。留空 = 不限"></label>
+        <label style="font-size:12.5px">至
+          <input id="gp_dto" type="month" style="width:118px"
+                 onchange="loadGraph()"
+                 title="到哪个月为止。留空 = 不限"></label>
+        <button class="btn" style="padding:5px 10px" onclick="gpReset()"
+                title="把所有筛选恢复默认">清空筛选</button>
+      </div>
+      <div id="gp_scope" style="font-size:12px;color:var(--dim);
+           margin-top:8px;line-height:1.75"></div>
       <div style="font-size:12px;color:var(--dim);margin-top:8px;line-height:1.7">
         数据由<b>内置规则引擎</b>从原文抽取（同一份数据永远抽出同样的结果，可当场重跑），
         每条关系都带原文出处。<br>
@@ -1664,10 +1701,142 @@ function ensureVis(){
   return _visPromise;
 }
 
+// ------------------------------------------------------------ 图谱筛选
+let GP_FACETS = null;      // 关系类型计数 + 焦点候选（未加任何筛选时的全图口径）
+
+// 收集当前筛选条件。⚠ 未勾选任何关系类型时必须传**空串**，
+// 而不是传全部类型 —— 「全部」和「显式勾了全部」在口径上不是一回事：
+// 后者会让人以为你**只**想要这几类关系。
+function gpQuery(){
+  const q = new URLSearchParams();
+  q.set('min_degree', parseInt($('gp_mindeg')?.value||'2',10)||1);
+  const md = parseInt($('gp_maxdeg')?.value||'0',10)||0;
+  if(md>0) q.set('max_degree', md);
+  const types = [...document.querySelectorAll('#gp_types input:checked')]
+      .map(x=>x.value);
+  if(types.length) q.set('rel_types', types.join(','));
+  const f = ($('gp_focus')?.value||'').trim();
+  if(f) q.set('focus', f);
+  const h = parseInt($('gp_hop')?.value||'1',10)||1;
+  if(f) q.set('hop', h);
+  const k = ($('gp_kw')?.value||'').trim();
+  if(k) q.set('keyword', k);
+  // 站点/日期：筛的是**关系所在文章**，所以口径要跟着走
+  const sites = [...document.querySelectorAll('#gp_sites input:checked')]
+      .map(x=>x.value);
+  // 未勾选任何站点 = 不限（与关系类型不同：站点的全集就是"全部"，
+  // 不勾等于显式表达"全部"，不会产生歧义）
+  if(sites.length) q.set('site', sites.join(','));
+  const df = ($('gp_dfrom')?.value||'').trim();
+  if(df) q.set('date_from', df);
+  const dt = ($('gp_dto')?.value||'').trim();
+  if(dt) q.set('date_to', dt);
+  q.set('limit','300'); q.set('topn','12');
+  return q;
+}
+
+function gpReset(){
+  $('gp_mindeg').value = 2;
+  $('gp_maxdeg').value = 0;
+  $('gp_focus').value = '';
+  $('gp_kw').value = '';
+  $('gp_hop').value = 1;
+  $('gp_dfrom').value = '';
+  $('gp_dto').value = '';
+  document.querySelectorAll('#gp_types input').forEach(x=>x.checked = true);
+  document.querySelectorAll('#gp_sites input').forEach(x=>x.checked = true);
+  loadGraph();
+}
+
+async function gpLoadFacets(){
+  if(GP_FACETS) return GP_FACETS;
+  try{
+    GP_FACETS = await (await fetch('/api/graph/facets?limit=24')).json();
+  }catch(e){ GP_FACETS = null; return null; }
+  const box = $('gp_types');
+  if(box){
+    box.innerHTML = (GP_FACETS.rel_types||[]).map(t=>
+      `<label class="inline" style="font-size:12px;cursor:pointer"
+        title="全图共 ${t.n} 条该类型关系">
+        <input type="checkbox" value="${esc(t.key)}" checked>
+        <span>${esc(t.key)} <span style="color:var(--dim)">${t.n}</span></span>
+      </label>`).join('');
+  }
+  const dl = $('gp_focus_opts');
+  if(dl && GP_FACETS.focus_candidates){
+    dl.innerHTML = GP_FACETS.focus_candidates
+        .map(x=>`<option value="${esc(x.name)}">度 ${x.degree}</option>`).join('');
+  }
+  const sb = $('gp_sites');
+  if(sb && GP_FACETS.sites && GP_FACETS.sites.length){
+    sb.innerHTML = GP_FACETS.sites.map(s=>
+      `<label class="inline" style="font-size:12px;cursor:pointer"
+        title="全图共 ${s.n} 条关系来自该站点">
+        <input type="checkbox" value="${esc(s.key)}" checked>
+        <span>${esc(s.key)} <span style="color:var(--dim)">${s.n}</span></span>
+      </label>`).join('');
+    // 日期框的上下界按库里实际有的年份给，别让用户选到没有数据的月份
+    const ys = (GP_FACETS.years||[]).map(y=>y.key).filter(Boolean).sort();
+    if(ys.length){
+      [$('gp_dfrom'), $('gp_dto')].forEach(el=>{
+        if(!el) return;
+        el.min = ys[0]+'-01'; el.max = ys[ys.length-1]+'-12';
+      });
+    }
+  }
+  return GP_FACETS;
+}
+
+// 口径回显：把「筛完剩什么」写清楚。数字必须来自接口的 filters，
+// 不能在前端自己算 —— 前端只有结果、没有分母。
+function gpRenderScope(an){
+  const box = $('gp_scope');
+  if(!box) return;
+  const f = an?.filters;
+  const g = an?.graph || {};
+  if(!f){ box.innerHTML = ''; return; }
+  const bits = [];
+  const hasScope = (f.rel_types||[]).length || (f.site||[]).length
+                   || f.date_from || f.date_to || f.keyword || f.focus;
+  bits.push(hasScope ? '全库 <b>' + f.graph_nodes_all + '</b> 节点 / <b>'
+    + f.graph_edges_all + '</b> 边 / <b>' + f.rel_rows_all + '</b> 条关系'
+    : '全图 <b>' + f.graph_nodes_all + '</b> 节点 / <b>'
+    + f.graph_edges_all + '</b> 边');
+  const cond = [];
+  if((f.rel_types||[]).length) cond.push('类型 <b>' + f.rel_types.join('、') + '</b>');
+  if((f.site||[]).length) cond.push('站点 <b>' + f.site.join('、') + '</b>');
+  if(f.date_from || f.date_to)
+    cond.push(`日期 <b>${f.date_from || '不限'} ~ ${f.date_to || '不限'}</b>`);
+  if(f.keyword) cond.push('名称含 <b>' + f.keyword + '</b>');
+  if(cond.length){
+    bits.push(`来源限定：${cond.join(' · ')} → <b>${f.rel_rows}</b> 条关系`
+      + ` → <b>${f.graph_nodes_typed}</b> 节点 / ${f.graph_edges_typed} 边`);
+  }
+  if(f.focus || f.keyword){
+    bits.push(f.scope_note + ` → <b>${f.scope_nodes}</b> 节点 / ${f.scope_edges} 边`);
+  }
+  const degTxt = f.max_degree
+    ? `度数 ${f.min_degree}–${f.max_degree}` : `度数 ≥ ${f.min_degree}`;
+  bits.push(`核心节点 ${degTxt} → 实画 <b>${(g.nodes||[]).length}</b> 节点 /`
+    + ` <b>${(g.edges||[]).length}</b> 边`
+    + (g.hidden_nodes ? `，折叠 ${g.hidden_nodes} 个低度数节点` : ''));
+  // ⚠ 子图里的介数不能和全图的介数比大小 —— 两个口径的数字混用
+  //   是报告里最容易出现的错误，所以直接把这句话写在界面上。
+  const warn = hasScope
+    ? `<div style="color:var(--warn);margin-top:4px">⚠ 当前是
+       <b>筛选后的子图</b>，下面的介数/PageRank 只在这张子图里算
+       ${(f.site||[]).length || f.date_from || f.date_to
+          ? `（且只统计这些来源文章的关系）` : ''}——
+       拿它和全库的数字比大小是没有意义的。</div>`
+    : '';
+  box.innerHTML = bits.join('　·　') + warn;
+}
+
 async function loadGraph(){
-  const md = parseInt($('gp_mindeg')?.value || '2', 10) || 2;
   const stat = $('gp_stat');
   if(!stat) return;                 // 图谱区已被隐藏/卸载，别往下走
+  await gpLoadFacets();
+  const q = gpQuery();
   stat.textContent = '加载中…';
   // ⚠ **数据请求不能排在 vis 之后**。vis-network 有 692KB，一旦它慢或失败，
   //   后面所有接口一个都发不出去 —— 症状是整页停在「加载中…」且控制台无报错，
@@ -1676,7 +1845,7 @@ async function loadGraph(){
   try{
     const [st, an] = await Promise.all([
       fetch('/api/graph/stats').then(x=>x.json()).catch(()=>null),
-      fetch(`/api/graph/analysis?min_degree=${md}&limit=300&topn=12`)
+      fetch('/api/graph/analysis?'+q.toString())
         .then(x=>x.json()).catch(()=>null),
     ]);
     if(st) $('gp_stat').innerHTML = (
@@ -1684,6 +1853,7 @@ async function loadGraph(){
       `关系 <b>${st.relation_total}</b> 条 / ${st.rel_pairs} 对 · `+
       `无原文证据 <b style="color:${st.no_evidence?'#c98':'var(--dim)'}">${st.no_evidence}</b>`);
     GP_ANA = an;
+    gpRenderScope(an);
     renderMetrics(an);
     const g = await fetch('/api/graph?limit=500').then(x=>x.json());
     GP_CACHE = g.edges || [];
@@ -1919,10 +2089,13 @@ function gpDetail(i){
 }
 
 async function dlGraphHtml(){
-  const md = parseInt($('gp_mindeg')?.value || '2', 10) || 2;
+  await gpLoadFacets();
+  // ⚠ 导出必须带上**当前筛选条件** —— 「屏幕看到的 = 导出的」。
+  //   筛完的图导出成全图，等于交付物和演示对不上。
+  const q = gpQuery();
   toast('正在生成图谱 HTML…');
   try{
-    const r = await fetch(`/api/graph/vis?min_degree=${md}&limit=300`).then(x=>x.json());
+    const r = await fetch('/api/graph/vis?'+q.toString()).then(x=>x.json());
     if(r.error){ toast(r.error); return; }
     const blob = new Blob([r.html], {type:'text/html;charset=utf-8'});
     const url = URL.createObjectURL(blob);

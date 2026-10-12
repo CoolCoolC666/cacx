@@ -32,7 +32,8 @@ def _nx():
 def build_graph(relations: Iterable[Dict[str, Any]],
                 min_weight: float = 1.0,
                 undirected: bool = True,
-                blocked_nodes: Optional[set] = None):
+                blocked_nodes: Optional[set] = None,
+                rel_types: Optional[set] = None):
     """
     relations 每项须含 {src_name, dst_name, rel_type, weight}
     → (networkx.Graph, 边类型字典)
@@ -42,17 +43,27 @@ def build_graph(relations: Iterable[Dict[str, Any]],
       这类词蹭到了机构后缀，抽出来置信度低，若照样建边会把社区划分搅成
       一堆语义上不相干的碎片（实测社区 #1 里全是「一定的社会」「不仅会」）。
       对应方案的「低置信不进默认图谱」。
+
+    ⚠ rel_types：只保留指定的关系类型。**在建图阶段就滤掉**，而不是
+      建完图再挑边 —— 因为边的权重是共现强度，一对节点可能同时有
+      co_issue 与 issue 两种关系，混进图里的权重是两条之和。
+      先筛后建才能让「只看 issue」时权重也是 issue 的强度。
+      这一维以前界面上明明**显示着**各类型占比（co_issue 71%）却**筛不了**。
     """
     nx = _nx()
     G = nx.Graph() if undirected else nx.DiGraph()
     types: Dict[Tuple[str, str], set] = {}
     blocked = blocked_nodes or set()
+    want = {t for t in rel_types if t} if rel_types else None
     for r in relations:
         s = (r.get("src_name") or "").strip()
         d = (r.get("dst_name") or "").strip()
         if not s or not d or s == d:
             continue
         if s in blocked or d in blocked:
+            continue
+        rt = r.get("rel_type") or ""
+        if want and rt not in want:
             continue
         try:
             w = float(r.get("weight") or 1.0)
@@ -65,10 +76,10 @@ def build_graph(relations: Iterable[Dict[str, Any]],
             # 无向图里只保留一条边，但**权重累加**（共现强度），
             # 边类型集合并起来（前端点边时能看到全部关系类型）。
             G[s][d]["weight"] += w
-            types[(s, d)].add(r.get("rel_type") or "")
+            types[(s, d)].add(rt)
         else:
             G.add_edge(s, d, weight=w)
-            types[(s, d)] = {r.get("rel_type") or ""}
+            types[(s, d)] = {rt}
     return G, types
 
 
@@ -180,52 +191,107 @@ def analyze(G, types: Optional[Dict] = None,
     }
 
 
+def crop_scope(G, focus: str = "", keyword: str = "",
+               hop: int = 1):
+    """
+    按「聚焦邻域 / 名称含」裁出子图 → (sub, scope_note)
+
+    ⚠ 单独抽出来是因为**指标和画图必须用同一张图**：
+      画图在 to_pyvis_nodes_edges 里裁子图，指标在 analyze 里算 ——
+      两边各裁一次，就很容易出现「图是子图、数字是全图」的情况，
+      而界面上写着「介数只在这张子图里算」，那就是骗用户。
+      调用方裁一次，把 sub 同时喂给 analyze 和 to_pyvis。
+
+    ⚠ 焦点不在图里要**说清楚**并返回空图，不能静默回退成整张图 ——
+      用户会以为筛生效了，其实什么都没筛。
+    """
+    nx = _nx()
+    sub = G
+    scope_note = ""
+    focus = (focus or "").strip()
+    kw = (keyword or "").strip()
+    if focus:
+        if focus in G:
+            sub = nx.ego_graph(G, focus, radius=max(1, int(hop)))
+            scope_note = f"以「{focus}」为中心 {max(1, int(hop))} 跳邻域"
+        else:
+            sub = nx.Graph()
+            scope_note = (f"「{focus}」不在当前图里"
+                          f"（可能度数不够或已被前面的筛子滤掉）")
+    if kw:
+        sub = sub.subgraph([n for n in sub.nodes() if kw in n]).copy()
+        scope_note = (scope_note + "；" if scope_note else "") + \
+            f"名称含「{kw}」"
+    return sub, scope_note
+
+
 def to_pyvis_nodes_edges(result: Dict[str, Any],
                          G, types: Optional[Dict] = None,
                          min_degree: int = 1,
-                         limit: int = 300) -> Dict[str, Any]:
+                         limit: int = 300,
+                         max_degree: int = 0,
+                         keyword: str = "",
+                         focus: str = "",
+                         hop: int = 1) -> Dict[str, Any]:
     """
     networkx 结果 → pyvis 前端要的 {nodes, edges}。
 
     ⚠ 只画「度 >= min_degree」的核心节点：全画出来 500+ 节点会糊成一团，
       也没人能看清。折叠掉的放折叠区，前端可展开。
     节点大小 ∝ 度，title 里带介数/社区，悬停就能看。
+
+    ⚠ 筛选顺序有讲究：焦点邻域与关键词**先裁子图**，再按度数筛核心。
+      反过来的话，「聚焦中央网信办 1 跳」会被 min_degree=2 砍掉一大半 ——
+      而这个筛选器存在的意义恰恰是「看某机构的直接协作对象」，
+      那批节点在整张图里度都不高。
+
+    ⚠ focus 裁出的是**子图**，介数/PageRank 必须在子图上重算
+      （沿用全图指标等于在两个不同口径的数字之间比较，没有意义）。
+      scope_note 回传裁剪说明，界面要把它显示出来。
     """
     deg = {n["name"]: n for n in result.get("degree", [])}
-    # ⚠ degree 列表只保留 topn。长尾节点会查不到介数/社区，
-    #   所以这里**就地重算全量**，而不是从 top 列表里捞 ——
-    #   否则核心节点之外的节点 tooltip 会缺指标。
     nx = _nx()
     full_deg = dict(G.degree())
     full_str = dict(G.degree(weight="weight"))
-    btw = nx.betweenness_centrality(G, weight=None)
-    pr = nx.pagerank(G)
     comm = result.get("node_community", {})
 
-    core = [n for n, d in full_deg.items() if d >= min_degree]
-    core.sort(key=lambda n: -full_deg[n])
+    # ---- 焦点邻域 / 关键词：先裁子图 ----
+    # ⚠ 传进来的 result 应当已经是在同一张子图上算的（见 crop_scope 的说明），
+    #   这里只负责画；指标不重复计算，避免两处口径漂移。
+    sub, scope_note = crop_scope(G, focus=focus, keyword=keyword, hop=hop)
+
+    # ⚠ 指标在**子图**上重算，不是沿用全图结果
+    btw = nx.betweenness_centrality(sub, weight=None)
+    pr = nx.pagerank(sub) if sub.number_of_nodes() else {}
+    d_of = dict(sub.degree())
+    s_of = dict(sub.degree(weight="weight"))
+
+    hi = int(max_degree or 0)
+    core = [n for n, d in d_of.items()
+            if d >= min_degree and (not hi or d <= hi)]
+    core.sort(key=lambda n: -d_of[n])
     core = core[:limit]
 
     keep = set(core)
     nodes = []
     for n in core:
-        d = full_deg[n]
+        d = d_of[n]
         nodes.append({
             "id": n,
             "label": n,
             "size": 12 + min(d * 3, 40),
             "degree": d,
-            "strength": round(full_str.get(n, 0), 1),
+            "strength": round(s_of.get(n, 0), 1),
             "betweenness": round(float(btw.get(n, 0.0)), 4),
             "pagerank": round(float(pr.get(n, 0.0)), 4),
             "community": comm.get(n, -1),
-            "title": (f"{n}\n度 {d}｜加权度 {full_str.get(n,0):.1f}｜"
+            "title": (f"{n}\n度 {d}｜加权度 {s_of.get(n,0):.1f}｜"
                       f"介数 {btw.get(n,0):.4f}｜PageRank {pr.get(n,0):.4f}"
                       f"｜社区 {comm.get(n,-1)}"),
         })
 
     edges = []
-    for s, d, dat in G.edges(data=True):
+    for s, d, dat in sub.edges(data=True):
         if s not in keep or d not in keep:
             continue
         ts = sorted(types.get((s, d), set())) if types else []
@@ -237,4 +303,7 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
                       + (f"\n类型 {'、'.join(ts)}" if ts else ""),
         })
     return {"nodes": nodes, "edges": edges,
-            "hidden_nodes": max(0, G.number_of_nodes() - len(nodes))}
+            "scope_note": scope_note,
+            "scope_nodes": sub.number_of_nodes(),
+            "scope_edges": sub.number_of_edges(),
+            "hidden_nodes": max(0, sub.number_of_nodes() - len(nodes))}

@@ -17,6 +17,7 @@ SQLite 存储与检索
     ai_annotations   AI 产物（摘要 / 标签 / 自愈诊断），按 (article_id, task) 唯一
 """
 
+import calendar
 import json
 import re
 import sqlite3
@@ -29,6 +30,38 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from . import textseg
 
 SCHEMA_VERSION = 1
+
+
+def _month_bound(s: str, side: str = "lo") -> str:
+    """把用户填的日期**归一化**成 YYYY-MM-DD 的边界。
+
+    界面给的是 <input type="month">，值形如 2024 / 2024-05；
+    库里存的是 pub_day（2024-05-06）。直接拿 2024 去比会踩字符串比较：
+    BETWEEN '2024' AND '2024' 恒为空 —— 用户选了年份却筛出 0 条，
+    而且不报错，看着像「这一年真没数据」。
+
+    ⚠ side 决定补哪一头：起点补当月 1 号，终点补当月最后一天。
+      两边都补 1 号的话，「2024-05 ~ 2024-05」会把整月只剩一天。
+    """
+    s = (s or "").strip()
+    if not s:
+        return "0000-01-01" if side == "lo" else "9999-12-31"
+    m = re.match(r"^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?$", s)
+    if not m:
+        # 认不出来的写法原样返回，让 SQL 去比，绝不静默当成"不限"
+        return s
+    y = int(m.group(1))
+    mo = int(m.group(2) or (1 if side == "lo" else 12))
+    mo = max(1, min(12, mo))
+    if side == "hi" and not m.group(2):
+        return f"{y:04d}-12-31"
+    if not m.group(3):
+        if side == "hi":
+            # 当月最后一天（闰年 2 月也要对）
+            last = calendar.monthrange(y, mo)[1]
+            return f"{y:04d}-{mo:02d}-{last:02d}"
+        return f"{y:04d}-{mo:02d}-01"
+    return f"{y:04d}-{mo:02d}-{int(m.group(3)):02d}"
 
 
 def _rollup_picked(rows: Iterable[tuple]) -> List[Dict[str, Any]]:
@@ -1665,8 +1698,16 @@ class Database:
 
     def list_relations(self, name: str = "", rel_type: str = "",
                        article_id: Optional[int] = None,
+                       site: str = "", date_from: str = "", date_to: str = "",
                        limit: int = 200) -> List[dict]:
-        """关系清单。name 非空时只看与该实体相连的关系（图谱点开一个点用）"""
+        """
+        关系清单。name 非空时只看与该实体相连的关系（图谱点开一个点用）。
+
+        ⚠ site / date_from / date_to 筛的是关系**所在文章**的站点与发表日期
+          （关系表自己没存站点和日期，得 JOIN articles）。
+          图谱按时间/站点筛选就靠这里 —— 同一对机构在两篇文章里出现，
+          只筛其中一篇时，权重与介数必须一起变，不能只挑边不换来源。
+        """
         where, args = [], []
         if name:
             where.append("(r.src_name=? OR r.dst_name=?)")
@@ -1675,10 +1716,41 @@ class Database:
             where.append("r.rel_type=?"); args.append(rel_type)
         if article_id:
             where.append("r.article_id=?"); args.append(int(article_id))
+        if site:
+            # 支持逗号分隔多站，与筛选栏的多选一致
+            ss = [s.strip() for s in str(site).split(",") if s.strip()]
+            if ss:
+                where.append("a.site IN (%s)" % ",".join("?" * len(ss)))
+                args += ss
+        # ⚠ 边界必须先**归一化**成 YYYY-MM-DD 再比。
+        #   直接拿 "2024" 去比 pub_day（"2024-05-06"）会踩字符串比较的坑：
+        #   BETWEEN '2024' AND '2024' 恒为空 —— 用户选了年份却筛出 0 条，
+        #   而且不报错，看起来像"这一年真没有关系"。
+        lo = _month_bound(date_from, "lo")
+        hi = _month_bound(date_to, "hi")
+        if lo != "0000-01-01" or hi != "9999-12-31":
+            # ⚠ 只有「区间恰好是同一个自然月」才走 (year, month) 快路径。
+            #   千万别把「整年」(01-01 ~ 12-31) 也当成整月去查 month=1 OR
+            #   month=12 —— 那样会静默丢掉中间十个月，筛"2024 年"得到 0 条。
+            #   （这个坑真踩过一次：不报错，只是结果为空，看着像"没数据"。）
+            if (lo[:4] == hi[:4] and lo[5:7] == hi[5:7]
+                    and lo[8:10] == "01"):
+                where.append("(a.year=? AND a.month=?)")
+                args += [int(lo[:4]), int(lo[5:7])]
+            elif (lo[:4] == hi[:4] and lo[5:7] == "01"
+                    and lo[8:10] == "01" and hi[5:7] == "12"
+                    and hi[8:10] == "31"):
+                # 整年 → 直接比 year，走得上 idx_articles_year
+                where.append("(a.year=? OR a.year=?)")
+                args += [int(lo[:4]), int(hi[:4])]
+            else:
+                where.append("substr(COALESCE(a.pub_day,''),1,10) BETWEEN ? AND ?")
+                args += [lo, hi]
         w = (" WHERE " + " AND ".join(where)) if where else ""
         with self._lock:
             return [dict(r) for r in self.conn.execute(
-                f"SELECT r.*, a.title AS article_title, a.pub_day, a.url "
+                f"SELECT r.*, a.title AS article_title, a.pub_day, a.url, "
+                f"a.site, a.site_name "
                 f"FROM relations r LEFT JOIN articles a ON a.id=r.article_id"
                 f"{w} ORDER BY r.weight DESC LIMIT ?",
                 args + [int(limit)])]
