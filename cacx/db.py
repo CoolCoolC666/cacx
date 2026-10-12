@@ -964,6 +964,142 @@ class Database:
                 "SELECT id,site,column_name,title,pub_date,url,chars FROM articles "
                 "ORDER BY synced_at DESC, id DESC LIMIT ?", (n,))]
 
+    # ---------------------------------------------------------- 分析样本
+    #: 抽样策略。
+    #:  ⚠ 别用「取最近 N 篇」—— 那是**按时间截断**，只覆盖末段。
+    #:    实测 cac·网信要闻 共 741 篇，取最近 500 篇只覆盖到 2025-03，
+    #:    2024 年整年丢失。而老师明确要求「发文量与主题随时间的变化」，
+    #:    时间轴只剩一年，这条要求直接作废。
+    #:  · stratified 按年份分层，每年等额 —— 保证每个年份都有样本，
+    #:    时间轴才画得出趋势（默认）
+    #:  · recent    取最近 N 篇 —— 只想看最新动态时用
+    SAMPLE_STRATEGIES = ("stratified", "recent")
+
+    def sample_articles(self, site: str = "", column: str = "",
+                        date_from: str = "2024-01-01",
+                        date_to: str = "2099-12-31",
+                        limit: int = 500,
+                        strategy: str = "stratified") -> Dict[str, Any]:
+        """
+        抽一个**分析样本**出来：给栏目、时间窗、篇数上限，其余自动。
+
+        老师要「任选一个栏目，300-500 篇，2024 年以来」，
+        但库里最多的栏目有 1600 多篇、最少的只有 14 篇——
+        光靠「选栏目」凑不出 300-500。所以规则是：
+          **时间窗给足（默认 2024 至今），篇数用 limit 截，抽样用分层。**
+        这样任何一个栏目都能配出合规样本，选择权才真正在小组手里。
+        """
+        if strategy not in self.SAMPLE_STRATEGIES:
+            raise ValueError(
+                f"未知抽样策略 {strategy}，可选：{self.SAMPLE_STRATEGIES}")
+        limit = max(1, min(int(limit), 5000))
+        where, args = ["pub_day>=?", "pub_day<=?"], [date_from, date_to]
+        if site:
+            where.append("site=?"); args.append(site)
+        if column:
+            where.append("column_name=?"); args.append(column)
+        w = " WHERE " + " AND ".join(where)
+
+        with self._lock:
+            total = self.conn.execute(
+                f"SELECT COUNT(*) FROM articles{w}", args).fetchone()[0]
+            years = [dict(r) for r in self.conn.execute(
+                f"SELECT substr(pub_day,1,4) y, COUNT(*) n FROM articles{w} "
+                f"GROUP BY y ORDER BY y", args)]
+            if strategy == "recent":
+                rows = [dict(r) for r in self.conn.execute(
+                    f"SELECT id,site,column_name,title,pub_day,url,chars,"
+                    f"COALESCE(content_empty,0) ce FROM articles{w} "
+                    f"ORDER BY pub_day DESC, id DESC LIMIT ?", args + [limit])]
+                picked_by_year: Dict[str, int] = {}
+            else:
+                # 按年份分层：每年先取 floor(limit/年数)，
+                # 余额再按年份轮流补 —— 用 OFFSET 翻页，每一年各自推进，
+                # 天然保证「每年都被覆盖到」，不会出现某年被跳过的坑。
+                ny = max(1, len(years))
+                per = max(1, limit // ny)
+                rows, picked_by_year = [], {}
+                COLS = ("id,site,column_name,title,pub_day,url,chars,"
+                        "COALESCE(content_empty,0) ce")
+                for y in years:
+                    yr = str(y["y"])
+                    offset = 0
+                    want = min(per, y["n"])
+                    while offset < want:
+                        batch = self.conn.execute(
+                            f"SELECT {COLS} FROM articles{w} "
+                            f"AND substr(pub_day,1,4)=? "
+                            f"ORDER BY pub_day DESC, id DESC LIMIT ? OFFSET ?",
+                            args + [yr, want - offset, offset]).fetchall()
+                        rows += [dict(r) for r in batch]
+                        offset += len(batch)
+                        if not batch:
+                            break
+                    picked_by_year[yr] = offset
+                # 配额用不完就继续补，逐年轮流
+                left = limit - len(rows)
+                while left > 0:
+                    grew = 0
+                    for y in years:
+                        if left <= 0:
+                            break
+                        yr = str(y["y"])
+                        if picked_by_year.get(yr, 0) >= y["n"]:
+                            continue
+                        batch = self.conn.execute(
+                            f"SELECT {COLS} FROM articles{w} "
+                            f"AND substr(pub_day,1,4)=? "
+                            f"ORDER BY pub_day DESC, id DESC LIMIT 1 OFFSET ?",
+                            args + [yr, picked_by_year.get(yr, 0)]).fetchall()
+                        if not batch:
+                            continue
+                        rows += [dict(r) for r in batch]
+                        picked_by_year[yr] = picked_by_year.get(yr, 0) + 1
+                        left -= len(batch)
+                        grew += len(batch)
+                    if not grew:
+                        break
+
+        rows.sort(key=lambda r: (r["pub_day"], r["id"]))
+        usable = [r for r in rows if not r["ce"]]
+        return {
+            "n": len(rows), "n_usable": len(usable),
+            "total_pool": total, "limit": limit, "strategy": strategy,
+            "site": site, "column": column,
+            "date_from": date_from, "date_to": date_to,
+            "years_pool": years, "years_taken": picked_by_year,
+            "date_min": min((r["pub_day"] for r in rows), default=""),
+            "date_max": max((r["pub_day"] for r in rows), default=""),
+            "items": rows,
+        }
+
+    def sample_options(self, date_from: str = "2024-01-01",
+                       date_to: str = "2099-12-31") -> List[dict]:
+        """有哪些栏目可以配样本，各有多少篇（给前端下拉 / AI 选参数用）"""
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT site, column_name, COUNT(*) n, "
+                "COUNT(DISTINCT substr(pub_day,1,4)) years, "
+                "MIN(pub_day) d0, MAX(pub_day) d1 "
+                "FROM articles WHERE pub_day>=? AND pub_day<=? "
+                "GROUP BY site, column_name ORDER BY n DESC",
+                (date_from, date_to))]
+
+    def column_years(self, site: str = "", column: str = "",
+                     date_from: str = "2024-01-01",
+                     date_to: str = "2099-12-31") -> List[dict]:
+        """某栏目逐年篇数 —— 抽样的依据，也是时间轴的基础"""
+        where, args = ["pub_day>=?", "pub_day<=?"], [date_from, date_to]
+        if site:
+            where.append("site=?"); args.append(site)
+        if column:
+            where.append("column_name=?"); args.append(column)
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(
+                f"SELECT substr(pub_day,1,4) y, COUNT(*) n "
+                f"FROM articles WHERE {' AND '.join(where)} "
+                f"GROUP BY y ORDER BY y", args)]
+
 
 def open_db(cfg: Dict[str, Any]) -> Database:
     """按配置打开数据库（相对路径按项目根解析）"""
