@@ -914,35 +914,48 @@ def _userdict_path() -> str:
 
 
 def _discover_nw(limit: int, max_chars: int, min_count: int,
-                 topn: int) -> Dict[str, Any]:
+                 topn: int, strategy: str = "stratified") -> Dict[str, Any]:
     """discover 与 review 共用的取候选逻辑（只读）。
 
     ⚠ 已知词口径走 newwords.known_words()，与网页那条入口**同一份实现**。
       这里自己重写一遍的话，两边迟早漂移，而这种漂移用户看不见。
+
+    ⚠ 取样必须走 db.sample_content_text()，不能自己写 SELECT ... LIMIT。
+      原来的写法没有 ORDER BY，SQLite 按 rowid 取 → 等于「取最早入库的
+      N 篇」，实测只覆盖 cac 一家站 + 单一年份；网页那边已经修过一次，
+      这边若不改就成了「同一功能两个口径」的第二个漂移点。
     """
     from . import newwords as NW
     with _db() as d:
-        rows = d.conn.execute(
-            "SELECT content_text FROM articles "
-            "WHERE content_text IS NOT NULL AND length(content_text) > 200 "
-            "LIMIT ?", (int(limit),)).fetchall()
-    if not rows:
+        s = d.sample_content_text(limit=int(limit), strategy=strategy)
+    if not s["texts"]:
         return {"error": "语料里没有可用正文，先抓一些文章"}
-    texts = [r[0][:int(max_chars)] for r in rows]
+    texts = [t[:int(max_chars)] for t in s["texts"]]
     known = NW.known_words(_userdict_path())
     cands = NW.discover_new_words(texts, min_count=min_count,
                                   topn=topn, known=known)
     for c in cands:
         c["hint"] = NW.domain_hint(c["word"]) or ""
-    return {"articles": len(texts), "known_size": len(known), "items": cands}
+    return {"articles": len(texts), "known_size": len(known), "items": cands,
+            "coverage": {"n": s["n"], "chars": s["chars"], "pool": s["pool"],
+                         "pool_chars": s["pool_chars"],
+                         "pct_articles": round(100.0 * s["n"] / s["pool"], 2)
+                         if s["pool"] else 0,
+                         "pct_chars": round(100.0 * s["chars"] / s["pool_chars"], 2)
+                         if s["pool_chars"] else 0,
+                         "strategy": s["strategy"],
+                         "cover_sites": s["cover_sites"],
+                         "cover_years": s["cover_years"],
+                         "picked": s["picked"]}}
 
 
 @mcp.tool()
 def cacx_newwords_discover(
-    limit: int = 600,
+    limit: int = 1200,
     min_count: int = 8,
     topn: int = 60,
     max_chars: int = 5000,
+    strategy: str = "stratified",
 ) -> Dict[str, Any]:
     """
     从语料里挖新词候选（**只读**）。分词自学习的第一步。
@@ -956,15 +969,22 @@ def cacx_newwords_discover(
       （或先用 cacx_newwords_review 让 AI 过一遍，再自己复核）。
 
     参数：
-        limit:     扫多少篇正文（默认 600，实测 800 篇时区分度最好）
+        limit:     扫多少篇正文。**默认 1200**：实测 600 篇以下时，
+                   分层取样会让每层样本只剩十几篇，凝固度与邻字熵
+                   估计不稳，候选里混进大量跨词边界的碎片；1200 是
+                   干净度拐点
         min_count: 候选至少出现几次，越大越保守
         topn:      返回多少个候选
+        strategy:  stratified=按「站点 × 年份」铺开（默认，可复现）
+                   recent=只取最近 N 篇（只覆盖时间末段）
 
-    返回：{articles, known_size, items:[{word,count,cohesion,
+    返回：{articles, known_size, coverage, items:[{word,count,cohesion,
           left_entropy,right_entropy,score,domain,hint}]}
+      ⚠ coverage 里写明本次实际覆盖了几站几年、占全库百分之多少 ——
+        报告里要引这个口径，别只写「扫了 N 篇」。
     """
     try:
-        return _discover_nw(limit, max_chars, min_count, topn)
+        return _discover_nw(limit, max_chars, min_count, topn, strategy)
     except Exception as e:
         return _err(e)
 

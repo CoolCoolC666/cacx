@@ -372,10 +372,18 @@
       </div>
     </div>
 
-    <div class="row" style="gap:12px;flex-wrap:wrap;margin-bottom:12px">
+    <div class="row" style="gap:12px;flex-wrap:wrap;margin-bottom:10px">
       <label style="font-size:12.5px">语料篇数
-        <input type="number" id="nw_limit" value="600" min="20" max="2000"
-               style="width:76px"></label>
+        <input type="number" id="nw_limit" value="1200" min="20" max="3000"
+               style="width:76px"
+               oninput="nwPreview()"></label>
+      <label style="font-size:12.5px">抽样口径
+        <select id="nw_strategy" onchange="nwPreview()"
+                style="width:210px"
+                title="决定这 N 篇从整个语料里怎么挑">
+          <option value="stratified">按站点 × 年份铺开（推荐）</option>
+          <option value="recent">只取最近的 N 篇</option>
+        </select></label>
       <label style="font-size:12.5px">最低频次
         <input type="number" id="nw_minc" value="8" min="2" max="200"
                style="width:66px"></label>
@@ -400,6 +408,12 @@
                onkeydown="if(event.key==='Enter')nwProbe()"
                style="width:230px"></label>
     </div>
+
+    <!-- 口径面板：篇数是个数字，但「这个数字覆盖了什么」必须能看见。
+         没有它，600 只能靠猜；有它，用户能自己判断够不够、
+         要不要调大、结果能不能写进报告当口径说明。 -->
+    <div class="box" id="nw_scope" style="margin-bottom:12px;
+         background:#12151c;font-size:12.5px;line-height:1.85"></div>
 
     <div class="box" id="nw_adopted" style="margin-bottom:12px"></div>
     <div class="box" id="nw_probe_out" style="display:none;margin-bottom:12px"></div>
@@ -1924,6 +1938,77 @@ async function dlGraphHtml(){
 /* ---------------- 分词实验室（新词自学习） ---------------- */
 let NW_ITEMS = [];        // 候选列表
 let NW_PICK = new Set();  // 勾选的词
+let NW_SCOPE = null;       // 最近一次口径（预览或真挖掘算出来的）
+let NW_PREVIEW_BUSY = false;
+
+// ------------------------------------------------------------ 取样口径
+// 为什么值得单独做一块面板：「语料篇数」是个纯数字，
+// 用户看不到它背后挑了哪些文章，就会当成「随便抽 600 篇」。
+// 实际上挑法决定结论 —— 只按入库顺序取，600 篇可能全是一个站、一年的，
+// 挖出来的「新词」其实只是那一个地方的用词习惯。
+function nwStrategy(){
+  return ($('nw_strategy')||{}).value || 'stratified';
+}
+
+function nwCoverageHtml(c, opts){
+  const o = opts || {};
+  const wan = (n)=> (n/10000).toFixed(0)+' 万字';
+  const bySite = {};
+  for(const p of (c.picked||[])) bySite[p.site]=(bySite[p.site]||0)+p.n;
+  const siteTxt = Object.entries(bySite)
+      .map(([k,v])=>`${esc(k)} ${v} 篇`).join(' · ') || '—';
+  const yrs = [...new Set((c.picked||[]).map(p=>p.year))].sort();
+  // 年份太多就折叠，只留首尾 + 数量，否则一行拉出去几十个数字反而看不清
+  const yrTxt = yrs.length>14
+    ? `${yrs[0]}–${yrs[yrs.length-1]}（${yrs.length} 个年份）`
+    : (yrs.join('、') || '—');
+  const warn = c.cover_sites<c.pool_sites
+      ? `<div style="color:var(--warn);margin-top:5px">⚠ 只覆盖了
+         ${c.cover_sites}/${c.pool_sites} 个站点、${c.cover_years}/${c.pool_years}
+         个年份 —— 这个口径<b>不能代表整个语料</b>，报告里要写明这是子集。</div>`
+      : '';
+  const lowN = c.n<1200 && c.strategy==='stratified';
+  const advice = lowN
+      ? `<div style="color:var(--warn);margin-top:5px">⚠ ${c.n} 篇偏少。
+         分层取样会把样本摊到 ${c.picked.length} 个「站点×年份」层上，
+         每层只剩十几篇，凝固度与邻字熵的估计就不稳 —— 实测候选里会
+         混进「江大数据交」这种跨词边界的碎片。
+         <b>建议调到 1200 以上</b>（耗时约翻倍，换来干净得多的候选）。</div>`
+      : '';
+  return `<div><b>本次会统计</b>：${c.n} 篇 / ${wan(c.chars)}
+      <span style="color:var(--dim)">（占可统计语料 ${c.pct_articles}% 的篇数、
+      ${c.pct_chars}% 的字数；底账 ${c.pool} 篇 / ${wan(c.pool_chars)}，
+      ${esc((c.date_min||'').slice(0,10))} ~ ${esc((c.date_max||'').slice(0,10))}）</span></div>
+    <div style="color:var(--dim)">覆盖站点：${siteTxt}</div>
+    <div style="color:var(--dim)">覆盖年份：${yrTxt}（共 ${c.pool_years} 个年份可选）</div>
+    <div style="color:var(--dim)">挑法：${c.strategy==='recent'
+        ? '只取最近的 N 篇 —— <b>只覆盖时间末段</b>，早年用词不会进统计'
+        : '按「站点 × 年份」分层铺开，每层先保底再轮转补齐 —— '
+          + '换查询顺序、重新抓取，结果都一致（可复现）'}</div>
+    ${warn}${advice}
+    ${o.tip===false ? '' :
+      `<div style="color:var(--dim);margin-top:5px">
+        怎么权衡：篇数越多覆盖越全、低频新词越不容易漏；
+        越少越快，但低频词的统计噪声会变大（上面实测就是这个规律）。
+        默认 1200 篇是本项目实测的干净度拐点，写进报告时把这一段口径一起写上。</div>`}`;
+}
+
+async function nwPreview(){
+  const box=$('nw_scope');
+  if(!box) return;
+  const lim=parseInt($('nw_limit').value||'1200',10)||1200;
+  if(NW_PREVIEW_BUSY) return;
+  NW_PREVIEW_BUSY=true;
+  try{
+    const c=await (await fetch(
+      `/api/newwords/corpus?limit=${lim}&strategy=${nwStrategy()}`)).json();
+    if(c.error){ box.innerHTML=`<div style="color:var(--err)">✗ ${esc(c.error)}</div>`; return; }
+    NW_SCOPE=c;
+    box.innerHTML=nwCoverageHtml(c);
+  }catch(e){
+    box.innerHTML=`<div style="color:var(--dim)">口径预览不可用（服务未起？）：${esc(e.message)}</div>`;
+  }finally{ NW_PREVIEW_BUSY=false; }
+}
 
 async function nwDiscover(){
   const box = $('nw_result');
@@ -1943,16 +2028,24 @@ async function nwDiscover(){
     const r = await fetch('/api/newwords/discover', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
-        limit: parseInt($('nw_limit').value||'600',10)||600,
+        limit: parseInt($('nw_limit').value||'1200',10)||1200,
         max_chars: 5000,
         min_count: parseInt($('nw_minc').value||'8',10)||8,
         topn: parseInt($('nw_topn').value||'60',10)||60,
+        strategy: nwStrategy(),
       }),
     }).then(x=>x.json());
     if(r.error){ $('nw_msg').innerHTML =
       `<div style="color:var(--err);font-size:12.5px">✗ ${esc(r.error)}</div>`;
       return; }
     NW_ITEMS = r.items || [];
+    // 挖完把**实际**口径打回面板 —— 预览只是预告，这里是既成事实
+    if(r.coverage){
+      NW_SCOPE=r.coverage;
+      $('nw_scope').innerHTML=nwCoverageHtml(r.coverage,{tip:false})
+        +`<div style="color:var(--dim);margin-top:5px">上面这行是本次
+          <b>实际</b>统计到的范围（不是预估）。</div>`;
+    }
     $('nw_cnt').textContent = `（扫了 ${r.articles} 篇，`+
       `当前词典 ${r.known_size} 词，用时 ${r.elapsed}s）`;
     if(!NW_ITEMS.length){
@@ -2189,7 +2282,7 @@ function showTab(t){
     PN_CACHE={}; loadPanel(); }
   if(t==='sample'){ loadSampleOptions(); }
   if(t==='graph'){ loadGraph(); }
-  if(t==='seg'){ nwLoadAdopted(); }
+  if(t==='seg'){ nwLoadAdopted(); nwPreview(); }
   if(t==='set') loadCfg();
   if(t==='ai'){ loadAiBadge(); loadAnns(); loadBatchSites(); loadFailures(); }
   if(t==='sync'){ loadSyncSites(); loadRuns(); loadSitesList(); pollSync(); }
