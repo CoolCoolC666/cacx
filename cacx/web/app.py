@@ -394,6 +394,232 @@ def api_panel_export(which: str, site: str = "",
                  "X-Export-Count": str(len(rows))})
 
 
+# ---------------------------------------------------------------- 面板快照 HTML
+def _esc(s: Any) -> str:
+    """HTML 转义。导出的文件要能在任何浏览器里打开，少一个转义都可能破版。"""
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _nice_max(v: float) -> int:
+    """
+    把 Y 轴上限收成「好看的整数」，并且保证能被 4 整除。
+
+    否则 140 篇的样本会画出 140 / 105 / 70 / 35 这种刻度 ——
+    数学上没错，但一眼看上去像坏了，而且放大截图后更刺眼。
+    导出物是要贴进 PPT 的，这种细节很显眼。
+    """
+    import math
+    if v <= 0:
+        return 1
+    mag = 10 ** math.floor(math.log10(v))
+    for m in (1, 2, 4, 5, 8, 10):          # 全都能被 4 整除
+        if v <= m * mag:
+            return int(m * mag)
+    return int(10 * mag)
+
+
+def _svg_bars(rows: List[dict], unit: str = "", w: int = 900,
+               h: int = 290, label_every: int = 1) -> str:
+    """
+    纯 SVG 柱状图。不引任何图表库 —— 导出的 HTML 必须双击即开、断网可用，
+    一旦依赖外链 CDN，教室没网就只剩一个空白页。
+
+    viewBox 宽度刻意贴近卡片实际渲染宽度（约 880px），这样 1:1 显示、
+    字号不被缩小，投影时才看得清。
+    """
+    if not rows:
+        return '<div class="empty">无数据</div>'
+    pad_l, pad_b, pad_t, pad_r = 62, 54, 16, 18
+    plot_w = w - pad_l - pad_r
+    plot_h = h - pad_t - pad_b
+    mx = _nice_max(max((r["n"] for r in rows), default=0))
+    step = plot_w / len(rows)
+    bw = max(2.0, min(46.0, step * 0.66))
+    out = [f'<svg viewBox="0 0 {w} {h}" class="chart" '
+           f'preserveAspectRatio="xMidYMid meet">']
+    for i in range(5):
+        v = mx * i // 4
+        y = pad_t + plot_h - plot_h * i / 4
+        out.append(f'<line x1="{pad_l}" y1="{y:.1f}" x2="{w-pad_r}" y2="{y:.1f}" '
+                   f'class="grid"/>')
+        out.append(f'<text x="{pad_l-10}" y="{y+4:.1f}" class="axis" '
+                   f'text-anchor="end">{v:,}</text>')
+    out.append(f'<line x1="{pad_l}" y1="{pad_t+plot_h}" x2="{w-pad_r}" '
+               f'y2="{pad_t+plot_h}" class="axisline"/>')
+    for i, r in enumerate(rows):
+        bh = max(2.0, r["n"] / mx * plot_h)
+        x = pad_l + i * step + (step - bw) / 2
+        y = pad_t + plot_h - bh
+        out.append(
+            f'<g class="bar"><title>{_esc(r["k"])}：{r["n"]:,}{_esc(unit)}</title>'
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{bh:.1f}" '
+            f'rx="2"/></g>')
+        if i % label_every == 0:
+            cx = x + bw / 2
+            out.append(f'<text x="{cx:.1f}" y="{pad_t+plot_h+16}" class="axis" '
+                       f'text-anchor="end" transform="rotate(-42 {cx:.1f} '
+                       f'{pad_t+plot_h+16})">{_esc(r["k"])}</text>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+def _table(head: List[str], rows: List[List[Any]]) -> str:
+    th = "".join(f"<th>{_esc(h)}</th>" for h in head)
+    tr = "".join("<tr>" + "".join(f"<td>{_esc(c)}</td>" for c in r) + "</tr>"
+                 for r in rows)
+    return (f'<details class="data"><summary>查看数据表（{len(rows)} 行）</summary>'
+            f'<table><thead><tr>{th}</tr></thead><tbody>{tr}</tbody></table>'
+            f"</details>")
+
+
+_PANEL_CSS = """
+*{box-sizing:border-box}
+body{margin:0;background:#0e1117;color:#e6e9ef;
+ font:15px/1.6 "Segoe UI","Microsoft YaHei","PingFang SC",sans-serif}
+.wrap{max-width:1280px;margin:0 auto;padding:34px 26px 60px}
+h1{font-size:25px;margin:0 0 6px;letter-spacing:.5px}
+.sub{color:#8b93a3;font-size:13.5px;margin-bottom:24px}
+.sub b{color:#3b82f6;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(560px,1fr));
+ gap:18px}
+.card{background:#151922;border:1px solid #232936;border-radius:12px;padding:18px 20px 14px}
+.card h2{font-size:15.5px;margin:0 0 14px;color:#c2c8d4;font-weight:600}
+.chart{width:100%;height:auto;display:block}
+.chart .grid{stroke:#1e2430;stroke-width:1}
+.chart .axisline{stroke:#3a4150;stroke-width:1}
+.chart .axis{fill:#8b93a3;font-size:12.5px;font-family:Consolas,monospace}
+.chart .bar rect{fill:#3b82f6}
+.chart .bar:hover rect{fill:#60a5fa}
+.rank{display:flex;align-items:center;gap:10px;padding:7px 0;
+ border-bottom:1px solid #1c222d}
+.rank:last-child{border-bottom:none}
+.rank .t{flex:1;font-size:13.5px}
+.rank .v{font-family:Consolas,monospace;color:#3b82f6;font-size:14px}
+.rank .bar{width:120px;height:6px;background:#1c222d;border-radius:3px;
+ overflow:hidden;flex:none}
+.rank .bar i{display:block;height:100%;background:#3b82f6}
+.empty{color:#7d8698;padding:26px 0;text-align:center}
+details.data{margin-top:12px}
+details.data summary{cursor:pointer;color:#8b93a3;font-size:12.5px;user-select:none}
+table{width:100%;border-collapse:collapse;margin-top:9px;font-size:12.5px}
+th,td{text-align:left;padding:5px 9px;border-bottom:1px solid #1c222d}
+th{color:#8b93a3;font-weight:600}
+td{font-family:Consolas,monospace}
+.note{margin-top:12px;color:#8b93a3;font-size:12.5px}
+.foot{margin-top:30px;color:#6d7686;font-size:12px;
+ line-height:1.9;border-top:1px solid #1c222d;padding-top:16px}
+@media print{body{background:#fff;color:#111}.card{border-color:#ddd}
+ details.data{display:none}}
+"""
+
+
+@app.get("/api/panel/snapshot")
+def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
+                       days: int = Query(30, ge=1, le=365),
+                       top: int = Query(12, ge=1, le=50)):
+    """
+    把整个数据面板导出成一个**独立的 HTML 文件**。
+
+    为什么要有这个：老师要的「可运行的展示网站」我们已经有了，
+    但报告和作业里还需要一个**能直接交上去、能贴进文档、离线能开**的东西。
+    这个 HTML 双击就开、不断网、不需要 Python、不需要装任何东西。
+
+    刻意不引任何图表库（同 _svg_bars 的理由），
+    所以它不是一个「简化版」，而是一份**自包含的静态快照**。
+    """
+    d = _db()
+    trend_m = api_trend(site=site, granularity="month")["items"][-months:]
+    trend_y = api_trend(site=site, granularity="year")["items"]
+    f = api_facets(site=site)
+    e = d.event_stats(days, site=site)
+
+    # 栏目榜：单站给满 top 名额，多站平分（与前端同一口径）
+    per = top if site else max(4, top // max(1, len(f["sites"])))
+    by_site: Dict[str, List[dict]] = {}
+    for c in f["columns"]:
+        by_site.setdefault(c["site"], []).append(c)
+    rank: List[dict] = []
+    for sk in (site and [site] or [x["site"] for x in f["sites"]]):
+        tag = {"cac": "国", "zjwx": "浙"}.get(sk, str(sk)[:2])
+        for c in (by_site.get(sk) or [])[:per]:
+            rank.append({"k": f"{tag}·{c['column_name']}", "n": c["n"]})
+    rank.sort(key=lambda x: -x["n"])
+    mx = max((x["n"] for x in rank), default=0) or 1
+
+    ev = [{"k": r["kind"], "n": r["n"]} for r in e["by_kind"]]
+    name = {"cac": "中国网信办", "zjwx": "浙江网信网"}.get(site, "全部站点")
+    now = time.strftime("%Y-%m-%d %H:%M")
+
+    def rank_html(items):
+        if not items:
+            return '<div class="empty">无数据</div>'
+        return "".join(
+            f'<div class="rank"><span class="t">{_esc(x["k"])}</span>'
+            f'<span class="bar"><i style="width:'
+            f'{max(2, round(x["n"]/mx*100))}%"></i></span>'
+            f'<span class="v">{x["n"]:,}</span></div>' for x in items)
+
+    ev_html = "".join(
+        f'<div class="rank"><span class="t">{_esc(x["k"])}</span>'
+        f'<span class="bar"><i style="width:'
+        f'{max(2, round(x["n"]/max((y["n"] for y in ev), default=1)*100))}%">'
+        f'</i></span><span class="v">{x["n"]:,} 次</span></div>' for x in ev)
+
+    note = ""
+    if site and e.get("note"):
+        note = f'<div class="note">{_esc(e["note"])}</div>'
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>网信办公开语料 · 数据面板 · {_esc(name)}</title>
+<style>{_PANEL_CSS}</style></head><body><div class="wrap">
+<h1>网信办公开语料 · 数据面板</h1>
+<div class="sub">站点 <b>{_esc(name)}</b> · 近 {months} 个月 ·
+检索行为近 {days} 天 · 生成于 {now}</div>
+<div class="grid">
+
+<div class="card"><h2>按月分布</h2>
+{_svg_bars(trend_m, " 篇", label_every=max(1, len(trend_m)//12))}
+{_table(["月份", "文章数", "字数"],
+        [[r["k"], f'{r["n"]:,}', f'{(r.get("c") or 0):,}'] for r in trend_m])}
+</div>
+
+<div class="card"><h2>按年分布</h2>
+{_svg_bars(trend_y, " 篇")}
+{_table(["年份", "文章数", "字数"],
+        [[r["k"], f'{r["n"]:,}', f'{(r.get("c") or 0):,}'] for r in trend_y])}
+</div>
+
+<div class="card"><h2>栏目 Top {len(rank)}</h2>
+{rank_html(rank)}
+{_table(["栏目", "文章数"], [[x["k"], f'{x["n"]:,}'] for x in rank])}
+</div>
+
+<div class="card"><h2>检索行为（近 {days} 天）</h2>
+{ev_html or f'<div class="empty">该站点近 {days} 天没有行为记录</div>'}
+{note}
+{_table(["行为类型", "次数"], [[x["k"], f'{x["n"]:,}'] for x in ev])}
+</div>
+
+</div>
+<div class="foot">
+数据来源：中央网信办（cac.gov.cn）、浙江网信网（zjwx.gov.cn）公开发布页面。<br>
+生成工具：cacx · 网络舆情分析与监测课程作业。仅供学习研究与课程作业用途，
+内容著作权归原作者及原发布网站，不得商用。
+</div>
+</div></body></html>"""
+    d.record_event("export", detail="panel:html",
+                   meta=f"site={site} months={months}")
+    fname = f"cacx_数据面板_{name}_{months}月_{time.strftime('%Y%m%d_%H%M%S')}.html"
+    return Response(
+        content=html.encode("utf-8"),
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition":
+                 f"attachment; filename*=UTF-8''{quote(fname)}"})
+
+
 # ---------------------------------------------------------------- AI
 class SummarizeReq(BaseModel):
     id: int
