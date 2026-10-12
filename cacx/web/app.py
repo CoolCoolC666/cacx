@@ -1855,7 +1855,13 @@ def api_ai_summarize_batch_status(job_id: str):
 # 同步是长任务（首次全量 ~20 分钟），绝不能跑在请求线程里，
 # 否则一个 POST /api/sync 会把整个服务卡死。
 # 用单后台线程 + 共享状态，前端轮询 /api/sync/status。
-SYNC_LOCK = threading.Lock()
+# ⚠ 必须是 RLock，不能用 Lock。
+# Lock 不可重入：本线程再进一次 with 就永久阻塞，而且**只有本线程知道**——
+# 服务不崩、别的接口照常响应，只有碰这把锁的端点悄悄死掉，
+# 表现就是「点了开始同步一点反应都没有」。
+# 这里必须可重入的原因：临界区里调了同样要加锁的 _sync_log()（登记日志）。
+# 两层保险：①锁用 RLock，②别在临界区里调加锁的函数。
+SYNC_LOCK = threading.RLock()
 SYNC_STATE: Dict[str, Any] = {
     "running": False, "started_at": "", "finished_at": "",
     "mode": "", "sites": [], "year": "",
@@ -1958,6 +1964,7 @@ def api_sync_start(
         if SYNC_STATE["running"]:
             raise HTTPException(409, "已有同步在跑，先等它结束或点停止")
         site_list = [s.strip() for s in sites.split(",") if s.strip()] or None
+        drop_notes = []      # 锁外统一写日志，锁内只攒字串
         if site_list:
             # 站点表是动态的（用户可以自己加站），不能写死 cac|zjwx，
             # 否则新站点点了同步直接被 400 挡回去
@@ -1993,10 +2000,13 @@ def api_sync_start(
                         drop[c] = codes[0]
             if drop:
                 eff = [c for c in eff if c not in drop]
-                for c, keep in sorted(drop.items()):
-                    _sync_log(f"⚠ 已自动跳过同源重复站点 {c}"
-                              f"（它与 {keep} 指向同一个网站，"
-                              f"同时同步会把同一批稿件存成两行）")
+                # 只在临界区内攒字串，真正写日志挪到锁外（见下方）
+                drop_notes = [
+                    f"⚠ 已自动跳过同源重复站点 {c}"
+                    f"（它与 {keep} 指向同一个网站，"
+                    f"同时同步会把同一批稿件存成两行）"
+                    for c, keep in sorted(drop.items())
+                ]
 
         # 显式勾选时 site_list 原样传；默认路径用剔除同源后的 eff。
         # ⚠ 这一步必须真的把 eff 传下去 —— 上面算 eff 只是为了生成日志，
@@ -2019,6 +2029,9 @@ def api_sync_start(
             "logs": [], "error": "", "cancel_requested": False,
             "totals": {"listed": 0, "new": 0, "failed": 0},
         })
+    # 以下两处 _sync_log 都在临界区之外：临界区里调加锁的函数会自锁
+    for note in drop_notes:
+        _sync_log(note)
     _sync_log(f"开始同步：模式 {mode}"
               + (f"，年份 {year}" if year else "")
               + (f"，站点 {','.join(site_list)}" if site_list

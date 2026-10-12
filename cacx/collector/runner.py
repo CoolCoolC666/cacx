@@ -139,6 +139,13 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
             say(f"  {c['name']:16} 列表 {len(items):5}")
             emit("column", site=site, column=c["name"], n=len(items),
                  listed=listed)
+            # 每列补发一次汇总进度。
+            # 下面逐篇的 emit("progress") 只在**写库分支**里发，
+            # list-only 分支直接 continue —— 于是整个盘点跑下来，
+            # 状态行一直显示「列表 0 · 新增 0」，
+            # 而这个模式的名字恰恰是「只盘点」，用户选它就是为了看条数。
+            emit("progress", site=site, listed=listed, new=listed_new,
+                 failed=failed)
             for it in items:
                 if it["url"] in seen_urls:
                     continue
