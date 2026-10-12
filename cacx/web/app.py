@@ -58,6 +58,8 @@ from ..ai import advisory as advisory_run
 from ..ai import diagnose as ai_diagnose
 from ..ai import summarize as ai_summarize
 from ..ai import status as ai_status
+from ..ai.base import AIError
+from ..ai.tasks import review_new_words as ai_review
 
 # 用 pathlib 解析，不能用 __file__.rsplit("/") —— Windows 上是反斜杠，切不开
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -1243,22 +1245,10 @@ def _userdict_path() -> str:
 def _known_words() -> set:
     """当前分词器已认识的词：内置领域词表 + jieba 词典 + 已回流词。
 
-    ⚠ 必须三份都算：漏一份就会把「中央网信办」这种早就有的词
-      当成新词报给用户，用户以为程序发现了新东西，其实是它自己已有的。
-    """
-    known = set()
-    for line in textseg._BASE_TERMS.strip().splitlines():
-        parts = line.split()
-        if parts:
-            known.add(parts[0])
-    j = textseg._get()
-    if j is not None:
-        try:
-            known |= set(j.dictionary.dictionary.keys())
-        except Exception:
-            pass
-    known |= set(NW.read_userdict(_userdict_path()))
-    return known
+    ⚠ 实现在 newwords.known_words()，不在这里 —— 网页与 MCP 是两条入口，
+      口径必须同一份实现，否则会出现「网页上不报旧词、MCP 里照报」
+      这种用户完全无从察觉的漂移。"""
+    return NW.known_words(_userdict_path())
 
 
 class NewWordsReq(BaseModel):
@@ -1327,6 +1317,42 @@ def api_segment(text: str, limit: int = Query(50, ge=1, le=200)):
         return {"items": []}
     return {"text": text, "tokens": textseg.cut(text)[:limit],
             "jieba": textseg.available()}
+
+
+class ReviewReq(BaseModel):
+    """AI 预勾选。cands 由前端回传，不在这里重扫语料 ——
+    界面上的候选表就是用户看到、正在复核的那一份，
+    让后端自己重扫会出现「AI 评的是另一批词」这种最气人的错位。"""
+    cands: List[Dict[str, Any]] = []
+    run: bool = False          # 默认只预览：先看 prompt 和花多少 token
+    batch: int = Query(40, ge=5, le=100)
+
+
+@app.post("/api/newwords/review")
+def api_newwords_review(req: ReviewReq):
+    """
+    让 AI 逐个判断候选词该不该收进词典，**只返回建议**。
+
+    ⚠⚠ 这里**一个字都不会写进词典** —— 采纳必须由人点「✅ 采纳勾选」。
+      AI 和统计都只是概率，而词典是**持续污染**后续所有检索与统计的东西。
+      把「建议」与「生效」分成两步，是让误判可撤销的唯一办法。
+
+    ⚠ 逐字一致的白名单：模型返回的 word 必须落在传入的候选里，
+      交集之外一律丢弃（候选文本来自抓来的网页，防提示注入）。
+    """
+    cands = [c for c in (req.cands or []) if (c.get("word") or "").strip()]
+    if not cands:
+        return {"error": "没有候选可评审"}
+    cfg = _cfg()
+    try:
+        res = ai_review(cfg, cands, dry_run=not req.run, batch=req.batch)
+    except AIError as e:
+        # AI 没配 / 调用失败都不是致命错误：统计结果照常可用，
+        # 只是没有预勾选而已。返回可读原因，前端显示「跳过」而不是空白。
+        return {"error": str(e), "retryable": bool(getattr(e, "retryable", False))}
+    if not req.run:
+        return {"dry_run": True, **res}
+    return {"dry_run": False, **res}
 
 
 @app.get("/api/ai/status")

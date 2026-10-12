@@ -55,10 +55,20 @@ REQUIRED_TOOLS = [
     "cacx_put_entities", "cacx_put_relations",
     "cacx_list_entities", "cacx_list_relations",
     "cacx_graph", "cacx_graph_stats",
+    # 分词自学习（P5）。discover/list 是只读；review 只给建议不写盘；
+    # adopt 会改词典，所以 confirm 默认 False —— 它必须留在
+    # WRITE_TOOLS 里被「未确认不写盘」那条闸门盯住。
+    "cacx_newwords_discover", "cacx_newwords_review",
+    "cacx_newwords_adopt", "cacx_list_userdict",
 ]
 WRITE_TOOLS = {"cacx_sync", "cacx_summarize",
                "cacx_summarize_batch", "cacx_ai_config",
-               "cacx_purge", "cacx_put_entities", "cacx_put_relations"}
+               "cacx_purge", "cacx_put_entities", "cacx_put_relations",
+               # ⚠ 采纳会改词典。词典是**累积资产**：写进去之后所有检索、
+               #   词频、实体抽取都按它切分，误写不会报错，只会持续出偏差。
+               #   所以它和 purge 一样必须走 confirm 闸门。
+               #   （review 不算写操作 —— 它一个字都不落盘。）
+               "cacx_newwords_adopt"}
 
 # 人造「真实格式」密钥：长得像 MiniMax key，但完全是测试用假串。
 FAKE_KEY = "sk-TESTKEY-abcdef0123456789XYZ"
@@ -95,7 +105,7 @@ def test_import():
 
 # ---------------------------------------------------------------- 2. 工具注册
 def test_tools_registered():
-    section("2. 12 个工具全部注册")
+    section("2. 全部工具注册")
     import cacx.mcp_server as m
 
     async def _names():
@@ -104,7 +114,10 @@ def test_tools_registered():
 
     tools = asyncio.run(_names())
     names = [t[0] for t in tools]
-    check("工具总数 == 22", len(names) == 22, f"实际 {len(names)}: {names}")
+    # ⚠ 数量从 REQUIRED_TOOLS 推，别写死数字：写死的话每加一个工具
+    #   都得记得改这里，忘了就变成一条跟功能无关的失败。
+    check(f"工具总数 == {len(REQUIRED_TOOLS)}",
+          len(names) == len(REQUIRED_TOOLS), f"实际 {len(names)}")
     for want in REQUIRED_TOOLS:
         check(f"已注册 {want}", want in names, f"现有 {names}")
 
@@ -415,9 +428,81 @@ def test_ai_config():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ---------------------------------------------------------------- 9. summarize_batch
+# ---------------------------------------------------------------- 9. 新词采纳闸
+def test_newwords_adopt_gate():
+    """
+    cacx_newwords_adopt 的 confirm 闸。
+
+    ⚠ 这条要单独测，不能只靠「工具总数」：总数对了不代表闸门有效。
+       词典是累积资产 —— 写进去之后所有检索、词频、实体抽取都按它切分，
+       误写**不会报错**，只会持续出偏差，而且极难归因到「词典多了个词」。
+    """
+    section("9. cacx_newwords_adopt（confirm 闸门）")
+    import cacx.mcp_server as m
+    from cacx import newwords as NW
+
+    tmp = Path(tempfile.mkdtemp(prefix="cacx_mcp_nw_"))
+    try:
+        # 把 userdict 指向临时目录：⚠ 绝不碰真实的 data/userdict.txt
+        d = tmp / "data"
+        d.mkdir(parents=True, exist_ok=True)
+        ud = d / "userdict.txt"
+        m._userdict_path = lambda: str(ud)
+
+        # --- 闸门 1：默认 confirm=False，只预览 ---
+        r = m.cacx_newwords_adopt(["清朗专项行动", "深度伪造"])
+        check("默认 dry_run", r.get("dry_run") is True, str(r)[:200])
+        check("dry_run 不建文件", not ud.exists(), str(ud))
+        check("dry_run 列出将写入", r.get("will_write") == ["清朗专项行动", "深度伪造"],
+              str(r.get("will_write")))
+        check("dry_run 给出下一步", "confirm=true" in (r.get("next_step") or ""),
+              str(r.get("next_step")))
+
+        # --- 闸门 2：confirm=True 才落盘 ---
+        r = m.cacx_newwords_adopt(["清朗专项行动", "深度伪造"], confirm=True)
+        check("confirm=True 已写入", r.get("added") == 2, str(r)[:200])
+        check("文件已生成", ud.exists(), str(ud))
+        check("落盘后可读回",
+              set(NW.read_userdict(str(ud))) == {"清朗专项行动", "深度伪造"},
+              str(NW.read_userdict(str(ud))))
+
+        # --- 闸门 3：重复采纳不重复写 ---
+        r = m.cacx_newwords_adopt(["清朗专项行动", "深度伪造"], confirm=True)
+        check("重复采纳 added=0", r.get("added") == 0, str(r)[:200])
+        check("词典没被撑大", r.get("total") == 2, str(r)[:200])
+
+        # --- 闸门 4：review 一个字都不能落盘 ---
+        before = set(NW.read_userdict(str(ud)))
+        import cacx.ai.tasks as AI_tasks
+        prov = type("P", (), {"model": "fake", "chat": staticmethod(
+            lambda s, u, dry_run=False: '{"decisions":[{"word":"清朗专项行动",'
+                                        '"verdict":"keep","reason":"x"}]}')})()
+        orig = AI_tasks.build
+        AI_tasks.build = lambda cfg, task=None: prov
+        try:
+            res = AI_tasks.review_new_words({"ai": {"provider": "openai_compat"}},
+                                            [{"word": "清朗专项行动"}],
+                                            dry_run=False)
+            check("review 返回建议", res["decisions"]["清朗专项行动"]["verdict"] == "keep",
+                  str(res["decisions"]))
+        finally:
+            AI_tasks.build = orig
+        check("review 后词典未变", set(NW.read_userdict(str(ud))) == before,
+              str(NW.read_userdict(str(ud))))
+
+        # --- 闸门 5：空词表不炸 ---
+        r = m.cacx_newwords_adopt([])
+        check("空词表返回 error", "error" in r, str(r)[:120])
+    finally:
+        m._CFG_OVERRIDE = None
+        if hasattr(m, "_userdict_path"):
+            del m._userdict_path
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- 10. summarize_batch
 def test_summarize_batch():
-    section("9. cacx_summarize_batch（增量过滤 / dry_run 预览）")
+    section("10. cacx_summarize_batch（增量过滤 / dry_run 预览）")
     import cacx.mcp_server as m
     from cacx import db as D
     from cacx.ai import tasks as AI_tasks
@@ -525,8 +610,8 @@ def main():
     print("=" * 62)
     for fn in (test_import, test_tools_registered,
                test_offline_and_key_zero_echo,
-               test_ai_status, test_ai_config, test_summarize_batch,
-               test_source_scan):
+               test_ai_status, test_ai_config, test_newwords_adopt_gate,
+               test_summarize_batch, test_source_scan):
         try:
             fn()
         except Exception:

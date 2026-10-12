@@ -907,6 +907,168 @@ def cacx_graph_stats() -> Dict[str, Any]:
         return _err(e)
 
 
+# ---------------------------------------------------------------- 分词实验室
+def _userdict_path() -> str:
+    from . import newwords as _NW
+    return _NW.userdict_path(str(C.PROJECT_ROOT / "data"))
+
+
+def _discover_nw(limit: int, max_chars: int, min_count: int,
+                 topn: int) -> Dict[str, Any]:
+    """discover 与 review 共用的取候选逻辑（只读）。
+
+    ⚠ 已知词口径走 newwords.known_words()，与网页那条入口**同一份实现**。
+      这里自己重写一遍的话，两边迟早漂移，而这种漂移用户看不见。
+    """
+    from . import newwords as NW
+    with _db() as d:
+        rows = d.conn.execute(
+            "SELECT content_text FROM articles "
+            "WHERE content_text IS NOT NULL AND length(content_text) > 200 "
+            "LIMIT ?", (int(limit),)).fetchall()
+    if not rows:
+        return {"error": "语料里没有可用正文，先抓一些文章"}
+    texts = [r[0][:int(max_chars)] for r in rows]
+    known = NW.known_words(_userdict_path())
+    cands = NW.discover_new_words(texts, min_count=min_count,
+                                  topn=topn, known=known)
+    for c in cands:
+        c["hint"] = NW.domain_hint(c["word"]) or ""
+    return {"articles": len(texts), "known_size": len(known), "items": cands}
+
+
+@mcp.tool()
+def cacx_newwords_discover(
+    limit: int = 600,
+    min_count: int = 8,
+    topn: int = 60,
+    max_chars: int = 5000,
+) -> Dict[str, Any]:
+    """
+    从语料里挖新词候选（**只读**）。分词自学习的第一步。
+
+    用无监督统计法：凝固度（该粘在一起的强度）+ 邻字熵（左右能接的字
+    够不够杂）+ 子串可切分性（能切成两个已知词的就是短语，不是词），
+    再按网信领域加权排序。
+
+    ⚠ 返回的是**候选不是结论**：统计只保证「大概率是词」，
+      保证不了「这个领域该收」。要写进词典必须人工确认
+      （或先用 cacx_newwords_review 让 AI 过一遍，再自己复核）。
+
+    参数：
+        limit:     扫多少篇正文（默认 600，实测 800 篇时区分度最好）
+        min_count: 候选至少出现几次，越大越保守
+        topn:      返回多少个候选
+
+    返回：{articles, known_size, items:[{word,count,cohesion,
+          left_entropy,right_entropy,score,domain,hint}]}
+    """
+    try:
+        return _discover_nw(limit, max_chars, min_count, topn)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def cacx_newwords_review(
+    words: List[str],
+    candidates: List[Dict[str, Any]] = [],
+    run: bool = False,
+    batch: int = 40,
+) -> Dict[str, Any]:
+    """
+    让 AI 逐个判断候选词该不该收进词典（**只给建议，不写词典**）。
+
+    ⚠⚠ 这个工具**一个字都不会写进词典**。采纳要用 cacx_newwords_adopt，
+      而且那个还得再经你本人确认。理由：AI 只是概率，
+      而用户词典会**持续污染**之后所有检索与统计，误判不可撤销。
+
+    参数：
+        words:      要评审的候选词（只传词名也能用，但带上 candidates
+                    的统计指标更准 —— 模型能看到凝固度和邻字自由度）
+        candidates: 可选，形如 discover 返回的 items（可直接整份传回）
+        run:        False=只预览 prompt（不花钱），True=真调模型
+        batch:      每次请求装多少个候选，省配额用
+
+    返回：{dry_run, decisions:{词:{verdict:keep|drop|unsure, reason}},
+          stats:{candidates,judged,keep,drop,unsure,missing,errors[]}}
+    """
+    from .ai.tasks import review_new_words
+    try:
+        cands = [c for c in (candidates or [])
+                 if (c.get("word") or "").strip()]
+        if not cands:
+            cands = [{"word": w} for w in (words or []) if str(w).strip()]
+        if not cands:
+            return {"error": "没给候选词"}
+        return review_new_words(_get_cfg(), cands, dry_run=not run,
+                                batch=batch)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def cacx_newwords_adopt(
+    words: List[str],
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """
+    把词写进 jieba 用户词典（**写操作**，默认只预览）。
+
+    ⚠ 为什么要 confirm 这道闸：词典是**累积资产**，写进去之后
+      所有检索、词频统计、实体抽取都会按它切分。一次误写不会报错，
+      但会持续污染结果，而且很难被发现是「词典里多了个词」导致的。
+      所以先 dry_run 看清楚要写什么，confirm=true 才真的落盘。
+
+    ⚠ 落盘是**追加**不覆盖：文件里可能有手工加过的词，不能被冲掉。
+    ⚠ 写完立刻对当前进程生效，重启后仍在（启动时会自动加载）。
+
+    参数：
+        words:  要写入的词
+        confirm: True 才真的写；False 只返回将要写入的内容
+
+    返回（dry_run）：{dry_run:true, will_write:[…], current_total:N}
+    返回（已执行）：{added:N, total:M, path:…}
+    """
+    try:
+        from . import newwords as NW
+        from . import textseg as TS
+        ws = [str(w).strip() for w in (words or []) if str(w).strip()]
+        if not ws:
+            return {"error": "没给要采纳的词"}
+        path = _userdict_path()
+        cur = NW.read_userdict(path)
+        new = [w for w in ws if w not in cur]
+        if not confirm:
+            return {"dry_run": True, "will_write": new,
+                    "already_in_dict": [w for w in ws if w in cur],
+                    "current_total": len(cur),
+                    "next_step": "确认无误后把同样的 words 传回来并设 confirm=true。"}
+        added = NW.write_userdict(path, new)
+        for w in new:
+            TS.add_word(w)
+        return {"added": added, "total": len(NW.read_userdict(path)),
+                "path": path, "applied_now": True}
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def cacx_list_userdict() -> Dict[str, Any]:
+    """
+    列出已回流进分词词典的词（**只读**）。
+
+    返回：{words:[…], count:N, path:…}
+    """
+    try:
+        from . import newwords as NW
+        p = _userdict_path()
+        ws = NW.read_userdict(p)
+        return {"words": ws, "count": len(ws), "path": p}
+    except Exception as e:
+        return _err(e)
+
+
 # ============================================== 4. 删除（不可逆，排最后）
 @mcp.tool()
 def cacx_purge(
