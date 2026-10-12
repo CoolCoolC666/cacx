@@ -26,6 +26,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from . import textseg
+
 SCHEMA_VERSION = 1
 
 SCHEMA = """
@@ -160,6 +162,42 @@ CREATE TABLE IF NOT EXISTS ai_failures (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_fail_retryable ON ai_failures(retryable, created_at);
 """
+
+
+def _split_query(q: str) -> List[str]:
+    """按显式分隔符切词（用户自己打了空格/逗号的场景）"""
+    return [t for t in re.split(r'[\s,，、;；]+', (q or "").strip()) if t]
+
+
+def _tokenize_for_search(q: str, tokenize: bool) -> List[str]:
+    """
+    查询切词：先按显式分隔符切，tokenize=True 时再把每个长串交给 jieba。
+
+    ⚠ 为什么不做成「方法」：`_fts_quote` 是 @staticmethod，
+    在里面写 `Self._xxx` / `DB._xxx` 都会在运行时炸（类名一改就崩），
+    而且这里的逻辑本来就不依赖实例状态。
+    """
+    toks = _split_query(q)
+    if not tokenize or not toks:
+        return toks
+    out: List[str] = []
+    for t in toks:
+        # 用户显式分隔出的词是「一个完整意图」，别再切碎
+        if len(t) >= 2 and not _PUNCT_ONLY.search(t):
+            sub = textseg.tokenize_query(t) or [t]
+        else:
+            sub = [t]
+        out.extend(sub)
+    # 去重但保序：重复词在 OR 里没意义，在 AND 里会把结果清空
+    seen, uniq = set(), []
+    for t in out:
+        if t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return uniq
+
+
+_PUNCT_ONLY = re.compile(r'^[\s,，、;；]+$')
 
 
 class Database:
@@ -517,10 +555,24 @@ class Database:
 
     # ---------------------------------------------------------- 检索
     @staticmethod
-    def _fts_quote(q: str) -> str:
-        """把用户输入转成安全的 FTS5 查询串（多词 AND）"""
-        toks = [t for t in re.split(r'[\s,，、;；]+', q.strip()) if t]
-        return " AND ".join('"' + t.replace('"', '""') + '"' for t in toks)
+    def _fts_quote(q: str, tokenize: bool = False,
+                   op: str = "AND") -> str:
+        """
+        把用户输入转成安全的 FTS5 查询串。
+
+        tokenize=False（默认）：按显式分隔符切，词间 AND —— 保持既有行为。
+        tokenize=True：中文按 jieba 切词后 OR。
+            为什么需要这条：中文没有空格，FTS5 默认把整串当一个词，
+            「清朗网络谣言」整串进去基本搜不到。切成 词组 后 OR 召回完全不同。
+            但**不能默认开**：OR 会把结果集放大好几倍，
+            精确查「中央网信办 专项行动」时反而捞出无关文章。
+            所以做成显式开关，由调用方（AI / 前端「智能分词」勾选）决定。
+        """
+        toks = _tokenize_for_search(q, tokenize)
+        if not toks:
+            return ""
+        joiner = " OR " if op.upper() == "OR" else " AND "
+        return joiner.join('"' + t.replace('"', '""') + '"' for t in toks)
 
     def search(self,
                q: str = "",
@@ -536,7 +588,9 @@ class Database:
                limit: int = 20,
                offset: int = 0,
                min_fts_chars: int = 3,
-               only_empty: bool = False) -> Dict[str, Any]:
+               only_empty: bool = False,
+               tokenize: bool = False,
+               op: str = "AND") -> Dict[str, Any]:
         """
         组合检索。
         返回 {total, items, mode, took_ms}
@@ -563,12 +617,13 @@ class Database:
             return self._search_locked(
                 q, site, column_code, column_name, year, date_from, date_to,
                 min_chars, skip_empty, sort, limit, offset, min_fts_chars,
-                only_empty)
+                only_empty, tokenize, op)
 
     def _search_locked(self, q, site, column_code, column_name, year,
                        date_from, date_to, min_chars, skip_empty, sort,
                        limit, offset, min_fts_chars,
-                       only_empty=False) -> Dict[str, Any]:
+                       only_empty=False, tokenize=False,
+                       op="AND") -> Dict[str, Any]:
         t0 = time.time()
         where, args = [], []
 
@@ -602,7 +657,9 @@ class Database:
         if q:
             # 逐词判断长度：只要有任一词短于阈值，就整体退回 LIKE，
             # 避免 "清朗 专项行动" 这种组合词半边走索引半边走扫描导致漏结果
-            toks = [t for t in re.split(r'[\s,，、;；]+', q) if t]
+            toks = _tokenize_for_search(q, tokenize)
+            if not toks:
+                toks = [q]
             use_fts = all(len(t) >= min_fts_chars for t in toks)
             if only_empty:
                 # 占位条目没有正文 → 不在 FTS 索引里，走 FTS 必然 0 结果。
@@ -612,17 +669,30 @@ class Database:
             if use_fts:
                 join = ("JOIN articles_fts f ON f.rowid = a.id "
                         "AND articles_fts MATCH ?")
-                args.insert(0, self._fts_quote(q))
+                args.insert(0, self._fts_quote(q, tokenize, op))
                 mode = "fts"
             else:
                 mode = "like"
+                clauses, cargs = [], []
                 for t in toks:
+                    like = f"%{t}%"
                     if only_empty:
-                        where.append("a.title LIKE ?")
-                        args.append(f"%{t}%")
+                        clauses.append("a.title LIKE ?")
+                        cargs.append(like)
                     else:
-                        where.append("(a.title LIKE ? OR a.content_text LIKE ?)")
-                        args += [f"%{t}%", f"%{t}%"]
+                        clauses.append("(a.title LIKE ? OR a.content_text LIKE ?)")
+                        cargs += [like, like]
+                if not clauses:
+                    pass
+                elif op.upper() == "OR":
+                    # ⚠ 分词 OR 时**不能**每个词各加一条 WHERE ——
+                    #    多条 WHERE 是 AND，OR 语义就没了，结果反而更少。
+                    #    必须合成一条 (... OR ...)。
+                    where.append("(" + " OR ".join(clauses) + ")")
+                    args += cargs
+                else:
+                    where += clauses
+                    args += cargs
 
         if sort == "date_asc":
             order = "a.pub_day ASC, a.id ASC"
