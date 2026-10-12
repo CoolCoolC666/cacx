@@ -121,5 +121,37 @@ class TestSearchTokenize(unittest.TestCase):
         self.assertIn("mode", r)
 
 
+class TestSnippet(unittest.TestCase):
+    """高亮词必须与真正用于匹配的词一致"""
+
+    def setUp(self):
+        self.db, self.tmp = _mk(ROWS)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_不分词时用整串高亮(self):
+        items = self.db.search(q="清朗网络谣言专项行动", limit=5)["items"]
+        self.db.annotate_snippets(items, "清朗网络谣言专项行动")
+        self.assertTrue(items[0]["highlights"], items[0])
+
+    def test_分词时高亮用切出的词(self):
+        """⚠ 回归：用整串去高亮会一个都标不出来，列表页像坏了"""
+        q = "清朗网络谣言专项行动"
+        items = self.db.search(q=q, tokenize=True, op="OR", limit=5)["items"]
+        self.db.annotate_snippets(items, q, tokenize=True)
+        self.assertTrue(items[0]["highlights"],
+                        f"分词检索却没高亮：{items[0].get('snippet')!r}")
+        for h in items[0]["highlights"]:
+            self.assertIn(h, q, h)
+
+    def test_空查询不炸(self):
+        items = self.db.search(limit=3)["items"]
+        self.db.annotate_snippets(items, "")
+        for it in items:
+            self.assertEqual(it["snippet"], "")
+            self.assertEqual(it["highlights"], [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

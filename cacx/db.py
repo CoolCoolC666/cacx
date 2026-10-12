@@ -820,9 +820,17 @@ class Database:
         return ("…" if start > 0 else "") + frag + ("…" if end < len(text) else "")
 
     def annotate_snippets(self, items: List[dict], q: str,
-                          width: int = 90) -> List[dict]:
-        """给 search 结果就地补 snippet + highlights（不改 DB，不影响 CLI）"""
-        terms = [t for t in re.split(r'[\s,，、;；]+', q or "") if t]
+                          width: int = 90,
+                          tokenize: bool = False) -> List[dict]:
+        """
+        给 search 结果就地补 snippet + highlights（不改 DB，不影响 CLI）
+
+        ⚠ tokenize 必须与 search() 传的一致：高亮词要跟**真正用于匹配的词**
+        相同。分词检索时命中的是「清朗」「网络谣言」，
+        这里若还拿整串「清朗网络谣言」去找，一个都找不到 ——
+        列表页会显示「无高亮」，用户以为功能坏了。
+        """
+        terms = _tokenize_for_search(q, tokenize)
         if not terms:
             for it in items:
                 it["snippet"] = ""

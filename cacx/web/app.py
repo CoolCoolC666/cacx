@@ -44,7 +44,7 @@ from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import (FileResponse, HTMLResponse, RedirectResponse,
                                Response)
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import config as C
 from .. import db as D
@@ -98,6 +98,8 @@ def api_search(
     skip_empty: bool = True,
     only_empty: bool = False,
     sort: str = "date_desc",
+    tokenize: bool = False,
+    op: str = "AND",
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
 ):
@@ -112,6 +114,7 @@ def api_search(
         skip_empty=(False if only_empty else skip_empty),
         only_empty=only_empty,
         sort=sort,
+        tokenize=tokenize, op=op,
         limit=size, offset=(page - 1) * size,
         min_fts_chars=cfg["search"]["min_fts_chars"])
     r["page"] = page
@@ -120,7 +123,9 @@ def api_search(
     r["page_size_default"] = page_size
     # 命中片段 + 命中词，供列表高亮。埋点只记检索词，不记完整筛选条件
     # ——详情和 IP 这类信息没必要为了统计而留在库里。
-    d.annotate_snippets(r["items"], q)
+    # ⚠ 高亮必须用「实际用于匹配的词」，不是原查询串：
+    #   分词后命中的是「清朗」「网络谣言」，拿整串去高亮会一个都标不出来。
+    d.annotate_snippets(r["items"], q, tokenize=tokenize)
     d.record_event("search", detail=q or "(浏览)")
     return r
 
@@ -669,6 +674,115 @@ def api_sample_years(site: str = "", column: str = "",
     """某栏目逐年篇数 —— 抽样依据 + 时间轴底稿"""
     return {"site": site, "column": column,
             "years": _db().column_years(site, column, date_from, date_to)}
+
+
+@app.get("/api/sample/export")
+def api_sample_export(site: str = "", column: str = "",
+                      date_from: str = "2024-01-01",
+                      date_to: str = "2099-12-31",
+                      limit: int = Query(500, ge=1, le=5000),
+                      strategy: str = "stratified"):
+    """
+    把样本导成 CSV（utf-8-sig，Excel 直接双击不乱码）。
+
+    ⚠ 走服务端而不是前端拼：界面显示的篇数与导出的行数必须来自
+      **同一次抽样**。前端拼的话，用户改一下篇数上限再下载，
+      两边数字就对不上 —— 这种错最难发现。
+    """
+    r = _db().sample_articles(site=site, column=column,
+                              date_from=date_from, date_to=date_to,
+                              limit=limit, strategy=strategy)
+    cols = ["article_id", "pub_day", "site", "column_name", "title", "url"]
+
+    def _cell(v):
+        return '"%s"' % str("" if v is None else v).replace('"', '""')
+
+    lines = [",".join(cols)]
+    for it in r["items"]:
+        lines.append(",".join(_cell(it.get(c)) for c in cols))
+    # 页脚注明抽样口径：CSV 脱离了界面后，参数必须写在文件里
+    lines.append("")
+    lines.append(_cell("# 样本口径：栏目=%s 区间=%s~%s 篇数上限=%d 策略=%s" % (
+        r["column"] or "全部", r["date_from"], r["date_to"],
+        r["limit"], r["strategy"])))
+    lines.append(_cell("# 实际取到 %d 篇，有正文 %d 篇，逐年 %s" % (
+        r["n"], r["n_usable"],
+        " ".join("%s=%d" % kv for kv in sorted(r["years_taken"].items())))))
+    body = "\r\n".join(lines).encode("utf-8-sig")
+    fn = "cacx-样本_%s_%s_%s.csv" % (
+        (column or "全部栏目").replace("/", "_"),
+        r["date_min"] or date_from, r["date_max"] or date_to)
+    # RFC5987：中文文件名要 URI 编码，否则部分浏览器会存成乱码名
+    q = quote(fn, safe="")
+    return Response(body, media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition":
+            "attachment; filename=sample.csv; filename*=UTF-8''%s" % q})
+
+
+# ---------------------------------------------------------------- 实体 / 关系
+# 写入走 POST（AI 通过 MCP 直接写库时不需要这些，但网页端要能人工补录/纠错）。
+class EntityIn(BaseModel):
+    name: str
+    type: str
+    article_id: int
+    evidence: str = ""
+    aliases: List[str] = Field(default_factory=list)
+    extractor: str = "human"
+    confidence: float = 0.0
+
+
+class RelationIn(BaseModel):
+    src_name: str
+    dst_name: str
+    rel_type: str
+    article_id: int
+    evidence: str = ""
+    weight: float = 1.0
+    extractor: str = "human"
+
+
+@app.get("/api/graph")
+def api_graph(limit: int = Query(300, ge=1, le=2000)):
+    """
+    关系图谱：{nodes, edges}。
+    edges 带 article_ids —— 前端「点一条关系回溯原文」直接用它。
+    """
+    return _db().graph(limit)
+
+
+@app.get("/api/graph/stats")
+def api_graph_stats():
+    """图谱概览。no_evidence 是答辩风险指标：没有原文证据的关系越多越危险"""
+    return _db().graph_stats()
+
+
+@app.get("/api/entities")
+def api_entities(type: str = "", q: str = "",
+                 article_id: Optional[int] = None,
+                 limit: int = Query(200, ge=1, le=2000)):
+    return {"items": _db().list_entities(type=type, q=q,
+                                         article_id=article_id, limit=limit)}
+
+
+@app.get("/api/relations")
+def api_relations(name: str = "", rel_type: str = "",
+                  article_id: Optional[int] = None,
+                  limit: int = Query(200, ge=1, le=2000)):
+    """name 非空时返回与该实体相连的关系（含入边出边）"""
+    return {"items": _db().list_relations(name=name, rel_type=rel_type,
+                                          article_id=article_id, limit=limit)}
+
+
+@app.post("/api/entities")
+def api_put_entities(rows: List[EntityIn]):
+    """人工补录/纠错实体（AI 走 MCP 的 cacx_put_entities）"""
+    return _db().upsert_entities([r.model_dump() for r in rows])
+
+
+@app.post("/api/relations")
+def api_put_relations(rows: List[RelationIn]):
+    """人工补录/纠错关系"""
+    return _db().upsert_relations([r.model_dump() for r in rows])
 
 
 # ---------------------------------------------------------------- AI

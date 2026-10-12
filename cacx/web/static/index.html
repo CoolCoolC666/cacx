@@ -177,6 +177,8 @@
   <div class="grow"></div>
   <button class="btn on" id="tab_search" onclick="showTab('search')">检索</button>
   <button class="btn" id="tab_panel" onclick="showTab('panel')">数据面板</button>
+  <button class="btn" id="tab_sample" onclick="showTab('sample')">样本配置器</button>
+  <button class="btn" id="tab_graph" onclick="showTab('graph')">关系图谱</button>
   <button class="btn" id="tab_set" onclick="showTab('set')">⚙ 设置</button>
   <button class="btn" id="tab_ai" onclick="showTab('ai')">✦ AI 摘要 <span
     id="ai_badge" style="color:var(--dim)"></span></button>
@@ -229,6 +231,79 @@
     </div>
     <div class="list" id="list"></div>
     <div class="pager" id="pager"></div>
+  </section>
+
+  <!-- ============ 样本配置器 ============ -->
+  <section id="v_sample" style="display:none">
+    <div class="box" style="margin-bottom:12px;padding:12px 14px">
+      <div style="font-size:12.5px;color:var(--dim);line-height:1.7;margin-bottom:10px">
+        <span style="color:#c98">抽样默认按年份分层</span>，保证区间内每年都有篇数；
+        若选「最近 N 篇」，取最近 500 篇会只覆盖 2025-03 之后，<b>2024 整年丢失</b>。
+      </div>
+      <div class="row" style="gap:12px;flex-wrap:wrap">
+        <label style="font-size:12.5px">站点
+          <select id="sp_site" onchange="loadSampleOptions()">
+            <option value="">全部站点</option></select></label>
+        <label style="font-size:12.5px">栏目
+          <select id="sp_column" onchange="loadSampleOptions()"></select></label>
+        <label style="font-size:12.5px">起
+          <input type="date" id="sp_from" value="2024-01-01"></label>
+        <label style="font-size:12.5px">止
+          <input type="date" id="sp_to" value="2099-12-31"></label>
+        <label style="font-size:12.5px">篇数上限
+          <input type="number" id="sp_limit" value="500" min="1" max="5000"
+                 style="width:78px"></label>
+        <label style="font-size:12.5px">抽样
+          <select id="sp_strategy">
+            <option value="stratified">按年份分层（推荐）</option>
+            <option value="recent">最近 N 篇</option>
+          </select></label>
+        <button class="btn" style="padding:5px 14px" onclick="runSample()">生成样本</button>
+        <button class="btn" style="padding:5px 12px" onclick="dlSampleCsv()">⬇ 样本 CSV</button>
+      </div>
+    </div>
+    <div class="box" id="sp_result" style="display:none">
+      <h3>样本概览</h3>
+      <div id="sp_summary"></div>
+      <h3>逐年分布（抽样质量自检）
+        <button class="btn" style="padding:1px 7px;font-size:11px"
+          onclick="dlBarsPng('sp_bars','样本逐年分布')"
+          title="下载这张图为 PNG，可直接贴进报告">⬇ 图</button>
+      </h3>
+      <div class="bars" id="sp_bars"></div>
+      <h3>样本文章</h3>
+      <div id="sp_list" style="max-height:420px;overflow:auto"></div>
+    </div>
+  </section>
+
+  <!-- ============ 关系图谱 ============ -->
+  <section id="v_graph" style="display:none">
+    <div class="box" style="margin-bottom:12px;padding:12px 14px">
+      <div class="row" style="gap:12px;flex-wrap:wrap">
+        <b style="font-size:13px">关系图谱</b>
+        <span style="font-size:12.5px;color:var(--dim)" id="gp_stat"></span>
+        <div class="grow"></div>
+        <label style="font-size:12.5px">关系类型
+          <select id="gp_rel" onchange="loadGraph()"><option value="">全部</option></select></label>
+        <button class="btn" style="padding:5px 12px" onclick="loadGraph()">刷新</button>
+      </div>
+      <div style="font-size:12px;color:var(--dim);margin-top:8px;line-height:1.7">
+        实体与关系由 AI 通过 MCP 写入（<code>cacx_put_entities</code> /
+        <code>cacx_put_relations</code>），每条都带原文出处。<br>
+        <b>演示动作</b>：点下方任一条关系 → 右侧列出支撑它的原文，点标题跳回原文页。
+      </div>
+    </div>
+    <div class="row" style="align-items:flex-start;gap:12px">
+      <div class="box" style="flex:2;min-width:0">
+        <h3>边（共现强度）<span id="gp_cnt" style="font-weight:400;color:var(--dim);font-size:12px"></span></h3>
+        <div id="gp_edges" style="max-height:600px;overflow:auto"></div>
+      </div>
+      <div class="box" style="flex:1;min-width:260px">
+        <h3 id="gp_detail_title">关系详情</h3>
+        <div id="gp_detail" style="font-size:12.5px;color:var(--dim)">
+          点左边任意一条关系</div>
+      </div>
+    </div>
   </section>
 
   <!-- ============ 数据面板 ============ -->
@@ -796,7 +871,7 @@ async function onSiteChange(){
 async function loadColumns(){
   const site=$('site').value;
   const f=await (await fetch('/api/facets'+(site?'?site='+encodeURIComponent(site):''))).json();
-  COLUMN_OPTIONS=f.columns.map(c=>{
+  COLUMN_OPTIONS=(f.columns||[]).map(c=>{
     const tag=c.site==='cac'?'国':(c.site==='zjwx'?'浙':c.site.slice(0,2));
     return {name:c.column_name, label:`${c.column_name} (${c.n})`, tag, n:c.n};
   });
@@ -825,13 +900,17 @@ async function loadFacets(){
     // 混成一个「28999 篇」会让读者以为语料是完整的，实际缺了 f.empty 条。
     `<span style="color:#c9a" title="列表抓到、正文未入库的文章">${f.empty} 占位</span> · `+
     `${f.external} 条站外`;
-  for(const s of f.sites){
+  // ⚠ 后端字段可能缺失（老库 / 端点报错返回了别的结构）。
+  //   for...of 一个 undefined 会抛 TypeError，Promise 没人 catch →
+  //   整个页面初始化静默失败，界面停在「加载中…」，看起来像服务挂了。
+  //   所以每个数组都要兜底。
+  for(const s of (f.sites||[])){
     const o=document.createElement('option');
     o.value=s.site; o.textContent=`${s.site_name||s.site} (${s.n})`;
     $('site').appendChild(o);
   }
   await loadColumns();
-  for(const y of f.years){
+  for(const y of (f.years||[])){
     const o=document.createElement('option');
     o.value=y.year; o.textContent=`${y.year} (${y.n})`;
     $('year').appendChild(o);
@@ -842,11 +921,14 @@ async function go(page){
   PAGE=page;
   const p=params(); p.set('page',page);
   const r=await (await fetch('/api/search?'+p)).json();
-  CURRENT=r; TOTAL=r.total; PAGES=r.pages;
+  // ⚠ 兜底而非信任：端点返回结构不同（老库 / 出错）时，
+  //   r.total.toLocaleString() 会抛 TypeError，Promise 无人 catch，
+  //   检索页就静默停在旧结果上 —— 用户看不出是筛选没生效还是崩了。
+  CURRENT=r; TOTAL=(r.total||0); PAGES=(r.pages||0);
   const pill = r.mode==='fts' ? '<span class="pill" style="color:var(--ok)">FTS5 索引</span>'
               : r.mode==='like' ? '<span class="pill" style="color:var(--warn)">LIKE 扫描（词过短）</span>'
               : '<span class="pill">浏览</span>';
-  $('meta').innerHTML=`命中 <b class="n">${r.total.toLocaleString()}</b> 条 · ${pill} · ${r.took_ms}ms`;
+  $('meta').innerHTML=`命中 <b class="n">${(r.total||0).toLocaleString()}</b> 条 · ${pill} · ${r.took_ms||0}ms`;
   const isPh = !!r.only_empty;
   // 占位视图的说明条：把「不含什么」写清楚。
   // 用户特意提过不能被导航一类的失败干扰 —— 所以要显式说明
@@ -861,12 +943,13 @@ async function go(page){
   } else { note.style.display='none'; }
 
   const L=$('list');
-  if(!r.items.length){
+  const hits = r.items||[];
+  if(!hits.length){
     L.innerHTML= isPh
       ? '<div class="empty">没有正文未入库的条目。换个词，或切回普通检索。</div>'
       : '<div class="empty">没有命中。换个词，或放宽筛选条件。</div>';
   } else {
-    L.innerHTML=r.items.map(it=>{
+    L.innerHTML=hits.map(it=>{
       const snip = it.snippet
         ? `<div class="s">${mark(it.snippet, it.highlights)}</div>` : '';
       if(it.content_empty){
@@ -982,13 +1065,14 @@ async function loadFailures(){
     // 清空按钮的可用性跟着实时数字走，不跟着历史记录走
     $('bg_clear_stale').disabled = !(st.stale>0);
     $('bg_clear_all').disabled   = !(st.total_rows>0);
-    if(!r.items.length && !(st.stale>0)){
+    const fitems = r.items||[];
+  if(!fitems.length && !(st.stale>0)){
       box.style.display='none'; BG_RETRY_IDS=[]; return;
     }
     box.style.display='block';
     // 按钮只留「真能自动补跑」的；内容审查那类点了也是白烧额度，
     // 提示语里说清「要去人工补录」。
-    const auto=r.items.filter(x=>FAIL_KIND[x.kind]?.ok);
+    const auto=fitems.filter(x=>FAIL_KIND[x.kind]?.ok);
     BG_RETRY_IDS=auto.map(x=>x.article_id);
     const btn=$('bg_retry');
     btn.disabled = auto.length===0;
@@ -1008,7 +1092,7 @@ async function loadFailures(){
       + `　·　历史记账共 ${st.total_rows||0} 条`
       + (st.stale?`　·　其中 <b style="color:var(--ok)">${st.stale}</b> 条已经补上摘要（不显示在下面）`:'');
 
-    $('bg_fail_list').innerHTML = r.items.map(x=>{
+    $('bg_fail_list').innerHTML = (r.items||[]).map(x=>{
       const k=FAIL_KIND[x.kind]||FAIL_KIND.other;
       const aid=x.article_id;
       const man = (k.ok===0 && x.kind==='content_blocked')
@@ -1196,15 +1280,202 @@ function reset(){
   go(1);
 }
 
-function showTab(t){
-  const map={search:'v_search',panel:'v_panel',set:'v_set',ai:'v_ai',sync:'v_sync'};
-  for(const k in map) $(map[k]).style.display = (k===t)?'block':'none';
-  for(const k of ['tab_search','tab_panel','tab_set','tab_ai','tab_sync']){
-    $(k).className='btn'+(k==='tab_'+t?' on':'');
+/* ---------------- 样本配置器 ---------------- */
+let SP_OPTS = [], SP_LAST = null;
+
+function spQs(){
+  const q = new URLSearchParams();
+  const site = $('sp_site').value, col = $('sp_column').value;
+  if(site) q.set('site', site);
+  if(col)  q.set('column', col);
+  q.set('date_from', $('sp_from').value || '2024-01-01');
+  q.set('date_to',   $('sp_to').value   || '2099-12-31');
+  q.set('limit', $('sp_limit').value || 500);
+  q.set('strategy', $('sp_strategy').value || 'stratified');
+  return q;
+}
+
+async function loadSampleOptions(){
+  const q = new URLSearchParams();
+  q.set('date_from', $('sp_from').value || '2024-01-01');
+  q.set('date_to',   $('sp_to').value   || '2099-12-31');
+  const r = await fetch('/api/sample/options?' + q).then(x=>x.json());
+  // 后端返回键是 columns（不是 items）—— 前端写错会让下拉全空
+  SP_OPTS = r.columns || [];
+  // 站点下拉：从栏目候选里去重
+  const sites = [...new Set(SP_OPTS.map(o=>o.site).filter(Boolean))];
+  const curSite = $('sp_site').value;
+  $('sp_site').innerHTML = '<option value="">全部站点</option>' +
+    sites.map(s=>{
+      const nm = (SP_OPTS.find(o=>o.site===s)||{}).site_name || s;
+      return `<option value="${esc(s)}">${esc(nm)}</option>`;
+    }).join('');
+  $('sp_site').value = sites.includes(curSite) ? curSite : '';
+  // 栏目下拉：随站点过滤
+  const cur = $('sp_column').value;
+  const cols = SP_OPTS.filter(o => !$('sp_site').value || o.site===$('sp_site').value);
+  $('sp_column').innerHTML = '<option value="">全部栏目</option>' +
+    cols.map(o=>{
+      const label = (o.site ? o.site + ' · ' : '') + o.column_name +
+                    `（${o.n} 篇 / ${o.years} 年）`;
+      return `<option value="${esc(o.column_name)}">${esc(label)}</option>`;
+    }).join('');
+  if(cols.some(o=>o.column_name===cur)) $('sp_column').value = cur;
+}
+
+async function runSample(){
+  $('sp_result').style.display='block';
+  $('sp_summary').innerHTML = '<div class="dim">抽样中…</div>';
+  // ⚠ with_items=1 必须带上：后端默认只回 items_sample（前 20 条预览），
+  //   完整清单在 items_total。不带的话 r.items 是 undefined，
+  //   列表一片空白且没有任何提示 —— 很难一眼看出是参数没传。
+  const q = spQs(); q.set('with_items','1');
+  const r = await fetch('/api/sample?' + q).then(x=>x.json());
+  if(r.error || r.message){ $('sp_summary').innerHTML =
+    '<div class="err">'+esc(r.message||r.error)+'</div>'; return; }
+  SP_LAST = r;
+
+  const all = r.items || r.items_sample || [];
+
+  const taken = r.years_taken || {};
+  const yrs = Object.keys(taken).sort();
+  // 逐年分布：这是「抽样质量自检」，最该让人一眼看到。
+  // 复用 drawBars —— 它会顺手把数据存进 PN_CACHE，于是这张图
+  // 也能用现成的「⬇ 图」按钮导出 PNG，不用另写一套。
+  // drawBars 认的字段是 k（不是 label）—— 传错字段会在 r.k.length 上抛
+  // TypeError，整张图连同上面的概览一起渲染失败
+  drawBars($('sp_bars'), yrs.map(y=>({k:y, n:taken[y]})));
+
+  const warn = [];
+  if(r.strategy === 'recent' && yrs.length < 2)
+    warn.push('⚠ 「最近 N 篇」只覆盖 '+yrs.length+' 个年份，'
+      +'「发文量与主题随时间的变化」这条要求会作废');
+  if(yrs.length && Number(yrs[0]) > 2024)
+    warn.push('⚠ 样本最早年份是 '+yrs[0]+'，2024 年没有被覆盖');
+  if(r.n_usable < r.n)
+    warn.push(`⚠ ${r.n - r.n_usable} 篇是空正文占位，分析时应剔除`);
+
+  $('sp_summary').innerHTML = `
+    <div class="row" style="gap:18px;flex-wrap:wrap;margin-bottom:8px">
+      <span>取到 <b>${r.n}</b> 篇（上限 ${r.limit}）</span>
+      <span>池中共 <b>${r.total_pool}</b> 篇</span>
+      <span>有正文 <b>${r.n_usable}</b> 篇</span>
+      <span>区间 ${esc(r.date_min)} ~ ${esc(r.date_max)}</span>
+      <span>策略 ${r.strategy==='stratified'?'按年份分层':'最近 N 篇'}</span>
+    </div>` +
+    (warn.length ? warn.map(w=>`<div class="err" style="margin-top:4px">${esc(w)}</div>`).join('')
+                 : '<div class="dim" style="margin-top:4px">✓ 抽样覆盖了区间内的全部年份</div>');
+
+  const items = all.slice(0, 300);
+  $('sp_list').innerHTML = items.map(it=>`
+    <div class="row" style="padding:4px 0;border-bottom:1px solid var(--line)">
+      <span style="color:var(--dim);width:92px;flex:none">${esc(it.pub_day)}</span>
+      <a href="#" class="ln" onclick="detail(${it.id});return false;"
+         style="flex:1;min-width:0">${esc(it.title)}</a>
+      <span style="color:var(--dim);flex:none">${esc(it.column_name||'')}</span>
+    </div>`).join('') +
+    (items.length < all.length
+      ? `<div class="dim" style="padding:6px 0">仅显示前 ${items.length} 条，`
+        + `共 ${all.length} 条（完整清单请下载 CSV）</div>` : '');
+}
+
+function dlSampleCsv(){
+  // ⚠ 走服务端端点而不是前端拼 CSV：界面显示的篇数与导出的行数
+  //   必须来自同一次抽样。前端拼的话，用户改一下篇数上限再下载，
+  //   两边数字就对不上 —— 这种错最难发现。
+  const q=spQs();
+  q.delete('strategy'); q.set('strategy', $('sp_strategy').value||'stratified');
+  const a=document.createElement('a');
+  a.href='/api/sample/export?'+q.toString();
+  a.download='';
+  document.body.appendChild(a); a.click(); a.remove();
+  toast('已开始下载（CSV，含抽样口径页脚，可直接进 Excel）');
+}
+
+/* ---------------- 关系图谱 ---------------- */
+let GP_CACHE = [];
+
+async function loadGraph(){
+  const st = await fetch('/api/graph/stats').then(x=>x.json()).catch(()=>null);
+  $('gp_stat').innerHTML = st ? (
+    `实体 <b>${st.entity_total}</b>（机构 ${st.entity_orgs}）· `+
+    `关系 <b>${st.relation_total}</b> 条 / ${st.rel_pairs} 对 · `+
+    `无原文证据 <b style="color:${st.no_evidence?'#c98':'var(--dim)'}">${st.no_evidence}</b>`
+  ) : '';
+
+  const rel = $('gp_rel').value;
+  const g = await fetch('/api/graph?limit=500').then(x=>x.json());
+  GP_CACHE = g.edges || [];
+  const types = [...new Set(GP_CACHE.map(e=>e.rel_type))];
+  const cur = $('gp_rel').value;
+  $('gp_rel').innerHTML = '<option value="">全部</option>' +
+    types.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('');
+  $('gp_rel').value = types.includes(cur) ? cur : '';
+
+  const edges = rel ? GP_CACHE.filter(e=>e.rel_type===rel) : GP_CACHE;
+  $('gp_cnt').textContent = `（${edges.length} 条）`;
+  if(!edges.length){
+    $('gp_edges').innerHTML =
+      '<div class="dim">还没有关系数据。实体与关系由 AI 通过 MCP 写入，'
+      +'或用下面的提示词让组员的智能体来填。</div>';
+    return;
   }
+  $('gp_edges').innerHTML = edges.map((e,i)=>{
+    const nid = (e.article_ids||[]).length;
+    return `<div class="row" style="padding:6px 8px;border-bottom:1px solid var(--line);
+      cursor:pointer" ondblclick="gpDetail(${i})">
+      <span style="flex:1;min-width:0">${esc(e.src_name)}
+        <span style="color:var(--dim)">→</span> ${esc(e.dst_name)}</span>
+      <span style="color:var(--dim);flex:none;font-size:11.5px">${esc(e.rel_type)}</span>
+      <b style="flex:none;font-size:12px" title="出现在 ${nid} 篇文章里">${e.n}</b>
+      <button class="btn" style="padding:1px 8px;font-size:11px;flex:none"
+        onclick="gpDetail(${i})">回溯原文 ${nid}</button>
+    </div>`;
+  }).join('');
+}
+
+function gpDetail(i){
+  const e = GP_CACHE[i];
+  if(!e) return;
+  const rel = $('gp_rel').value;
+  const list = rel ? GP_CACHE.filter(x=>x.rel_type===rel) : GP_CACHE;
+  const idx = list.indexOf(e);
+  $('gp_detail_title').innerHTML =
+    `${esc(e.src_name)} → ${esc(e.dst_name)}`;
+  $('gp_detail').innerHTML =
+    `<div class="dim" style="margin-bottom:8px">关系类型 ${esc(e.rel_type)} ·
+      共现于 ${e.n} 篇文章 · 权重 ${e.weight}</div>
+     <div id="gp_ev" style="max-height:420px;overflow:auto"></div>`;
+  const ids = e.article_ids || [];
+  fetch('/api/relations?limit=500').then(x=>x.json()).then(r=>{
+    const rows = (r.items||[]).filter(x=>
+      (x.src_name===e.src_name && x.dst_name===e.dst_name && x.rel_type===e.rel_type)
+      || (x.src_name===e.dst_name && x.dst_name===e.src_name && x.rel_type===e.rel_type));
+    const box = $('gp_ev');
+    if(!rows.length){ box.innerHTML='<div class="dim">没有证据记录</div>'; return; }
+    box.innerHTML = rows.map(x=>`
+      <div style="padding:5px 0;border-bottom:1px solid var(--line)">
+        <a href="#" onclick="detail(${x.article_id});return false;"
+           class="ln">${esc(x.article_title||('文章 '+x.article_id))}</a>
+        <div class="dim" style="font-size:11.5px">${esc(x.pub_day||'')}</div>
+        ${x.evidence?`<div style="font-size:11.5px;color:var(--dim);margin-top:2px">
+          「${esc(x.evidence.slice(0,120))}」</div>`:''}
+      </div>`).join('');
+  });
+}
+
+function showTab(t){
+  const map={search:'v_search',panel:'v_panel',sample:'v_sample',graph:'v_graph',
+             set:'v_set',ai:'v_ai',sync:'v_sync'};
+  for(const k in map) $(map[k]).style.display = (k===t)?'block':'none';
+  const tabs=['tab_search','tab_panel','tab_sample','tab_graph',
+             'tab_set','tab_ai','tab_sync'];
+  for(const k of tabs){ $(k).className='btn'+(k==='tab_'+t?' on':''); }
   if(t==='panel'){ /* 缓存必须清：否则切走再切回时，PN_CACHE 里还是
      上一轮的旧数据，「⬇ 图」下载到的会与屏幕上的对不上 */
     PN_CACHE={}; loadPanel(); }
+  if(t==='sample'){ loadSampleOptions(); }
+  if(t==='graph'){ loadGraph(); }
   if(t==='set') loadCfg();
   if(t==='ai'){ loadAiBadge(); loadAnns(); loadBatchSites(); loadFailures(); }
   if(t==='sync'){ loadSyncSites(); loadRuns(); loadSitesList(); pollSync(); }
@@ -1244,7 +1515,7 @@ async function loadSyncSites(){
     const r=await (await fetch('/api/sites')).json();
     const sel=$('sy_site'); const cur=sel.value;
     sel.innerHTML='<option value="">全部站点</option>';
-    for(const s of r.items){
+    for(const s of (r.items||[])){
       if(!s.enabled) continue;
       const o=document.createElement('option');
       o.value=s.code;
@@ -1426,7 +1697,7 @@ async function siteSave(){
 async function loadSitesList(){
   try{
     const r=await (await fetch('/api/sites')).json();
-    $('sites_list').innerHTML=r.items.map(s=>{
+    $('sites_list').innerHTML=(r.items||[]).map(s=>{
       const tags=[];
       if(s.builtin) tags.push('内置');
       else tags.push('自定义 · '+(s.kind||'html'));
@@ -1539,8 +1810,9 @@ function docList(title, arr, cls){
 async function loadRuns(){
   try{
     const r=await (await fetch('/api/sync/runs?limit=12')).json();
-    if(!r.items.length){ $('sync_runs').innerHTML='<div class="empty" style="padding:20px">还没有同步记录</div>'; return; }
-    $('sync_runs').innerHTML=r.items.map(x=>`
+    const ritems=r.items||[];
+  if(!ritems.length){ $('sync_runs').innerHTML='<div class="empty" style="padding:20px">还没有同步记录</div>'; return; }
+    $('sync_runs').innerHTML=ritems.map(x=>`
       <div class="rank">
         <span class="t">${esc(x.site==='cac'?'中国网信办':'浙江网信网')} ·
           <span style="color:var(--dim)">${esc(x.mode)}</span></span>
@@ -1574,7 +1846,8 @@ async function loadAnns(){
   const site=$('ai_site').value;
   const r=await (await fetch(`/api/annotations?limit=50&q=${q}&site=${site}`)).json();
   const L=$('ai_list');
-  if(!r.items.length){
+  const aitems=r.items||[];
+  if(!aitems.length){
     L.innerHTML=`<div class="empty">${
       r.total===0
       ? '还没有生成过摘要。<br>去「检索」页点开任意文章 → 点「✨ 生成摘要」。<br>没配 key 的话，先去「⚙ 设置」填。'
@@ -1582,7 +1855,7 @@ async function loadAnns(){
     $('ai_pager').innerHTML='';
     return;
   }
-  L.innerHTML=r.items.map(it=>{
+  L.innerHTML=(r.items||[]).map(it=>{
     const p=it.parsed||{};
     const tags=(p.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join(' ');
     const ent=(p.entities||[]).length
@@ -1606,8 +1879,8 @@ async function loadAnns(){
       ${ent}
     </div>`;
   }).join('');
-  $('ai_pager').innerHTML=r.total>r.items.length
-    ? `<span style="color:var(--dim)">显示 ${r.items.length} / 共 ${r.total}</span>`
+  $('ai_pager').innerHTML=(r.total||0)>aitems.length
+    ? `<span style="color:var(--dim)">显示 ${aitems.length} / 共 ${r.total}</span>`
     : '';
 }
 
@@ -2350,9 +2623,9 @@ async function loadPanel(){
   // 单站就该给满，否则选「浙江」只剩 6 个栏目，看着像数据缺失。
   const per = site ? 12 : Math.max(4, Math.floor(12 / Math.max(1, f.sites.length)));
   const bySite = {};
-  for(const c of f.columns){ (bySite[c.site] ||= []).push(c); }
+  for(const c of (f.columns||[])){ (bySite[c.site] ||= []).push(c); }
   const rank = [];
-  const siteKeys = site ? [site] : f.sites.map(s=>s.site);
+  const siteKeys = site ? [site] : (f.sites||[]).map(s=>s.site);
   for(const sk of siteKeys){
     const s=f.sites.find(x=>x.site===sk)||{site:sk,site_name:sk};
     const tag = s.site==='cac' ? '国' : (s.site==='zjwx' ? '浙' : String(s.site).slice(0,2));
