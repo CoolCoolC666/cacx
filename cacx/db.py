@@ -1542,6 +1542,210 @@ class Database:
                         if total.get(ym) else 0.0})
         return out
 
+    def article_monthly_trend(self, site: str = "",
+                              date_from: str = "2024-01-01",
+                              date_to: str = "2099-12-31") -> List[dict]:
+        """
+        月度发文量 —— 对应老师要的「时间轴：发文量随时间的变化」。
+
+        ⚠ 归一化到**整月补零**：某个月没有文章不是"那件事没发生"，
+          而可能是"那个月站点没更新/栏目停更"。前端画折线时若直接
+          跳过空月，间距会被压扁，读起来像"发文变频繁了"。
+          所以这里把区间内每个月都补上 0。
+
+        ⚠ 口径：所有文章都算（含内容为空的列表页占位），
+          与 problem_distribution 的「COALESCE(content_empty,0)=0」不同，
+          界面上必须把两个分母都写出来。
+        """
+        lo = _month_bound(date_from, "lo")
+        hi = _month_bound(date_to, "hi")
+        where, args = ["pub_day>=?", "pub_day<=?"], [lo, hi]
+        if site:
+            where.append("site=?"); args.append(site)
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT site, substr(pub_day,1,7) ym, COUNT(*) n "
+                f"FROM articles WHERE {' AND '.join(where)} AND pub_day!='' "
+                f"GROUP BY site, ym", args).fetchall()
+        by_site: Dict[str, Dict[str, int]] = {}
+        total: Dict[str, int] = {}
+        for s, ym, n in rows:
+            if len(ym or "") != 7:
+                continue
+            by_site.setdefault(ym, {})[s or ""] = n
+            total[ym] = total.get(ym, 0) + n
+        # ⚠ 补零的上界必须**截到数据实际覆盖的最后一个月**。
+        #   否则 date_to 默认 2099-12-31 会补出 800 多个空月 ——
+        #   折线图右边拖一条八百个月长的空白，看着像站点停更了九年。
+        #   （这个坑真踩过：912 个月，其中 878 个是补出来的 0。）
+        def _add_month(ym: str, k: int) -> str:
+            y, m = int(ym[:4]), int(ym[5:7]) + k
+            y += (m - 1) // 12
+            m = (m - 1) % 12 + 1
+            return f"{y:04d}-{m:02d}"
+
+        first = lo[:7] if len(lo) >= 7 else "0000-01"
+        cap = hi[:7] if len(hi) >= 7 else "9999-12"
+        # 只有**哨兵默认值**（2099-xx）才截到数据实际覆盖的最后一个月。
+        # 用户显式选到 8 月却只看到 6 月 = 静默篡改用户的筛选意图，
+        # 而「8 月确实一篇没有」是事实，必须显示 0。
+        if cap >= "2099-01" or not cap:
+            cap = max(total) if total else first
+        months: List[str] = []
+        cur = first
+        while cur <= cap and len(months) < 1200:   # 上限防呆
+            months.append(cur)
+            cur = _add_month(cur, 1)
+        sites = sorted({s for d in by_site.values() for s in d})
+        out = []
+        for ym in months:
+            d = by_site.get(ym, {})
+            row = {"month": ym, "total": total.get(ym, 0)}
+            for s in sites:
+                row[s] = d.get(s, 0)
+            out.append(row)
+        if sites:
+            out[0]["_sites"] = sites
+        return out
+
+    def problem_monthly(self, site: str = "",
+                        date_from: str = "2024-01-01",
+                        date_to: str = "2099-12-31",
+                        top: int = 6) -> List[dict]:
+        """
+        治理问题 × 月份 —— 对应老师要的「主题随时间的变化」。
+
+        ⚠ 与 problem_distribution 同口径（关键词粗筛、标题权重更高），
+          所以这里也是粗筛：一篇可命中多类，各月各类相加会超过该月总数。
+          报告里必须写明，否则"某月问题数加起来超过发文量"没法解释。
+
+        ⚠ 只回 top N 类（默认 6）：33 个月 × 10 类全画会糊成一片，
+          且长尾类基本是噪声。其余类在 total 里。
+        """
+        where, args = ["pub_day>=?", "pub_day<=?",
+                       "COALESCE(content_empty,0)=0"], [date_from, date_to]
+        if site:
+            where.append("site=?"); args.append(site)
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT pub_day, title, COALESCE(content_text,'') FROM articles "
+                f"WHERE {' AND '.join(where)}", args).fetchall()
+        grid: Dict[str, Dict[str, int]] = {}
+        month_total: Dict[str, int] = {}
+        for day, title, body in rows:
+            ym = (day or "")[:7]
+            if len(ym) != 7:
+                continue
+            month_total[ym] = month_total.get(ym, 0) + 1
+            t, b = (title or ""), (body or "")
+            g = grid.setdefault(ym, {})
+            for name, kws in self.PROBLEM_TERMS:
+                if any(k in t for k in kws) or any(k in b for k in kws):
+                    g[name] = g.get(name, 0) + 1
+        # 哪几类入图：按整段区间内的总量取前 N
+        totals: Dict[str, int] = {}
+        for g in grid.values():
+            for k, v in g.items():
+                totals[k] = totals.get(k, 0) + v
+        keep = [k for k, _ in sorted(totals.items(),
+                                      key=lambda kv: -kv[1])[:max(1, top)]]
+        out = []
+        for ym in (sorted(month_total) or [date_from[:7]]):
+            g = grid.get(ym, {})
+            out.append({"month": ym, "total": month_total.get(ym, 0),
+                        "problems": {k: g.get(k, 0) for k in keep}})
+        # ⚠ 补零到与 article_monthly_trend **同一个月份集合** ——
+        #   两张图并排放，横轴月份数不一致会显得数据自相矛盾。
+        #   这里不能自己补（problem_monthly 不知道发文量口径的全区间），
+        #   交给调用方按 article_monthly_trend 的月份对齐，接口层做。
+        if keep:
+            out[0]["_kept"] = keep
+            out[0]["_dropped"] = [k for k in totals if k not in keep]
+        return out
+
+    def ai_theme_monthly(self, months: Optional[List[str]] = None,
+                         site: str = "",
+                         date_from: str = "2024-01-01",
+                         date_to: str = "2099-12-31",
+                         task: str = "theme") -> List[dict]:
+        """
+        AI 主题标签 × 月份 —— 时间轴的「AI 口径」。
+
+        ⚠ 与关键词粗筛的**分母不同**：这里只统计**已经被 AI 标过**的文章。
+          一篇没标过的就没进这个分母，所以 AI 口径的总量天然小于发文量。
+          界面上必须同时显示「已标注 N / 共 M 篇」，
+          否则看图的人会以为主题图漏画了没被 AI 认领的文章。
+
+        ⚠ months 传入时按它对齐（横轴与发文量图一致）；不传则只返回有标注的月份。
+        """
+        where, args = ["aa.task=?", "a.pub_day>=?", "a.pub_day<=?"], \
+            [task, date_from, date_to]
+        if site:
+            where.append("a.site=?"); args.append(site)
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT a.pub_day, aa.article_id, aa.result "
+                f"FROM ai_annotations aa JOIN articles a ON a.id=aa.article_id "
+                f"WHERE {' AND '.join(where)}", args).fetchall()
+        grid: Dict[str, Dict[str, int]] = {}
+        labeled: Dict[str, int] = {}
+        seen: Dict[str, set] = {}
+        for day, aid, result in rows:
+            ym = (day or "")[:7]
+            if len(ym) != 7:
+                continue
+            seen.setdefault(ym, set()).add(aid)
+            labels: List[str] = []
+            if result:
+                try:
+                    obj = json.loads(result)
+                    if isinstance(obj, list):
+                        labels = [str(x) for x in obj]
+                    elif isinstance(obj, dict):
+                        labels = [str(x) for x in (obj.get("themes") or [])]
+                except (ValueError, TypeError):
+                    labels = [x.strip() for x in str(result).split(",")
+                              if x.strip()]
+            g = grid.setdefault(ym, {})
+            for t in set(labels):
+                g[t] = g.get(t, 0) + 1
+        labeled = {k: len(v) for k, v in seen.items()}
+        if months is None:
+            out_m = sorted(grid)
+        else:
+            out_m = list(months)
+        totals: Dict[str, int] = {}
+        for g in grid.values():
+            for k, v in g.items():
+                totals[k] = totals.get(k, 0) + v
+        out = []
+        for ym in out_m:
+            g = grid.get(ym, {})
+            out.append({"month": ym, "labeled": labeled.get(ym, 0),
+                        "themes": dict(g)})
+        if totals:
+            out[0]["_totals"] = totals
+        return out
+
+    def theme_coverage(self, site: str = "", date_from: str = "2024-01-01",
+                       date_to: str = "2099-12-31",
+                       task: str = "theme") -> dict:
+        """AI 主题标注的覆盖率 —— 画图前先让人知道「标了多少、还差多少」。"""
+        where, args = ["pub_day>=?", "pub_day<=?",
+                       "COALESCE(content_empty,0)=0"], [date_from, date_to]
+        if site:
+            where.append("site=?"); args.append(site)
+        w = " AND ".join(where)
+        with self._lock:
+            total = self.conn.execute(
+                f"SELECT COUNT(*) FROM articles WHERE {w}", args).fetchone()[0]
+            done = self.conn.execute(
+                f"SELECT COUNT(*) FROM articles a JOIN ai_annotations aa "
+                f"ON aa.article_id=a.id AND aa.task=? WHERE {w}",
+                [task] + args).fetchone()[0]
+        return {"total": total, "labeled": done,
+                "pct": round(done * 100.0 / total, 1) if total else 0.0}
+
     def column_years(self, site: str = "", column: str = "",
                      date_from: str = "2024-01-01",
                      date_to: str = "2099-12-31") -> List[dict]:

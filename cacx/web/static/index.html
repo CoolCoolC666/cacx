@@ -72,6 +72,19 @@
   .tag{background:#232936;border-radius:4px;padding:1px 7px;font-size:11.5px}
   .empty{padding:60px;text-align:center;color:var(--dim)}
 
+  /* ---- 服务端下发的 SVG 图（时间轴）与图例 ----
+     SVG 由 cacx/web/app.py 的 _svg_stack 生成，网页与快照导出共用同一份
+     HTML，所以这套类名两边必须都定义 —— 缺一边，导出物就会掉样式。 */
+  svg.chart{width:100%;height:auto;display:block}
+  svg.chart .grid{stroke:#232936;stroke-width:1}
+  svg.chart .axisline{stroke:#3a4150;stroke-width:1}
+  svg.chart .axis{fill:#8b93a3;font-size:12.5px;
+                  font-family:Consolas,Menlo,monospace}
+  .legend{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 2px;font-size:11.5px;
+          color:var(--dim)}
+  .legend .lg{display:inline-flex;align-items:center;gap:5px}
+  .legend .lg i{width:11px;height:11px;border-radius:2px;display:inline-block}
+
   /* ---- 超链接：统一浅蓝 ----
      a.ln 这类文字链以前没有任何 color 声明，落到浏览器默认 #0b4bff，
      深底上又暗又脏，组员截图里圈出来的就是这个。统一走 --acc2 浅蓝。
@@ -575,9 +588,57 @@
           按标题含「联合/印发/会同/联发/共同」粗筛；精确数字以 R1 抽取的「联合发文」关系为准</div>
       </div>
     </div>
+  <!-- 时间轴：PPT 明确要的「发文量/主题随时间的变化」。
+         两张图共用同一批月份 —— 横轴长度不同会显得数据自相矛盾。
+         主题给两种口径：关键词粗筛（免费、即时、可复现）与
+         AI 分类（准、烧配额、不可复现），并列便于对比。 -->
+    <h3 style="font-size:13px;margin:16px 0 8px;color:var(--dim)">
+      时间轴 —— 发文量与主题随时间的变化
+      <span style="font-weight:400;font-size:11.5px">
+        （对应作业要求的「时间轴」；共用上方站点与月份筛选）</span>
+    </h3>
+    <div class="box" style="margin-bottom:12px">
+      <div class="row" style="gap:12px;align-items:center">
+        <span style="font-size:12.5px;color:var(--dim)">主题口径</span>
+        <label class="inline" style="font-size:12.5px;cursor:pointer">
+          <input type="radio" name="tl_mode" value="kw" checked
+                 onchange="loadTimeline()"> 关键词粗筛</label>
+        <label class="inline" style="font-size:12.5px;cursor:pointer">
+          <input type="radio" name="tl_mode" value="ai"
+                 onchange="loadTimeline()"> AI 分类</label>
+        <div class="grow"></div>
+        <span id="tl_cov" style="font-size:11.5px;color:var(--dim)"></span>
+        <button class="btn" style="padding:3px 10px;font-size:12px"
+          onclick="aiThemePreview()"
+          title="用 AI 给文章打主题标签。先看预览，确认后才真跑（默认不烧配额）">🤖 AI 标主题</button>
+        <button class="btn" style="padding:3px 10px;font-size:12px"
+          onclick="dlPanel('timeline')"
+          title="下载时间轴的原始数据（CSV）">⬇ 数据</button>
+      </div>
+      <div id="tl_note" class="dim"
+           style="font-size:11.5px;margin-top:6px;line-height:1.7"></div>
+    </div>
+    <div class="panel-grid">
+      <div class="box" style="grid-column:1/-1">
+        <h3>发文量月度趋势
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlBarsPng('tl_vol','发文量月度趋势')">⬇ 图</button>
+        </h3>
+        <div id="tl_vol" style="max-width:960px"></div>
+        <div class="dim" style="font-size:11px;margin-top:6px">
+          按所有文章计（含正文为空的列表页占位）；末月虚线段表示尚未过完，不可与整月直接比较</div>
+      </div>
+      <div class="box" style="grid-column:1/-1">
+        <h3>主题分布随时间
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlBarsPng('tl_theme','主题分布随时间')">⬇ 图</button>
+        </h3>
+        <div id="tl_theme" style="max-width:960px"></div>
+        <div class="dim" style="font-size:11px;margin-top:6px">
+          堆叠的是「命中次数」而非互斥分类，一篇可命中多类，<b>各月相加会超过该月发文量</b></div>
+      </div>
+    </div>
   </section>
-
-  <!-- ============ 数据同步 ============ -->
   <section id="v_sync" style="display:none">
     <div class="box">
       <h3>同步设置</h3>
@@ -3611,6 +3672,80 @@ function dlBarsPng(chartId, fname){
   img.src=url;
 }
 
+/* ---- 时间轴（发文量 + 主题随时间） -------------------------------
+   口径有两条：关键词粗筛（免费、即时、可复现）与 AI 分类（准、烧配额）。
+   两者并列而不是二选一 —— 老师问「凭什么说是这个主题」时，
+   能当场把两套口径摆出来对比，比只给一套更有说服力。 */
+let TL_DATA = null;
+
+function tlMode(){
+  return document.querySelector('input[name=tl_mode]:checked')?.value || 'kw';
+}
+
+async function loadTimeline(){
+  const box = $('tl_vol');
+  if(!box) return;                    // 面板未渲染，别往下走
+  const site=$('pn_site')?.value||'';
+  const months=Math.max(6, Math.min(120, parseInt($('pn_months')?.value||'36',10)||36));
+  const mode=tlMode();
+  // ⚠ 只截**尾部** N 个月，且**由服务端截**（months 参数）。
+  //   前端自己 slice 的话，同一份数据会被切两次，网页与导出口径就对不上 ——
+  //   这正是「屏幕 = 导出」最容易漏的一处。
+  const q=new URLSearchParams({include_ai:'true', top:'6', months:String(months)});
+  if(site) q.set('site', site);
+  const d = await (await fetch('/api/panel/timeline?'+q.toString())).json();
+  TL_DATA = d;
+
+  // ---- 图 + 图例：服务端生成，网页与快照导出共用同一份 HTML ----
+  // 这里不做任何坐标计算。
+  const ms=d.months||[];
+  PN_CACHE['tl_vol']=ms.map(r=>({k:r.month, n:r.total}));
+  box.innerHTML = d.charts.volume +
+    `<div style="font-size:11px;color:var(--dim);margin-top:6px">
+     合计 <b>${ms.reduce((a,b)=>a+b.total,0).toLocaleString()}</b> 篇 ·
+     ${(d.sites||[]).join(' / ')}分色叠加</div>`;
+  $('tl_theme').innerHTML = mode==='ai' ? d.charts.theme_ai : d.charts.theme_kw;
+
+  // ---- 口径回显 ----
+  const cov=(d.ai&&d.ai.coverage)||{labeled:0,total:0,pct:0};
+  if($('tl_cov')) $('tl_cov').textContent =
+    `AI 主题已标注 ${cov.labeled}/${cov.total} 篇（${cov.pct}%）`;
+  if($('tl_note')) $('tl_note').innerHTML =
+    `口径：${esc(d.scope.site)} · ${esc(d.scope.range)} · ${d.scope.months} 个月 ·
+     发文量合计 <b>${d.scope.articles_total.toLocaleString()}</b> 篇，
+     有正文 <b>${d.scope.articles_with_body.toLocaleString()}</b> 篇（两图分母不同）。`
+    + (mode==='ai'
+      ? `<br>当前是 <b>AI 分类口径</b>：只统计已被 AI 标过主题的 ${cov.labeled} 篇，
+         没标过的不在这个分母里 —— 所以这里的量和发文量对不上是正常的。`
+      : `<br>当前是 <b>关键词粗筛口径</b>：一篇可命中多类，各月相加会超过发文量。`);
+}
+
+async function aiThemePreview(){
+  const site=$('pn_site')?.value||'';
+  const btn = document.querySelector('#tl_cov');
+  const plan = await (await fetch('/api/panel/ai-themes', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({sites: site?[site]:[], limit:120,
+                           per_call:12, dry_run:true})
+  })).json();
+  if(!confirm(
+      `即将用 AI 给文章打主题标签（只处理「${site||'全部站点'}」未标注的部分）。\n\n`+
+      `${plan.plan}\n每批 12 篇合并成一次调用（MiroFish 式批量 LLM 调用，成本约为逐篇的一半）。\n\n`+
+      `确定要真跑吗？这会实际调用模型并消耗 API 配额。`)){
+    return;
+  }
+  toast('开始跑 AI 主题标注，请稍候…');
+  const r = await (await fetch('/api/panel/ai-themes', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({sites: site?[site]:[], limit:120,
+                           per_call:12, dry_run:false})
+  })).json();
+  if(r.error){ toast(r.error); return; }
+  toast(`AI 主题标注完成：成功 ${r.done||0} 篇，失败 ${r.failed||0} 篇`
+        + (r.dropped? `，模型自造主题名被丢弃 ${r.dropped} 个`:''));
+  await loadTimeline();
+}
+
 async function loadPanel(){
   const site=$('pn_site')?.value||'';
   const q = site ? '?site='+site : '';
@@ -3698,6 +3833,13 @@ async function loadPanel(){
   } else if($('bar_joint')) {
     $('bar_joint').innerHTML = '<div class="empty" style="padding:20px">无数据</div>';
   }
+
+  // ---- 时间轴（PPT 要求的「发文量/主题随时间的变化」）----
+  // 放最后：前面的图失败不该连带时间轴也不出
+  try { await loadTimeline(); }
+  catch(e){ console.error('时间轴加载失败', e);
+    if($('tl_vol')) $('tl_vol').innerHTML =
+      `<div class="empty" style="padding:20px">时间轴加载失败：${esc(e.message||e)}</div>`; }
 }
 
 $('q').addEventListener('keydown',e=>{ if(e.key==='Enter') go(1); });
