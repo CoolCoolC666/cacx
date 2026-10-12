@@ -407,3 +407,35 @@ def read_userdict(path: str) -> List[str]:
             if s:
                 out.append(s.split()[0])
     return out
+
+
+def known_words(path: Optional[str] = None) -> set:
+    """当前分词器已经认识的词：内置领域词表 + jieba 词典 + 已回流词。
+
+    ⚠ 三份都必须算，漏一份就会把「中央网信办」这种早就有的词
+      当成新词报给用户 —— 用户以为程序发现了新东西，
+      其实是它自己的词典里本来就有，白占篇幅还误导结论。
+
+    ⚠⚠ 这个函数必须**只有一份实现**。先前 web 层和 MCP 层各写了一遍，
+      两边靠不同的方式取 jieba 词典（一份走 j.dictionary，一份想读
+      dict_file），迟早会漂移：某天只改一边，
+      「网页上不报旧词」而「MCP 里照报」，用户完全无从察觉。
+      口径统一到这个函数，两条入口才必然一致。
+    """
+    known: set = set()
+    try:
+        from . import textseg as TS
+        for line in (TS._BASE_TERMS or "").strip().splitlines():
+            parts = line.split()
+            if parts:
+                known.add(parts[0])
+        j = TS._get()
+        if j is not None:
+            try:
+                known |= set(j.dictionary.dictionary.keys())
+            except Exception:
+                pass
+    except Exception:
+        pass
+    known |= set(read_userdict(path or userdict_path()))
+    return known

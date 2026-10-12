@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cacx · 网信办语料检索</title>
+<!-- ⚠ 图标内联成 data URI，不引外链文件：教室可能没网，
+     一个指向 favicon.ico 的 <link> 在断网时会稳定产生一条 404，
+     混在控制台里跟真报错分不开。零外链，顺手也省一次请求。 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231b2333'/%3E%3Ccircle cx='11' cy='16' r='4' fill='%234c9aff'/%3E%3Ccircle cx='22' cy='11' r='3' fill='%235ad1a8'/%3E%3Ccircle cx='22' cy='21' r='3' fill='%23e2b04a'/%3E%3Cpath d='M11 16 L22 11 M11 16 L22 21' stroke='%23566' stroke-width='1.6'/%3E%3C/svg%3E">
 <style>
   :root{
     --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
@@ -360,7 +364,11 @@
         检索时按词组匹配不到，统计时词频也被稀释。<br>
         这里用<b>无监督统计法</b>（凝固度 + 邻字自由度 + 可切分性）从
         语料里挖候选词，<b>由你勾选</b>后写进 jieba 用户词典 ——
-        写完<b>立即生效且重启后仍在</b>。
+        写完<b>立即生效且重启后仍在</b>。<br>
+        勾选这一步有 <b>🤖 AI 预勾选</b>可以代劳：AI 逐个判断每个候选
+        该收该弃并给一句话理由，<b>建议采纳的会自动勾上</b>。
+        但它<b>只给建议</b> —— 词典是持续影响后续所有检索与统计的东西，
+        误写进去不会报错、也很难被发现，所以最终仍然由你点「采纳」。
       </div>
     </div>
 
@@ -378,6 +386,9 @@
            没法稳定定位，只能靠按钮文案，中文一改测试就断。 -->
       <button class="btn on" id="nwDiscover" style="padding:6px 16px"
               onclick="nwDiscover()">🔍 挖掘新词</button>
+      <button class="btn" id="nwAiReviewBtn" style="padding:6px 14px"
+              onclick="nwAiReview(false)"
+              title="让 AI 逐个判断候选该不该收进词典，自动勾上建议采纳的">🤖 AI 预勾选</button>
       <button class="btn" id="nwAdoptBtn" style="padding:6px 14px"
               onclick="nwAdopt()"
               title="把勾选的词写进用户词典，立即生效">✅ 采纳勾选</button>
@@ -1924,6 +1935,10 @@ async function nwDiscover(){
   $('nw_msg').innerHTML = `<div style="font-size:12.5px;color:var(--acc2)">
     正在统计…要扫几百篇正文，约十几秒。</div>`;
   NW_PICK = new Set();
+  // ⚠ 重新挖一批候选，上一轮的 AI 结论就作废了 —— 不清的话
+  //   旧词条上的「✅AI建议收」会挂到新列表的同名字词上，
+  //   而那是另一次统计、另一次模型判断，理由根本不对应。
+  NW_VERDICT = {};
   try{
     const r = await fetch('/api/newwords/discover', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -1964,6 +1979,17 @@ function nwRenderList(){
     //   所以标成 —。
     const L = c.left_entropy ? c.left_entropy : '—';
     const R = c.right_entropy ? c.right_entropy : '—';
+    // AI 评审结果：徽章 + 理由。⚠ 理由要用 title 而不是直接铺开 ——
+    //   60 行候选每行都跟一段解释，这一列会被推到屏幕外，反而更看不清。
+    const v = (NW_VERDICT||{})[c.word];
+    const VB = {
+      keep:  ['✅ AI建议收', '#7d8'],
+      drop:  ['⛔ AI建议弃', 'var(--dim)'],
+      unsure:['❓ AI拿不准', 'var(--warn)'],
+    };
+    const vb = v ? (VB[v.verdict] || ['',''])[0] : '';
+    const vc = v ? (VB[v.verdict] || ['',''])[1] : '';
+    const vtip = v && v.reason ? ` title="AI 理由：${esc(v.reason)}"` : '';
     return `<div class="row" style="gap:8px;padding:6px 8px;
         border-bottom:1px solid var(--line);align-items:flex-start">
       <!-- ⚠ value 必须给词本身：原来只靠 onchange 里的下标定位，
@@ -1971,6 +1997,7 @@ function nwRenderList(){
       <input type="checkbox" value="${esc(c.word)}" ${on?'checked':''}
         onchange="nwToggle('${i}', this.checked)" style="margin-top:3px">
       <span style="flex:1;min-width:0;font-size:13px">${esc(c.word)}</span>
+      ${vb ? `<span style="flex:none;font-size:11px;color:${vc}"${vtip}>${vb}</span>` : ''}
       <span style="color:var(--dim);font-size:11.5px;flex:none">
         ×${c.count}</span>
       <span style="color:var(--dim);font-size:11.5px;flex:none;width:62px;
@@ -1980,6 +2007,91 @@ function nwRenderList(){
       ${badge ? `<span style="flex:none">${badge}</span>` : ''}
     </div>`;
   }).join('');
+}
+
+/* ---------------- AI 预勾选 ----------------
+   ⚠ 它**只预勾选，不写词典**。采纳仍然必须点「✅ 采纳勾选」。
+     这不是保守，是这两件事的风险等级不同：统计与模型都只是概率，
+     而词典一旦写进去就持续影响之后所有检索与统计，误判不可撤销。
+     把「建议」和「生效」分开，中间才有你复核的那一步。           */
+let NW_VERDICT = {};
+let NW_AI_BUSY = false;
+
+async function nwAiReview(confirmed){
+  if(NW_AI_BUSY){ toast('AI 评审正在进行中'); return; }
+  if(!NW_ITEMS.length){ toast('先点「🔍 挖掘新词」拿到候选'); return; }
+  const msg = $('nw_msg');
+  if(!confirmed){
+    // ⚠ 第一次点击**不发请求**，只报清楚要花多少、发给谁。
+    //   默认就烧配额的话，用户会把它当成一个不敢点的按钮。
+    let m = '（未配置 AI）';
+    try{
+      const s = await fetch('/api/ai/status').then(x=>x.json());
+      m = s.ready ? `模型 ${s.model} · ${s.provider}` : '（未配置 AI）';
+    }catch(e){ /* 状态拿不到就照常显示下面的说明 */ }
+    msg.innerHTML = `<div style="font-size:12.5px;line-height:1.8">
+      <b>将调用 AI 评审 ${NW_ITEMS.length} 个候选</b>（${esc(m)}）<br>
+      <span class="dim">AI 只给「建议收 / 建议弃 / 拿不准」和一句话理由，
+      <b>不会自动写进词典</b>；建议采纳的会被自动勾上，
+      仍然要你点「✅ 采纳勾选」才生效。这一步会消耗配额。</span><br>
+      <button class="btn on" id="nw_ai_go" style="padding:4px 12px;margin-top:6px"
+        onclick="nwAiReview(true)">继续，调用 AI</button>
+      <button class="btn" style="padding:4px 12px;margin-top:6px"
+        onclick="$('nw_msg').innerHTML=''">取消</button>
+    </div>`;
+    return;
+  }
+  NW_AI_BUSY = true;
+  const btn = $('nwAiReviewBtn');
+  if(btn) btn.disabled = true;
+  msg.innerHTML = `<div style="font-size:12.5px;color:var(--acc2)">
+    AI 正在逐个判断…${NW_ITEMS.length} 个候选，可能要十几秒。</div>`;
+  try{
+    const r = await fetch('/api/newwords/review', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({cands: NW_ITEMS, run: true}),
+    }).then(x=>x.json());
+    // ⚠ AI 没配 / 调用失败**不是致命错误**：统计结果照常可用，
+    //   只是没预勾选而已。区别对待才能让用户知道下一步该干什么。
+    if(r.error){
+      msg.innerHTML = `<div style="font-size:12.5px">
+        <span style="color:var(--warn)">AI 评审跳过：${esc(r.error)}</span><br>
+        <span class="dim">候选和手动勾选都不受影响，照常采纳即可。
+        ${r.retryable ? '（可以稍后重试）' : '（这不是配额问题，重试没用，去「设置」页检查密钥/模型名）'}</span>
+      </div>`;
+      return;
+    }
+    NW_VERDICT = r.decisions || {};
+    // 只预勾 keep。drop/unsure **不动用户已有的勾选** ——
+    // 你手动选过的词不该被 AI 的意见推翻，那不叫辅助那叫越权。
+    let added = 0;
+    for(const w of Object.keys(NW_VERDICT)){
+      if(NW_VERDICT[w].verdict === 'keep'){
+        if(!NW_PICK.has(w)) added++;
+        NW_PICK.add(w);
+      }
+    }
+    const s = r.stats || {};
+    msg.innerHTML = `<div style="font-size:12.5px;line-height:1.8">
+      AI 判完 ${s.judged}/${s.candidates} 个：
+      <b style="color:#7d8">建议收 ${s.keep}</b> ·
+      <span class="dim">建议弃 ${s.drop} · 拿不准 ${s.unsure}</span><br>
+      <span class="dim">已自动勾上 ${added} 个建议采纳的词。
+      把鼠标停在徽章上看 AI 的理由。<b>仍未写进词典</b> ——
+      你可以改勾选，再点「✅ 采纳勾选」。</span>
+      ${(s.errors && s.errors.length)
+        ? `<br><span style="color:var(--warn)">有 ${s.errors.length} 批失败：${esc(s.errors[0])}</span>`
+        : ''}
+      ${s.missing ? `<br><span class="dim">另有 ${s.missing} 个模型没给出结论，保持原样。</span>` : ''}
+    </div>`;
+    nwRenderList();
+  }catch(e){
+    msg.innerHTML = `<div style="color:var(--err);font-size:12.5px">
+      AI 评审失败：${esc(e.message||e)}</div>`;
+  }finally{
+    NW_AI_BUSY = false;
+    if(btn) btn.disabled = false;
+  }
 }
 
 function nwToggle(i, on){
