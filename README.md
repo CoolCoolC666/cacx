@@ -207,8 +207,14 @@ config/    settings.example.json（模板，已提交）
 data/      cacx.db（数据库，gitignore）
 日志/      开发留痕文档（每轮改了什么、为什么）
 docs/      工程文档
-tests_*.py 13 个测试文件，共 515 项
+（测试）/  测试脚本 + 开发期的一次性脚本（不随分发包走）
 ```
+
+> **测试为什么不在根目录**：根目录一度堆了 70 个 `_*.py` + 31 个
+> `tests_*.py` + 30 个日志，真正属于工程的只剩上面那几行 ——
+> 想知道「这功能改了哪个文件」得先翻一遍噪音。现在测试与开发脚本
+> 全在 `（测试）/`，根目录只留工程本体和 4 个 bat。
+> 一键整理用根目录的 `dev-clean.bat`。
 
 ---
 
@@ -243,9 +249,14 @@ SQLite FTS5 的 `trigram` 分词器对中文有效，但**要求查询词 ≥ 3 
 ### 跑测试
 
 ```bash
-python selftest.py                  # 29 项自检
-python tests_generic.py             # 或各测试文件单跑
+python （测试）\_regress.py            # 全量回归（31 个文件 / 488 项）
+python （测试）\selftest.py            # 29 项自检
+python （测试）\tests_generic.py       # 或各测试文件单跑
 ```
+
+> ⚠ 被测文件在 `（测试）/` 子目录，但**运行目录必须是项目根**
+> —— 部分测试要读 `config/settings.json`、`data/cacx.db`、`cacx/web/static`。
+> `_regress.py` 已经自己 `chdir` 到根了，手动单跑时记得先回到项目根。
 
 ---
 
