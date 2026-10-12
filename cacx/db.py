@@ -740,22 +740,47 @@ class Database:
                  time.strftime("%Y-%m-%d %H:%M:%S")))
             self.conn.commit()
 
-    def event_stats(self, since_days: int = 30) -> Dict[str, Any]:
+    #: 只有绑定了 article 的行为才能按站点归属。
+    #: search / export 不在其中 —— 检索天然跨站，导出也可能一次导了两站。
+    SITE_SCOPED_EVENTS = ("open", "summarize")
+
+    def event_stats(self, since_days: int = 30,
+                    site: str = "") -> Dict[str, Any]:
         since = time.strftime("%Y-%m-%d",
                               time.localtime(time.time() - since_days * 86400))
+        args: List[Any] = [since]
+        if site:
+            # 按站点过滤时，只看能归属到站点的那几类。
+            # 不把 search/export 混进来报 —— 半口径的数字比没有更误导：
+            # 界面上会出现「浙江的 search 是 0 次」，而事实是「不可归属」。
+            ph = ",".join("?" * len(self.SITE_SCOPED_EVENTS))
+            where = (f" AND e.kind IN ({ph}) "
+                     "AND e.article_id IN (SELECT id FROM articles WHERE site=?)")
+            args += list(self.SITE_SCOPED_EVENTS) + [site]
+        else:
+            where = ""
         with self._lock:
+            base = "FROM events e WHERE e.created_at>=?" + where
             total = self.conn.execute(
-                "SELECT COUNT(*) FROM events WHERE created_at>=?",
-                (since,)).fetchone()[0]
+                f"SELECT COUNT(*) {base}", list(args)).fetchone()[0]
             by_kind = [dict(r) for r in self.conn.execute(
-                "SELECT kind, COUNT(*) n FROM events WHERE created_at>=? "
-                "GROUP BY kind ORDER BY n DESC", (since,))]
+                f"SELECT e.kind, COUNT(*) n {base} "
+                "GROUP BY e.kind ORDER BY n DESC", list(args))]
+            # 「跳原文最多」需要 join articles 拿标题，因此 JOIN 要写在 base 里。
+            # 先把 base 拼成带 JOIN 的版本，再补 kind='open' 与 LIMIT。
+            base_j = base.replace(
+                "FROM events e", "FROM events e LEFT JOIN articles a ON a.id=e.article_id")
             top = [dict(r) for r in self.conn.execute(
-                "SELECT e.article_id, a.title, a.site_name, COUNT(*) n "
-                "FROM events e LEFT JOIN articles a ON a.id=e.article_id "
-                "WHERE e.kind='open' AND e.created_at>=? "
-                "GROUP BY e.article_id ORDER BY n DESC LIMIT 10", (since,))]
-        return {"since": since, "total": total, "by_kind": by_kind, "top_open": top}
+                f"SELECT e.article_id, a.title, a.site, a.site_name, COUNT(*) n "
+                f"{base_j} AND e.kind='open' GROUP BY e.article_id "
+                "ORDER BY n DESC LIMIT 10", list(args))]
+        return {"since": since, "total": total, "by_kind": by_kind,
+                "top_open": top, "site": site,
+                # 前端据此说明「哪些类别在按站点过滤下不计入」
+                "site_applicable": list(self.SITE_SCOPED_EVENTS) if site
+                else None,
+                "note": ("按站点过滤时只统计 open / summarize；"
+                         "search 与 export 跨站，不可归属。") if site else ""}
 
     # ---------------------------------------------------------- 批量导出
     def fetch_for_export(self, ids: List[int]) -> List[dict]:

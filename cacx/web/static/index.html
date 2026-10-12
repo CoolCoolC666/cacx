@@ -233,26 +233,60 @@
 
   <!-- ============ 数据面板 ============ -->
   <section id="v_panel" style="display:none">
+    <!-- 面板总说明：四张图共用一个站点选择，改一处四张图全跟着变 -->
+    <div class="box" style="margin-bottom:12px;padding:10px 14px">
+      <div class="row" style="gap:14px">
+        <span style="font-size:12.5px;color:var(--dim)">
+          以下所有图表共用同一个筛选</span>
+        <label style="font-size:12.5px">站点
+          <select id="pn_site" onchange="loadPanel()">
+            <option value="">全部站点</option>
+            <option value="cac">中国网信办</option>
+            <option value="zjwx">浙江网信网</option>
+          </select></label>
+        <label style="font-size:12.5px">近
+          <input type="number" id="pn_months" value="36" min="6" max="120"
+                 style="width:64px" onchange="loadPanel()"> 个月</label>
+        <div class="grow"></div>
+        <span style="font-size:11.5px;color:var(--dim)">
+          下载的是图里的**原始数据**（CSV），可直接进 Excel / 统计软件做图</span>
+      </div>
+    </div>
     <div class="panel-grid">
       <div class="box">
-        <h3>按年分布</h3>
+        <h3>按年分布
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlBarsPng('bar_year','按年分布')" title="下载这张图为 PNG 图片">⬇ 图</button>
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlPanel('trend','year')" title="下载这张图的数据（CSV）">⬇ 数据</button>
+        </h3>
         <div class="bars" id="bar_year"></div>
       </div>
       <div class="box">
-        <h3>按月分布（近 36 月） <select id="trend_site" onchange="loadTrend()"
-             style="font-size:12px;padding:2px 6px">
-          <option value="">全部站点</option>
-          <option value="cac">中国网信办</option>
-          <option value="zjwx">浙江网信网</option>
-        </select></h3>
+        <h3>按月分布
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlBarsPng('bar_month','按月分布')" title="下载这张图为 PNG 图片">⬇ 图</button>
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlPanel('trend','month')" title="下载这张图的数据（CSV）">⬇ 数据</button>
+        </h3>
         <div class="bars" id="bar_month"></div>
       </div>
       <div class="box">
-        <h3>栏目 Top 12</h3>
+        <h3>栏目 Top 12
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlBarsPng('rank_col','栏目Top12')" title="下载这张图为 PNG 图片">⬇ 图</button>
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlPanel('columns')" title="下载这张图的数据（CSV）">⬇ 数据</button>
+        </h3>
         <div id="rank_col"></div>
       </div>
       <div class="box">
-        <h3>检索行为（近 30 天）</h3>
+        <h3>检索行为（近 30 天）
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlBarsPng('rank_ev','检索行为')" title="下载这张图为 PNG 图片">⬇ 图</button>
+          <button class="btn" style="padding:1px 7px;font-size:11px"
+            onclick="dlPanel('events')" title="下载这张图的数据（CSV）">⬇ 数据</button>
+        </h3>
         <div id="rank_ev"></div>
       </div>
     </div>
@@ -1165,7 +1199,9 @@ function showTab(t){
   for(const k of ['tab_search','tab_panel','tab_set','tab_ai','tab_sync']){
     $(k).className='btn'+(k==='tab_'+t?' on':'');
   }
-  if(t==='panel') loadPanel();
+  if(t==='panel'){ /* 缓存必须清：否则切走再切回时，PN_CACHE 里还是
+     上一轮的旧数据，「⬇ 图」下载到的会与屏幕上的对不上 */
+    PN_CACHE={}; loadPanel(); }
   if(t==='set') loadCfg();
   if(t==='ai'){ loadAiBadge(); loadAnns(); loadBatchSites(); loadFailures(); }
   if(t==='sync'){ loadSyncSites(); loadRuns(); loadSitesList(); pollSync(); }
@@ -2165,6 +2201,9 @@ async function testAI(){
 function drawBars(el, rows){
   if(!rows.length){ el.classList.remove('dense');
     el.innerHTML='<div class="empty" style="padding:20px">无数据</div>'; return; }
+  // 缓存给「下载图片」用：下载的必须是**屏幕上这批**数据，
+  // 而不是重新请求一次 —— 否则筛选条件变了但没重渲染时就对不上。
+  PN_CACHE[el.id]=rows;
   const max=Math.max(...rows.map(r=>r.n))||1;
   // 容器高 130px，减去数值行(14) 与横轴行(16) 与间距(6)，剩约 94px 可用
   const MAXH=94;
@@ -2188,43 +2227,140 @@ function drawBars(el, rows){
 }
 
 async function loadTrend(){
-  const site=$('trend_site').value;
-  const t=await (await fetch('/api/trend?granularity=month'+(site?'&site='+site:''))).json();
-  drawBars($('bar_month'), t.items.slice(-36));
-  const y=await (await fetch('/api/trend?granularity=year')).json();
+  const site=$('pn_site')?.value||'';
+  const months=Math.max(6, Math.min(120, parseInt($('pn_months')?.value||'36',10)||36));
+  const q = s => site ? '&site='+site : '';
+  const t=await (await fetch('/api/trend?granularity=month'+q(s))).json();
+  drawBars($('bar_month'), t.items.slice(-months));
+  const y=await (await fetch('/api/trend?granularity=year'+q(s))).json();
   drawBars($('bar_year'), y.items);
 }
 
+/* 下载面板图表的原始数据（CSV）。
+   走 /api/panel/export 而不是前端拼 —— 界面看到的数字与导出的数字
+   必须来自同一次查询，否则「改了筛选忘了同步」这种错最难发现。 */
+function dlPanel(which, granularity){
+  const site=$('pn_site')?.value||'';
+  const months=Math.max(6, Math.min(120, parseInt($('pn_months')?.value||'36',10)||36));
+  const qs=new URLSearchParams({which});
+  if(site) qs.set('site',site);
+  if(granularity) qs.set('granularity',granularity);
+  if(which==='trend'&&granularity==='month') qs.set('limit',String(months));
+  const a=document.createElement('a');
+  a.href='/api/panel/export?'+qs.toString();
+  a.download='';
+  document.body.appendChild(a); a.click(); a.remove();
+  toast('已开始下载（CSV，可直接用 Excel / SPSS / Python 打开）');
+}
+
+/* 把柱状图画成 PNG 下载。
+   用 SVG + canvas 而不是截图库：没有外部依赖，缩放不失真，
+   中文也不会像某些 canvas 方案那样因为字体没加载变方块。
+   ⚠ 图表数据必须从缓存里取，不能重新请求 —— 否则用户看到的
+   和下载到的可能不是同一批数。 */
+let PN_CACHE={};
+function dlBarsPng(chartId, fname){
+  const rows=PN_CACHE[chartId];
+  if(!rows||!rows.length){ toast('这张图还没有数据', true); return; }
+  const W=Math.max(560, Math.min(1600, rows.length*46+90));
+  const H=380, PADL=64, PADB=64, PADT=34;
+  const max=Math.max(...rows.map(r=>r.n))||1;
+  const bw=Math.max(8, (W-PADL-24)/rows.length*0.66);
+  const step=(W-PADL-24)/rows.length;
+  const y0=H-PADB, yh=H-PADT-PADB;
+  const site=$('pn_site')?.value||'';
+  const NAMES={cac:'中国网信办', zjwx:'浙江网信网'};
+  const label=NAMES[site]||'全部站点';
+  const svg=
+   `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`
+   +`<rect width="${W}" height="${H}" fill="#12151b"/>`
+   +`<text x="${PADL}" y="22" fill="#e6e9ef" font-size="14" font-family="Segoe UI,Microsoft YaHei,sans-serif">`
+    +`${esc(fname)} · ${esc(label)} · 共 ${rows.length} 项 · 峰值 ${max}</text>`
+   +grid(4)
+   +rows.map((r,i)=>{
+      const h=Math.max(2, r.n/max*yh), x=PADL+i*step+(step-bw)/2, y=y0-h;
+      return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" fill="#3b82f6"/>`
+        +`<text x="${(x+bw/2).toFixed(1)}" y="${(y-4).toFixed(1)}" fill="#c2c8d4" font-size="10" text-anchor="middle" font-family="Consolas,monospace">${r.n}</text>`
+        +`<text x="${(x+bw/2).toFixed(1)}" y="${y0+16}" fill="#8b93a3" font-size="9.5" text-anchor="end" transform="rotate(-40 ${(x+bw/2).toFixed(1)} ${y0+16})" font-family="Consolas,monospace">${esc(String(r.k))}</text>`;
+     }).join('')
+   +`</svg>`;
+  function grid(n){
+    let s='';
+    for(let i=0;i<=n;i++){
+      const v=Math.round(max*i/n), y=y0-(max/n)*i;
+      s+=`<line x1="${PADL}" y1="${y}" x2="${W-24}" y2="${y}" stroke="#252a33"/>`
+       +`<text x="${PADL-8}" y="${y+4}" fill="#8b93a3" font-size="10" text-anchor="end" font-family="Consolas,monospace">${v}</text>`;
+    }
+    return s+`<line x1="${PADL}" y1="${y0}" x2="${W-24}" y2="${y0}" stroke="#3a4150"/>`;
+  }
+  const blob=new Blob([svg],{type:'image/svg+xml;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const img=new Image();
+  img.onload=()=>{
+    const c=document.createElement('canvas');
+    c.width=W*2; c.height=H*2;              // 2 倍图，放进论文不糊
+    const g=c.getContext('2d');
+    g.fillStyle='#12151b'; g.fillRect(0,0,c.width,c.height);
+    g.drawImage(img,0,0,c.width,c.height);
+    URL.revokeObjectURL(url);
+    c.toBlob(b=>{
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(b);
+      a.download=`cacx_${fname}_${label}.png`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(a.href),1500);
+      toast('图片已下载（2 倍分辨率，适合直接放进论文）');
+    },'image/png');
+  };
+  img.onerror=()=>{ toast('图片生成失败，请改用「⬇ 数据」下载 CSV', true); };
+  img.src=url;
+}
+
 async function loadPanel(){
+  const site=$('pn_site')?.value||'';
+  const q = site ? '?site='+site : '';
   await loadTrend();
-  const f=await (await fetch('/api/facets')).json();
+  const f=await (await fetch('/api/facets'+q)).json();
   // 每个站点各取 Top N，不能直接 slice(0,12) ——
   // /api/facets 的栏目是按 site 再按篇数排序的，CAC 库比浙江大一个量级，
   // slice(0,12) 会让 CAC 吃满全部名额，浙江一个栏目都不显示
   // （这是「浙江面板上根本没有浙江栏目」的真实原因，不是数据缺失）。
-  const per = Math.max(4, Math.floor(12 / Math.max(1, f.sites.length)));
+  // ⚠ 但**选定单个站点时不能再除** —— 那是多站平分名额的场景，
+  // 单站就该给满，否则选「浙江」只剩 6 个栏目，看着像数据缺失。
+  const per = site ? 12 : Math.max(4, Math.floor(12 / Math.max(1, f.sites.length)));
   const bySite = {};
   for(const c of f.columns){ (bySite[c.site] ||= []).push(c); }
   const rank = [];
-  for(const s of f.sites){
-    const tag = s.site==='cac' ? '国' : (s.site==='zjwx' ? '浙' : s.site.slice(0,2));
-    for(const c of (bySite[s.site]||[]).slice(0, per))
+  const siteKeys = site ? [site] : f.sites.map(s=>s.site);
+  for(const sk of siteKeys){
+    const s=f.sites.find(x=>x.site===sk)||{site:sk,site_name:sk};
+    const tag = s.site==='cac' ? '国' : (s.site==='zjwx' ? '浙' : String(s.site).slice(0,2));
+    for(const c of (bySite[sk]||[]).slice(0, per))
       rank.push({...c, tag, site_name:s.site_name});
   }
   rank.sort((a,b)=>b.n-a.n);
-  $('rank_col').innerHTML=rank.map(c=>
-    `<div class="rank" title="${esc(c.site_name||'')} · ${esc(c.column_name)}">
-       <span class="t">${esc(c.tag)}·${esc(c.column_name)}</span>
-     <span class="v">${c.n}</span></div>`).join('');
-  const e=await (await fetch('/api/events?days=30')).json();
+  PN_CACHE['rank_col']=rank.map(c=>({k:`${c.tag}·${c.column_name}`, n:c.n}));
+  $('rank_col').innerHTML=rank.length
+    ? rank.map(c=>
+      `<div class="rank" title="${esc(c.site_name||'')} · ${esc(c.column_name)}">
+         <span class="t">${esc(c.tag)}·${esc(c.column_name)}</span>
+       <span class="v">${c.n}</span></div>`).join('')
+    : '<div class="empty" style="padding:20px">该站点无栏目数据</div>';
+
+  const e=await (await fetch('/api/events?days=30'+(site?'&site='+site:''))).json();
   const ev=e.by_kind.map(x=>({k:x.kind,n:x.n}));
   const top=e.top_open.map(x=>({k:x.title||'(已删)',n:x.n}));
+  PN_CACHE['rank_ev']=ev;
+  // 按站点过滤时，明说 search/export 被排除的原因 ——
+  // 不说的话，「浙江的 search 是 0 次」会被当成「浙江没人检索」。
+  const skipNote = site && e.note
+    ? `<div style="margin-top:9px;color:var(--dim);font-size:11.5px">${esc(e.note)}</div>` : '';
   $('rank_ev').innerHTML = (ev.length||top.length)
-    ? ev.map(x=>`<div class="rank"><span class="t">${x.k}</span><span class="v">${x.n} 次</span></div>`).join('')
+    ? ev.map(x=>`<div class="rank"><span class="t">${esc(x.k)}</span><span class="v">${x.n} 次</span></div>`).join('')
       + (top.length?`<div style="margin-top:9px;color:var(--dim);font-size:12px">跳原文最多：</div>`
         + top.slice(0,6).map(x=>`<div class="rank"><span class="t">${esc(x.k)}</span>
-           <span class="v">${x.n}</span></div>`).join(''):'')
-    : '<div class="empty" style="padding:20px">还没有行为记录</div>';
+           <span class="v">${x.n}</span></div>`).join(''):'')+skipNote
+    : `<div class="empty" style="padding:20px">${site?'该站点近 30 天没有行为记录':'还没有行为记录'}</div>`;
 }
 
 $('q').addEventListener('keydown',e=>{ if(e.key==='Enter') go(1); });
