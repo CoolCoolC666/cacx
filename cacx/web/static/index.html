@@ -2229,10 +2229,13 @@ function drawBars(el, rows){
 async function loadTrend(){
   const site=$('pn_site')?.value||'';
   const months=Math.max(6, Math.min(120, parseInt($('pn_months')?.value||'36',10)||36));
-  const q = s => site ? '&site='+site : '';
-  const t=await (await fetch('/api/trend?granularity=month'+q(s))).json();
+  // ⚠ 这个辅助函数**不能带形参**。之前写成 `s => ...` 再 `q(s)` 调用，
+  // 实参 `s` 是在 loadTrend 的作用域里求值的，而 s 只存在于箭头的形参列表中，
+  // 于是必然 ReferenceError —— 而且整个面板静默空白（Promise 没人接）。
+  const qs = () => site ? '&site='+site : '';
+  const t=await (await fetch('/api/trend?granularity=month'+qs())).json();
   drawBars($('bar_month'), t.items.slice(-months));
-  const y=await (await fetch('/api/trend?granularity=year'+q(s))).json();
+  const y=await (await fetch('/api/trend?granularity=year'+qs())).json();
   drawBars($('bar_year'), y.items);
 }
 
