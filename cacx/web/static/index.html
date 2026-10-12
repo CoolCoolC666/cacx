@@ -248,6 +248,9 @@
           <input type="number" id="pn_months" value="36" min="6" max="120"
                  style="width:64px" onchange="loadPanel()"> 个月</label>
         <div class="grow"></div>
+        <button class="btn" style="padding:3px 10px;font-size:12px"
+          onclick="dlSnapshot()"
+          title="把整个数据面板导出成一个独立的 HTML 文件：双击即开、离线可看、可直接交作业">⬇ 面板 HTML</button>
         <span style="font-size:11.5px;color:var(--dim)">
           下载的是图里的**原始数据**（CSV），可直接进 Excel / 统计软件做图</span>
       </div>
@@ -2254,6 +2257,21 @@ function dlPanel(which, granularity){
   a.download='';
   document.body.appendChild(a); a.click(); a.remove();
   toast('已开始下载（CSV，可直接用 Excel / SPSS / Python 打开）');
+}
+
+/* 把整个面板导成一个独立的 HTML 文件。
+   这个 HTML 双击就开、离线可看、不需要 Python —— 交作业时它本身就是
+   一份「网站页面」材料，报告里也能直接引用。 */
+function dlSnapshot(){
+  const site=$('pn_site')?.value||'';
+  const months=Math.max(6, Math.min(120, parseInt($('pn_months')?.value||'36',10)||36));
+  const qs=new URLSearchParams({months:String(months), days:'30', top:'12'});
+  if(site) qs.set('site',site);
+  const a=document.createElement('a');
+  a.href='/api/panel/snapshot?'+qs.toString();
+  a.download='';
+  document.body.appendChild(a); a.click(); a.remove();
+  toast('已导出：双击 HTML 就能离线打开，也能直接当作业里的「网站页面」交');
 }
 
 /* 把柱状图画成 PNG 下载。
