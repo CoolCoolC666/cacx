@@ -269,6 +269,17 @@
           </select></label>
         <button class="btn" style="padding:5px 14px" onclick="runSample()">生成样本</button>
         <button class="btn" style="padding:5px 12px" onclick="dlSampleCsv()">⬇ 样本 CSV</button>
+        <button class="btn on" style="padding:5px 12px"
+                onclick="runExtract(false)"
+                title="用当前口径跑一次内置规则抽取，抽出实体与关系，但不写库（先看结果）">🔧 预览抽取</button>
+        <button class="btn on" style="padding:5px 12px"
+                onclick="runExtract(true)"
+                title="抽取并写入数据库，让关系图谱页有数据可画">🔧 抽取并写入</button>
+      </div>
+      <div style="font-size:12.5px;color:var(--dim);line-height:1.7;margin-top:10px">
+        抽取用<b>内置规则引擎</b>从原文实时抽取实体（机构/政策/治理问题/措施）与四类关系，
+        每条关系都带<b>可回溯的原文出处</b>，老师追问「这数哪来的」时可当场重跑、结果永远一致。<br>
+        <b>先点「预览抽取」</b>看结果，满意了再点「抽取并写入」让图谱页出图。
       </div>
     </div>
     <div class="box" id="sp_result" style="display:none">
@@ -283,6 +294,9 @@
       <h3>样本文章</h3>
       <div id="sp_list" style="max-height:420px;overflow:auto"></div>
     </div>
+    <div class="box" id="ex_result" style="display:none;margin-top:12px">
+      <h3>抽取结果</h3>
+    </div>
   </section>
 
   <!-- ============ 关系图谱 ============ -->
@@ -292,26 +306,45 @@
         <b style="font-size:13px">关系图谱</b>
         <span style="font-size:12.5px;color:var(--dim)" id="gp_stat"></span>
         <div class="grow"></div>
-        <label style="font-size:12.5px">关系类型
-          <select id="gp_rel" onchange="loadGraph()"><option value="">全部</option></select></label>
+        <label style="font-size:12.5px">最小度数
+          <input type="number" id="gp_mindeg" value="2" min="1" max="20"
+                 style="width:58px" onchange="loadGraph()"></label>
         <button class="btn" style="padding:5px 12px" onclick="loadGraph()">刷新</button>
+        <button class="btn" style="padding:5px 12px"
+                onclick="dlGraphHtml()" title="把整张图导出成一个独立的 HTML 文件：断网双击即开，可直接交作业">⬇ 图谱 HTML</button>
+        <button class="btn on" style="padding:5px 12px"
+                onclick="showTab('sample')"
+                title="图谱现在是空的？去样本配置器按同一口径跑一次抽取">🔧 去抽取数据</button>
       </div>
       <div style="font-size:12px;color:var(--dim);margin-top:8px;line-height:1.7">
-        实体与关系由 AI 通过 MCP 写入（<code>cacx_put_entities</code> /
-        <code>cacx_put_relations</code>），每条都带原文出处。<br>
-        <b>演示动作</b>：点下方任一条关系 → 右侧列出支撑它的原文，点标题跳回原文页。
+        数据由<b>内置规则引擎</b>从原文抽取（同一份数据永远抽出同样的结果，可当场重跑），
+        每条关系都带原文出处。<br>
+        <b>演示动作</b>：点图中任一条<b>边</b> → 右侧列出支撑它的原文句子，点标题跳回原文页。
       </div>
     </div>
+
+    <!-- 关联指标：权责边界的直接论据 -->
+    <div class="box" id="gp_metrics" style="margin-bottom:12px;display:none"></div>
+
     <div class="row" style="align-items:flex-start;gap:12px">
       <div class="box" style="flex:2;min-width:0">
-        <h3>边（共现强度）<span id="gp_cnt" style="font-weight:400;color:var(--dim);font-size:12px"></span></h3>
-        <div id="gp_edges" style="max-height:600px;overflow:auto"></div>
+        <h3>网络图
+          <span id="gp_cnt" style="font-weight:400;color:var(--dim);font-size:12px"></span></h3>
+        <div id="gp_canvas" style="height:620px;background:#0f1115;border-radius:6px;
+             border:1px solid var(--line)"></div>
+        <div id="gp_legend" style="margin-top:10px;display:flex;gap:14px;flex-wrap:wrap;
+             font-size:12px;color:var(--dim)"></div>
       </div>
-      <div class="box" style="flex:1;min-width:260px">
+      <div class="box" style="flex:1;min-width:280px">
         <h3 id="gp_detail_title">关系详情</h3>
         <div id="gp_detail" style="font-size:12.5px;color:var(--dim)">
-          点左边任意一条关系</div>
+          点图里任意一条<b>边</b>，这里会列出支撑它的原文</div>
       </div>
+    </div>
+
+    <div class="box" style="margin-top:12px">
+      <h3>边（共现强度）<span id="gp_cnt2" style="font-weight:400;color:var(--dim);font-size:12px"></span></h3>
+      <div id="gp_edges" style="max-height:320px;overflow:auto"></div>
     </div>
   </section>
 
@@ -1440,44 +1473,352 @@ function dlSampleCsv(){
   toast('已开始下载（CSV，含抽样口径页脚，可直接进 Excel）');
 }
 
-/* ---------------- 关系图谱 ---------------- */
-let GP_CACHE = [];
+/* ---------------- 规则抽取（供样本配置器一键调用） ---------------- */
+// ⚠ 口径必须与样本/CSV 走同一个 spQs()，否则「报告里 500 篇」
+//   和「图谱其实抽了另一批」会对不上——这是评审最容易抓的点。
+async function runExtract(write){
+  const q = spQs();
+  const body = {
+    site: q.get('site')||'', column: q.get('column')||'',
+    date_from: q.get('date_from')||'2024-01-01',
+    date_to:   q.get('date_to')||'2099-12-31',
+    limit: parseInt(q.get('limit')||'500',10)||500,
+    strategy:  q.get('strategy')||'stratified',
+    with_measures: true,
+    write: !!write,
+  };
+  const box = $('ex_result');
+  box.style.display = 'block';
+  box.innerHTML = `<div style="font-size:12.5px;color:var(--acc2)">
+    ${write?'正在抽取并写入':'正在抽取（预览）'}…
+    按 ${esc(body.date_from)} ~ ${esc(body.date_to)}、${esc(body.strategy)}、
+    上限 ${body.limit} 篇。500 篇约需十几秒，请稍候。</div>`;
+  try{
+    const r = await fetch('/api/extract/run', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    }).then(x=>x.json());
+    if(r.error){ box.innerHTML =
+      `<div style="color:var(--err);font-size:12.5px">✗ ${esc(r.error)}</div>`; return; }
+    const t = r.types||{}, rt = r.rel_types||{};
+    const TN = {org:'机构',policy:'政策',problem:'治理问题',measure:'措施'};
+    const RN = {issue:'发布',target:'针对',adopt:'采取',co_issue:'联合发文'};
+    const sum = (obj,map)=>Object.keys(obj).map(k=>
+      `<span>${esc(map[k]||k)} <b style="color:var(--acc2)">${obj[k]}</b></span>`).join('　');
+    box.innerHTML = `
+      <div style="font-size:13px;color:var(--acc2);font-weight:600;margin-bottom:6px">
+        ${write?'✓ 已写入数据库':'预览结果（未写库）'}</div>
+      <div style="font-size:12.5px;color:var(--dim);line-height:1.9">
+        口径命中 <b style="color:var(--acc2)">${r.scope.articles_found}</b> 篇，
+        耗时 <b style="color:var(--acc2)">${r.elapsed}s</b>。<br>
+        实体 <b style="color:var(--acc2)">${r.entity_total||0}</b>：
+        ${sum(t,TN)}<br>
+        关系 <b style="color:var(--acc2)">${r.relation_total||0}</b>：
+        ${sum(rt,RN)}<br>
+        ${r.written
+          ? `已写入：实体 <b>${r.written.entities}</b> 行、关系 <b>${r.written.relations}</b> 行。`
+          : '这是预览，数据库未变。满意后点「🔧 抽取并写入」。'}<br>
+        <span style="font-size:11.5px">
+          ${write
+            ? '现在去「关系图谱」页点刷新即可出图。'
+            : '结果可当场重跑复现；每条关系都能点回原文。'}</span>
+      </div>`;
+    toast(write ? `抽取完成，已写入图谱数据库` : '抽取完成（预览，未写库）');
+  }catch(e){
+    box.innerHTML = `<div style="color:var(--err);font-size:12.5px">
+      ✗ 抽取失败：${esc(e.message||e)}</div>`;
+  }
+}
+
+/* ---------------- 关系图谱 ---------------- */let GP_CACHE = [];        // 边列表（给下方表格与详情用）
+let GP_ANA = null;        // 关联分析结果
+let GP_NET = null;        // vis.Network 实例
+let GP_NODES = [];        // 供点击回调按 id 查
+
+// 四类实体：颜色 + 形状双编码。
+// ⚠ 不能只靠颜色 —— 色盲同学分不出蓝/绿。图例里也写明形状。
+const GP_STYLE = {
+  org:     {c:'#4c8dff', s:'dot',       cn:'机构'},
+  policy:  {c:'#b48bff', s:'square',    cn:'政策'},
+  problem: {c:'#ff6b6b', s:'triangle',  cn:'治理问题'},
+  measure: {c:'#5ddc9a', s:'diamond',   cn:'措施'},
+};
+const GP_SHAPE_CN = {dot:'圆', square:'方块', triangle:'三角', diamond:'菱形'};
+
+// vis-network 懒加载：只有进图谱页/导出时才拉那 469KB。
+// ⚠ 用 <script> 注入而不是 import()：这个包是 UMD，挂的是全局 vis。
+// ⚠ 失败要 reject 并给出可读原因 —— 否则 loadGraph 里 new vis.Network
+//   会报 undefined，排查时看不出是「没装 pyvis」还是「网络断了」。
+let _visPromise = null;
+function ensureVis(){
+  if(typeof vis !== 'undefined') return Promise.resolve(vis);
+  if(_visPromise) return _visPromise;
+  _visPromise = new Promise((resolve, reject)=>{
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = '/api/graph/vislib.css';
+    document.head.appendChild(link);
+    const sc = document.createElement('script');
+    sc.src = '/api/graph/vislib.js';
+    sc.onload = ()=> resolve(vis);
+    sc.onerror = ()=> reject(new Error('图渲染库加载失败：后端可能没装 pyvis'));
+    document.head.appendChild(sc);
+    // ⚠ 必须有超时兜底：若后端返回了错的 MIME（曾经用 HTMLResponse
+    //   返回 JS，浏览器按严格 MIME 静默拒绝执行），onload/onerror
+    //   **两个都不触发**，Promise 永远悬空 → loadGraph 整条卡死，
+    //   页面表现是「一片空白但控制台没有任何报错」，
+    //   排查时极难想到是 MIME 的问题。超时后必须 reject，
+    //   让 loadGraph 走 catch 分支，边列表和关联指标照样能显示。
+    setTimeout(()=> reject(new Error(
+      '图渲染库加载超时（20s）。若刷新后图谱空白，多半是 vis 脚本 MIME 不对')), 20000);
+  }).catch(e=>{ _visPromise = null; throw e; });
+  return _visPromise;
+}
 
 async function loadGraph(){
-  const st = await fetch('/api/graph/stats').then(x=>x.json()).catch(()=>null);
-  $('gp_stat').innerHTML = st ? (
-    `实体 <b>${st.entity_total}</b>（机构 ${st.entity_orgs}）· `+
-    `关系 <b>${st.relation_total}</b> 条 / ${st.rel_pairs} 对 · `+
-    `无原文证据 <b style="color:${st.no_evidence?'#c98':'var(--dim)'}">${st.no_evidence}</b>`
-  ) : '';
-
-  const rel = $('gp_rel').value;
-  const g = await fetch('/api/graph?limit=500').then(x=>x.json());
-  GP_CACHE = g.edges || [];
-  const types = [...new Set(GP_CACHE.map(e=>e.rel_type))];
-  const cur = $('gp_rel').value;
-  $('gp_rel').innerHTML = '<option value="">全部</option>' +
-    types.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('');
-  $('gp_rel').value = types.includes(cur) ? cur : '';
-
-  const edges = rel ? GP_CACHE.filter(e=>e.rel_type===rel) : GP_CACHE;
-  $('gp_cnt').textContent = `（${edges.length} 条）`;
-  if(!edges.length){
-    $('gp_edges').innerHTML =
-      '<div class="dim">还没有关系数据。实体与关系由 AI 通过 MCP 写入，'
-      +'或用下面的提示词让组员的智能体来填。</div>';
+  const md = parseInt($('gp_mindeg')?.value || '2', 10) || 2;
+  const stat = $('gp_stat');
+  if(!stat) return;                 // 图谱区已被隐藏/卸载，别往下走
+  stat.textContent = '加载中…';
+  // ⚠ **数据请求不能排在 vis 之后**。vis-network 有 692KB，一旦它慢或失败，
+  //   后面所有接口一个都发不出去 —— 症状是整页停在「加载中…」且控制台无报错，
+  //   极难定位。所以：先把统计/指标/边列表渲染出来（这部分不依赖图库），
+  //   图库在后面单独加载，失败也只影响画布那一块。
+  try{
+    const [st, an] = await Promise.all([
+      fetch('/api/graph/stats').then(x=>x.json()).catch(()=>null),
+      fetch(`/api/graph/analysis?min_degree=${md}&limit=300&topn=12`)
+        .then(x=>x.json()).catch(()=>null),
+    ]);
+    if(st) $('gp_stat').innerHTML = (
+      `实体 <b>${st.entity_total}</b>（机构 ${st.entity_orgs}）· `+
+      `关系 <b>${st.relation_total}</b> 条 / ${st.rel_pairs} 对 · `+
+      `无原文证据 <b style="color:${st.no_evidence?'#c98':'var(--dim)'}">${st.no_evidence}</b>`);
+    GP_ANA = an;
+    renderMetrics(an);
+    const g = await fetch('/api/graph?limit=500').then(x=>x.json());
+    GP_CACHE = g.edges || [];
+    renderEdges();
+  }catch(e){
+    $('gp_stat').innerHTML =
+      `<span style="color:var(--warn)">${esc(e.message||e)}</span>`;
     return;
   }
-  $('gp_edges').innerHTML = edges.map((e,i)=>{
+  // ---- 以上不依赖图库；下面才画图 ----
+  try{
+    // vis-network 从**本机后端**内联加载（不是 CDN）—— 教室没网也能出图。
+    await ensureVis();
+    renderNet(GP_ANA);
+  }catch(e){
+    // 图失败**不该**让整页信息归零：边列表和关联指标已经在上面渲染好了。
+    const host = $('gp_canvas');
+    if(host) host.innerHTML = `<div class="empty" style="padding:50px 20px;
+      line-height:1.9">网络图暂不可用：${esc(e.message||e)}<br>
+      <span style="font-size:11.5px">上方指标与边列表不受影响，
+      点边仍可回溯原文；点上方「刷新」可重试画图。</span></div>`;
+    if(stat) stat.innerHTML +=
+      `　<span style="color:var(--warn)">（图渲染失败：${esc(e.message||e)}）</span>`;
+  }
+}
+
+// 关联指标卡片 —— 权责边界的直接论据
+function renderMetrics(a){
+  const box = $('gp_metrics');
+  if(!a || !a.nodes){ box.style.display='none'; return; }
+  const col = (title, arr, key, note) => `
+    <div style="min-width:0;flex:1">
+      <div style="font-size:12px;color:var(--dim);margin-bottom:6px">${title}
+        <span style="opacity:.75">${note||''}</span></div>
+      ${(arr||[]).slice(0,6).map((x,i)=>`
+        <div class="row" style="gap:6px;font-size:12.5px;padding:2px 0">
+          <span style="color:var(--dim);width:16px;flex:none">${i+1}</span>
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+            white-space:nowrap" title="${esc(x.name)}">${esc(x.name)}</span>
+          <b style="color:var(--acc2);flex:none">${x[key]}</b>
+        </div>`).join('')}
+    </div>`;
+  // ⚠ 介数要单独说明「为什么不等于权责边界」，否则容易被误读成
+  //   「网信办度最高 = 什么都管」。这是报告里的核心区分。
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div style="font-size:13px;color:var(--acc2);font-weight:600;margin-bottom:4px">
+      关联指标（networkx）· ${esc(a.summary||'')}</div>
+    <div style="font-size:11.5px;color:var(--dim);margin-bottom:12px;line-height:1.7">
+      度 = 参与多少条关系（只能说明「出现得多」）；
+      <b style="color:var(--warn)">介数</b> = 有多少最短路径经过它，
+      这才反映「在部门协作里是不是居中协调」——
+      <b>度中心性 ≠ 权责边界</b>，报告里要写清这个区分。
+      ${a.blocked_count?`低置信节点 ${a.blocked_count} 个未进图。`:''}
+    </div>
+    <div class="row" style="gap:18px;align-items:flex-start;flex-wrap:wrap">
+      ${col('介数 Top（协调中枢）', a.betweenness, 'betweenness', '← 权责边界')}
+      ${col('加权度 Top（合作最密集）', a.strength, 'strength')}
+      ${col('度 Top（出现最多）', a.degree, 'degree')}
+      ${col('PageRank Top', a.pagerank, 'pagerank')}
+    </div>
+    ${a.by_type && a.by_type.length ? `
+    <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line);
+         font-size:12px;color:var(--dim);line-height:1.8">
+      关系类型占比：${a.by_type.map(t=>`${esc(t.rel_type)} <b style="color:var(--acc2)">${t.count}</b>（${t.pct}%）`).join('　')}
+      ${a.components?`　· ${a.components} 个连通块，最大 ${a.largest_component} 节点`:''}
+    </div>` : ''}`;
+}
+
+function renderNet(a){
+  const host = $('gp_canvas');
+  if(GP_NET){ try{ GP_NET.destroy(); }catch(e){} GP_NET=null; }
+  const nodes = (a && a.graph && a.graph.nodes) || [];
+  const edges = (a && a.graph && a.graph.edges) || [];
+  GP_NODES = nodes;
+  if(!nodes.length){
+    host.innerHTML = `<div class="empty" style="padding:80px 20px;line-height:1.9">
+      还没有关系数据。<br>
+      点右上角「🔧 去抽取数据」，在样本配置器里按同一口径跑一次规则抽取。<br>
+      <span style="font-size:11.5px">或让 AI 通过 MCP 的
+      <code>cacx_put_entities</code> / <code>cacx_put_relations</code> 写入。</span></div>`;
+    $('gp_cnt').textContent = '';
+    return;
+  }
+  const hidden = a.graph.hidden_nodes || 0;
+  $('gp_cnt').textContent = `（${nodes.length} 节点 / ${edges.length} 边`+
+    (hidden?`，已折叠 ${hidden} 个低度数节点`:'')+'）';
+  host.innerHTML = '';
+
+  // vis-network 由后端内联进来了（零 CDN）。若没加载成功给出明确提示，
+  // 而不是留一块黑漆漆的空白让人以为是 bug。
+  if(typeof vis === 'undefined'){
+    host.innerHTML = '<div class="empty" style="padding:60px 20px">'+
+      '图渲染库没加载成功。<br>请刷新页面；若仍失败，检查后端 pyvis 是否安装：'+
+      '<code>pip install pyvis</code></div>';
+    return;
+  }
+
+  const ds = new vis.DataSet(nodes.map(n=>{
+    const g = n.group || 'org';
+    const st = GP_STYLE[g] || GP_STYLE.org;
+    return {id:n.id, label:n.label||n.id, group:g,
+            size:n.size||16, title:n.title||'',
+            color:{background:st.c, border:'#e6e8ee', highlight:{background:st.c, border:'#fff'}},
+            shape:st.s, font:{color:'#e6e8ee', size:13},
+            borderWidth: n.degree>=20 ? 2 : 1,
+            value: n.degree||1};
+  }));
+  const de = new vis.DataSet(edges.map((e,i)=>({
+    id:'e'+i, from:e.from, to:e.to,
+    width: Math.min(6, Math.max(1, (e.weight||1)*0.6)),
+    color:{color:'#3a4a63', highlight:'#7ab8ff', hover:'#7ab8ff',
+           opacity:0.85},
+    title:e.title||'', weight:e.weight||1, types:e.types||[],
+    _from:e.from, _to:e.to,
+  })));
+
+  GP_NET = new vis.Network(host, {nodes:ds, edges:de}, {
+    physics:{stabilization:{iterations:220},
+             barnesHut:{springLength:130, avoidOverlap:0.25}},
+    interaction:{hover:true, tooltipDelay:120, navigationButtons:true,
+                 keyboard:true},
+    nodes:{borderWidth:1},
+    edges:{smooth:{type:'continuous'}, font:{color:'#9aa3b2', size:10,
+           strokeWidth:0, align:'middle'}},
+  });
+
+  // 点边 → 右侧列出原文证据（老师要的核心交互）
+  GP_NET.on('doubleClick', p=>{
+    if(p.nodes.length){ focusNode(p.nodes[0]); return; }
+    if(p.edges.length){
+      const e = de.get(p.edges[0]);
+      if(e) showEdgeEvidence(e._from, e._to, (e.types||[])[0]||'');
+    }
+  });
+  // 单击边也响应 —— 演示时未必记得双击
+  GP_NET.on('click', p=>{
+    if(p.edges.length){
+      const e = de.get(p.edges[0]);
+      if(e){ showEdgeEvidence(e._from, e._to, (e.types||[])[0]||''); return; }
+    }
+    if(p.nodes.length) focusNode(p.nodes[0]);
+  });
+
+  $('gp_legend').innerHTML = Object.keys(GP_STYLE).map(k=>{
+    const st = GP_STYLE[k];
+    const shapes = {dot:'●', square:'■', triangle:'▲', diamond:'◆'};
+    return `<span style="display:inline-flex;align-items:center;gap:5px">
+      <span style="color:${st.c};font-size:13px">${shapes[st.s]}</span>
+      ${st.cn}</span>`;
+  }).join('') + `<span style="opacity:.7">节点大小 ∝ 度　·　
+    悬停看指标　·　单击/双击边看原文</span>`;
+}
+
+function focusNode(id){
+  if(!GP_NET) return;
+  GP_NET.selectNodes([id]);
+  GP_NET.focus(id, {scale:1.3, animation:true});
+  const n = GP_NODES.find(x=>x.id===id);
+  if(n) $('gp_detail').innerHTML =
+    `<div style="font-size:13px;color:var(--fg);margin-bottom:8px">${esc(id)}</div>
+     <div style="line-height:2;color:var(--dim)">
+       度 <b style="color:var(--acc2)">${n.degree}</b>　
+       加权度 <b style="color:var(--acc2)">${n.strength}</b><br>
+       介数 <b style="color:var(--warn)">${n.betweenness}</b>　
+       PageRank <b style="color:var(--acc2)">${n.pagerank}</b><br>
+       社区编号 ${n.community}
+     </div>
+     <div class="dim" style="margin-top:10px;font-size:11.5px;line-height:1.7">
+       介数高说明它在部门协作路径中居中，是「牵头协调」的量化迹象；
+       单看度数高只能说明它出现得多。</div>`;
+  $('gp_detail_title').textContent = '节点详情';
+}
+
+function showEdgeEvidence(src, dst, relType){
+  $('gp_detail_title').textContent = '关系详情';
+  $('gp_detail').innerHTML =
+    `<div style="font-size:13px;margin-bottom:6px">${esc(src)} → ${esc(dst)}</div>
+     <div class="dim" style="margin-bottom:8px">正在取原文证据…</div>`;
+  fetch(`/api/graph/evidence?src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}`+
+        `&rel_type=${encodeURIComponent(relType||'')}`)
+    .then(x=>x.json()).then(r=>{
+      const rows = r.items || [];
+      if(!rows.length){ $('gp_detail').innerHTML =
+        `<div style="font-size:13px;margin-bottom:6px">${esc(src)} → ${esc(dst)}</div>
+         <div class="dim">没有证据记录</div>`; return; }
+      $('gp_detail').innerHTML =
+        `<div style="font-size:13px;margin-bottom:6px">${esc(src)} → ${esc(dst)}</div>
+         <div class="dim" style="margin-bottom:8px">
+           ${esc(relType||'关系')} · ${rows.length} 条原文证据</div>
+         <div style="max-height:460px;overflow:auto">` +
+        rows.map(x=>`
+          <div style="padding:6px 0;border-bottom:1px solid var(--line)">
+            <a href="#" onclick="detail(${x.article_id});return false;"
+               class="ln">${esc(x.article_title||('文章 '+x.article_id))}</a>
+            <div class="dim" style="font-size:11.5px">${esc(x.pub_day||'')}</div>
+            ${x.evidence?`<div style="font-size:12px;margin-top:3px;line-height:1.65;
+              border-left:2px solid var(--acc);padding-left:7px">${esc(x.evidence.slice(0,180))}${
+              x.evidence.length>180?'…':''}</div>`:''}
+            ${x.url?`<a href="${esc(x.url)}" target="_blank" rel="noopener"
+              style="font-size:11.5px">打开原文 ↗</a>`:''}
+          </div>`).join('') + `</div>`;
+    }).catch(()=>{
+      $('gp_detail').innerHTML =
+        `<div class="dim" style="color:var(--err)">证据加载失败</div>`;
+    });
+}
+
+function renderEdges(){
+  if(!GP_CACHE.length){
+    $('gp_edges').innerHTML = '<div class="dim">还没有关系数据</div>';
+    $('gp_cnt2').textContent = '';
+    return;
+  }
+  const label = {issue:'发布', target:'针对', adopt:'采取', co_issue:'联合发文'};
+  $('gp_cnt2').textContent = `（${GP_CACHE.length} 条）`;
+  $('gp_edges').innerHTML = GP_CACHE.slice(0,300).map((e,i)=>{
     const nid = (e.article_ids||[]).length;
-    return `<div class="row" style="padding:6px 8px;border-bottom:1px solid var(--line);
-      cursor:pointer" ondblclick="gpDetail(${i})">
+    return `<div class="row" style="padding:5px 8px;border-bottom:1px solid var(--line);
+      cursor:pointer" onclick="gpDetail(${i})">
       <span style="flex:1;min-width:0">${esc(e.src_name)}
         <span style="color:var(--dim)">→</span> ${esc(e.dst_name)}</span>
-      <span style="color:var(--dim);flex:none;font-size:11.5px">${esc(e.rel_type)}</span>
+      <span style="color:var(--dim);flex:none;font-size:11.5px">${esc(label[e.rel_type]||e.rel_type)}</span>
       <b style="flex:none;font-size:12px" title="出现在 ${nid} 篇文章里">${e.n}</b>
-      <button class="btn" style="padding:1px 8px;font-size:11px;flex:none"
-        onclick="gpDetail(${i})">回溯原文 ${nid}</button>
     </div>`;
   }).join('');
 }
@@ -1485,31 +1826,24 @@ async function loadGraph(){
 function gpDetail(i){
   const e = GP_CACHE[i];
   if(!e) return;
-  const rel = $('gp_rel').value;
-  const list = rel ? GP_CACHE.filter(x=>x.rel_type===rel) : GP_CACHE;
-  const idx = list.indexOf(e);
-  $('gp_detail_title').innerHTML =
-    `${esc(e.src_name)} → ${esc(e.dst_name)}`;
-  $('gp_detail').innerHTML =
-    `<div class="dim" style="margin-bottom:8px">关系类型 ${esc(e.rel_type)} ·
-      共现于 ${e.n} 篇文章 · 权重 ${e.weight}</div>
-     <div id="gp_ev" style="max-height:420px;overflow:auto"></div>`;
-  const ids = e.article_ids || [];
-  fetch('/api/relations?limit=500').then(x=>x.json()).then(r=>{
-    const rows = (r.items||[]).filter(x=>
-      (x.src_name===e.src_name && x.dst_name===e.dst_name && x.rel_type===e.rel_type)
-      || (x.src_name===e.dst_name && x.dst_name===e.src_name && x.rel_type===e.rel_type));
-    const box = $('gp_ev');
-    if(!rows.length){ box.innerHTML='<div class="dim">没有证据记录</div>'; return; }
-    box.innerHTML = rows.map(x=>`
-      <div style="padding:5px 0;border-bottom:1px solid var(--line)">
-        <a href="#" onclick="detail(${x.article_id});return false;"
-           class="ln">${esc(x.article_title||('文章 '+x.article_id))}</a>
-        <div class="dim" style="font-size:11.5px">${esc(x.pub_day||'')}</div>
-        ${x.evidence?`<div style="font-size:11.5px;color:var(--dim);margin-top:2px">
-          「${esc(x.evidence.slice(0,120))}」</div>`:''}
-      </div>`).join('');
-  });
+  showEdgeEvidence(e.src_name, e.dst_name, e.rel_type);
+}
+
+async function dlGraphHtml(){
+  const md = parseInt($('gp_mindeg')?.value || '2', 10) || 2;
+  toast('正在生成图谱 HTML…');
+  try{
+    const r = await fetch(`/api/graph/vis?min_degree=${md}&limit=300`).then(x=>x.json());
+    if(r.error){ toast(r.error); return; }
+    const blob = new Blob([r.html], {type:'text/html;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cacx_关系图谱_${new Date().toISOString().slice(0,10)}.html`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 1500);
+    toast(`已下载（${r.nodes} 节点 / ${r.edges} 边，断网双击即开）`);
+  }catch(e){ toast('生成失败：'+(e.message||e)); }
 }
 
 function showTab(t){

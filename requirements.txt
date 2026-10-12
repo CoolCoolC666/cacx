@@ -16,5 +16,15 @@ mcp>=2.3
 # 内置领域词典必须配合使用：默认分词会把「中央网信办」切成 中央/网信/办
 jieba>=0.42
 
+# 关系图谱可视化：pyvis 生成单文件 HTML，其自带 vis-network 会**内联**进产物，
+# 断网双击即开（教室没网是硬约束，不能有 CDN 外链）。
+# 已实测 pyvis 0.3.2：默认会引 4 条 CDN 外链，但 vis-network.min.js/.css
+# 就在包内 lib/vis-<ver>/，由 cacx/web/app.py 读出来内联 → 零外链。
+pyvis>=0.3.2
+
+# 关联分析：度/加权度/介数/PageRank/Louvain 社区/连通块。
+# 已实测 networkx 3.6.1 全部指标出数；Louvain 固定 seed=42 保证可复现。
+networkx>=3.0
+
 # 可选：测试
 # pytest>=8.0

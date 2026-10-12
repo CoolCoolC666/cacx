@@ -209,7 +209,44 @@ def _org_mentions(text: str) -> List[Tuple[str, int]]:
                 # 命中即停：否则「中央网信办」后面还会拼出
                 # 「中央网信办公安部」这种超长垃圾
                 break
-    return hits
+    return _drop_substring_orgs(hits)
+
+
+def _drop_substring_orgs(hits: List[Tuple[str, int]]) -> List[Tuple[str, int]]:
+    """
+    同一篇里，**若 A 是 B 的严格子串，丢掉 A**，只留更长的 B。
+
+    ⚠ 这是并列切分的必然后果：「中国志愿服务联合会」被切成
+    「中国志愿服务联合会」+「志愿服务联合会」两个节点，
+    「农业农村部」多出一个「农村部」，「国家互联网应急中心」多出
+    「互联网应急中心」——实测边列表里满屏都是
+    「中国志愿服务联合会→志愿服务联合会」「农业农村部→农村部」。
+    图上因此出现一堆同义重复节点，居中性和介数都会被稀释。
+
+    ⚠ 只在**同一篇**内消除：跨篇合并是 db 的事，
+      在这里跨篇判断会把「农村部」（真机构，单独出现时）
+      误删，因为它恰好是别的篇里「农业农村部」的子串。
+
+    ⚠ 用「唯一最长的那个」判定，不是「任一更长者」——
+      否则 A⊂B 且 B⊂C 时 A 会因 B 被删、也可能因 C 被删，
+      顺序依赖导致结果不可复现。
+    """
+    if len(hits) < 2:
+        return hits
+    names = [h[0] for h in hits]
+    drop = set()
+    for a in names:
+        supers = [b for b in names
+                  if b != a and a in b and len(b) > len(a)]
+        if not supers:
+            continue
+        # 只被**唯一的最长**上位词包含才删；有多个不同长度的上位词
+        # 说明它可能是另一个真机构（如「网信办」之于多个上级），保留。
+        longest = {b for b in supers if not any(
+            b in c and len(c) > len(b) for c in supers)}
+        if len(longest) == 1:
+            drop.add(a)
+    return [(nm, pos) for nm, pos in hits if nm not in drop]
 
 
 # 以这些词结尾的，一律不是机构（会议/峰会/活动/代表大会…）
@@ -482,14 +519,31 @@ def _build_relations(full: str, title: str, orgs, ents, add_rel):
         add_rel(a, b, "co_issue", pos, w)
 
     def _link(rx, objs, rtype, w, obj_n=5, org_n=3):
+        """
+        触发词命中 → 建「机构 → 对象」边。
+
+        ⚠ 必须**逐句**判定，不能只在全文搜一次触发词就无差别连边：
+          早期版本 rx.search(full) 全文取第一次命中，然后与全部机构×对象
+          连边 —— 结果「中央网信办→个人信息」这种公共词组合会命中整篇里
+          毫不相干的句子（实测点到 17 条证据，里面混着「信息清除」
+          「汽车数据安全」「数字乡村」，全是噪声）。
+          现在改成：在**含触发词的那一句**里，要求机构与对象词同时出现
+          才建边 —— 证据句子本身就是判定依据，回溯时看到的那句话
+          必须真的同时提到这两个主体。
+        """
         if not objs or not org_names:
             return
-        m = rx.search(full)
-        if not m:
-            return
-        for o in org_names[:org_n]:
-            for obj in objs[:obj_n]:
-                add_rel(o, obj, rtype, m.start(), w)
+        for base, sent in split_sentences(full):
+            m = rx.search(sent)
+            if not m:
+                continue
+            hit_orgs = [o for o in org_names if o in sent][:org_n]
+            hit_objs = [ob for ob in objs if ob in sent][:obj_n]
+            for o in hit_orgs:
+                for obj in hit_objs:
+                    # 位置换算回全文（split_sentences 用的是切片，
+                    # 直接把句内偏移加上 base 才能截出正确证据）
+                    add_rel(o, obj, rtype, base + m.start(), w)
 
     for rt in ("issue", "target", "adopt"):
         rx, w = _REL_TRIGGER[rt]

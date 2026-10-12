@@ -1131,6 +1131,44 @@ def api_graph_evidence(src: str, dst: str, rel_type: str = "",
                                              limit=limit)}
 
 
+_VIS_CACHE: Dict[str, str] = {}
+
+
+@app.get("/api/graph/vislib.js")
+def api_graph_vislib_js():
+    """
+    把 vis-network 的 JS 内联到**主页面**里（零 CDN）。
+
+    ⚠ 必须显式声明 Content-Type: application/javascript，不能用
+      HTMLResponse —— 那会返回 text/html，浏览器按严格 MIME 检查
+      **拒绝执行** <script src>，onload 不触发，ensureVis() 的 Promise
+      永远悬空，loadGraph() 整条卡死（症状：图谱页一片空白，
+      且只在**刷新后**出现，因为首屏 vis 可能已被别的路径注入）。
+    ⚠ 缓存：469KB 不该每次进图谱页都重传。
+    """
+    lib = _pyvis_lib_dir()
+    if not lib:
+        raise HTTPException(500, "缺少 vis-network 资源，请 pip install pyvis")
+    if "js" not in _VIS_CACHE:
+        _VIS_CACHE["js"] = Path(lib, "vis-network.min.js").read_text(
+            encoding="utf-8")
+    return Response(_VIS_CACHE["js"],
+                    media_type="application/javascript; charset=utf-8")
+
+
+@app.get("/api/graph/vislib.css")
+def api_graph_vislib_css():
+    """vis-network 的 CSS（220KB），同样内联；MIME 必须是 text/css"""
+    lib = _pyvis_lib_dir()
+    if not lib:
+        raise HTTPException(500, "缺少 vis-network 资源，请 pip install pyvis")
+    if "css" not in _VIS_CACHE:
+        _VIS_CACHE["css"] = Path(lib, "vis-network.css").read_text(
+            encoding="utf-8")
+    return Response(_VIS_CACHE["css"],
+                    media_type="text/css; charset=utf-8")
+
+
 @app.get("/api/graph/vis")
 def api_graph_vis(min_degree: int = Query(1, ge=1, le=50),
                   limit: int = Query(300, ge=1, le=1000)):
