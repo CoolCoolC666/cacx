@@ -90,6 +90,78 @@ def tag_many(cfg: Dict, arts: List[Dict[str, Any]], dry_run: bool = True) -> Any
     return parse_json(raw, [])
 
 
+#: 主题分类的**候选词表**。
+#: ⚠ 必须是受控词表，不能让模型自由发挥主题名 ——
+#:   4513 篇自由打标会得到几百个不同标签名，压根没法按月聚合画图，
+#:   还会顺手引入提示注入（模型可能被正文里的句子带跑，
+#:   输出「忽略前面的指令」之类的东西当标签）。
+#:   这与「模型返回的 word 必须过候选白名单」是同一条纪律。
+THEME_LABELS = (
+    "网络谣言", "网络诈骗", "未成年人", "个人信息", "数据安全",
+    "网络暴力", "深度伪造", "生成式AI", "算法推荐",
+    "App违规", "账号链条", "数据出境", "跨境数据",
+    "网络执法", "清朗行动", "个人信息保护", "反诈宣传",
+    "党建学习", "基层治理", "数字化转型", "other",
+)
+
+_SYS_THEME = (
+    "你是舆情文本分类助手。下面是若干篇政府网站文章的梗概，"
+    "每篇以 `id: N` 开头，以 --- 分隔。\n"
+    "请为**每一篇**从下列候选主题中选出最多 2 个最贴切的：\n"
+    "  {labels}\n"
+    "规则：\n"
+    "1. 只能从候选里选，**不要自造主题名**；都不贴切就选 other。\n"
+    "2. 一篇最多 2 个，宁缺毋滥；确实没有就给 []。\n"
+    "3. 只依据文章内容判断，不要输出解释。\n"
+    "输出严格 JSON 数组，每个元素形如 "
+    '{{"id": 1, "themes": ["个人信息"]}}，必须覆盖输入里的每个 id。'
+    "只输出 JSON，不要任何前后缀。"
+)
+
+
+def theme_many(cfg: Dict, arts: List[Dict[str, Any]],
+               dry_run: bool = True, per_call: int = 12) -> Any:
+    """
+    批量主题分类 —— 一次调用给多篇打主题标签。
+
+    ⚠ MiroFish 那套「批量 LLM 调用」的思路（多个请求打包成一次
+      API 调用，成本降 ~50%、速度升 5–10 倍）已用于此处：
+      **一次装 12 篇**，而不是 4513 篇逐个调。
+
+    ⚠ per_call 不能贪大：每篇截 600 字，12 篇约 7200 字 +
+      prompt 约 400 字。批次太大会被模型悄悄截断后半段，
+      表现为「后面的文章莫名其妙全是 other」——
+      这类静默劣化比报错难查得多。
+    """
+    p = build(cfg, task="theme")
+    if p is None:
+        raise AIError("AI 未配置")
+    use = arts[:max(1, int(per_call))]
+    blocks = "\n\n---\n\n".join(
+        _article_block(a, 600) for a in use)
+    sys_p = _SYS_THEME.format(labels="、".join(THEME_LABELS))
+    raw = p.chat(sys_p, blocks, dry_run=dry_run)
+    if dry_run:
+        return json.loads(raw)
+    out = parse_json(raw, [])
+    # ⚠ 白名单过滤：模型自造的主题名一律丢弃，绝不写库。
+    #   不静默丢弃 —— 丢掉的数量在批处理层可见，否则界面上的
+    #   「AI 分类占比」会缺一块却没人知道。
+    clean = []
+    dropped = 0
+    for row in out if isinstance(out, list) else []:
+        if not isinstance(row, dict):
+            continue
+        themes = row.get("themes")
+        themes = themes if isinstance(themes, list) else []
+        ok = [str(t).strip() for t in themes
+              if str(t).strip() in THEME_LABELS]
+        dropped += len(themes) - len(ok)
+        clean.append({"id": row.get("id"), "themes": ok[:2]})
+    return {"rows": clean, "dropped": dropped,
+            "asked": len(use), "labels": list(THEME_LABELS)}
+
+
 SYS_DIAGNOSE = (
     "你是爬虫维护工程师。下面是一个政务网站采集器的自检结果，"
     "请判断最可能的原因并给出具体修复建议。"

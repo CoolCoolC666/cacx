@@ -58,6 +58,7 @@ from ..ai import advisory as advisory_run
 from ..ai import diagnose as ai_diagnose
 from ..ai import summarize as ai_summarize
 from ..ai import status as ai_status
+from ..ai import THEME_LABELS
 from ..ai.base import AIError
 from ..ai.tasks import review_new_words as ai_review
 
@@ -342,6 +343,267 @@ def api_events(days: int = Query(30, ge=1, le=365), site: str = ""):
 # 与旁边那张「检索行为」（我们自己的操作记录）是两回事。
 _PANEL_D0 = "2024-01-01"
 _PANEL_D1 = "2099-12-31"
+# 时间轴主题图显示几类。**必须是一个共享常量**：网页、CSV 导出、
+# 快照导出都从这里取。早先快照端用了自己的 limit 参数当 top，
+# 于是同一份数据网页出 6 类、导出出 10 类 —— 两张图并排贴 PPT 时，
+# 「为什么这里比那里多几层」没人答得上来。
+_TL_TOP = 6
+
+
+def _timeline_impl(site: str = "", top: int = _TL_TOP,
+                   date_from: str = "", date_to: str = "",
+                   include_ai: bool = True,
+                   months_n: int = 0) -> Dict[str, Any]:
+    """
+    时间轴的**内部实现**（路由、网页端与快照导出都调它）。
+
+    ⚠ 必须抽成独立函数，不能让快照导出直接调路由函数：
+      路由参数的默认值是 `Query(6, ...)` **参数对象**，不是数字。
+      走 HTTP 时框架会替换掉，走内部调用时不会 ——
+      int() 直接炸（TypeError: '>' not supported between 'Query' and 'int'）。
+      这个坑在 /api/graph/analysis 上已经踩过一次。
+
+    ⚠ 两张图共用**同一个月份集合**（以发文量的区间为准）：
+      发文量按「所有文章」数，主题按「有正文的文章」数，
+      两个分母本来就不一样（正文为空的列表页占位也被算进发文量）。
+      各自按自己的月份出图的话，横轴长度不同，并排看就像数据打架。
+
+    ⚠ 末月通常**不完整**（当月还没过完），画趋势时最后一点偏低，
+      界面上必须标出来，否则会被当成"发文量在跌"。
+
+    ⚠ SVG 在**服务端**生成并随 payload 一起返回。网页和快照导出
+      调的是同一个函数、同一份参数，所以「屏幕 = 导出」是构造出来的，
+      不靠两边各写一遍图然后祈祷它们一致 ——
+      之前就是各写一遍，前端那份算错 mx 时单根柱子高 2208px。
+    """
+    d = _db()
+    dflt_f, dflt_t = _PANEL_D0, _PANEL_D1
+    top = max(1, min(10, int(top)))
+    vol = d.article_monthly_trend(site=site,
+                                  date_from=date_from or dflt_f,
+                                  date_to=date_to or dflt_t)
+    themes = d.problem_monthly(site=site,
+                               date_from=date_from or dflt_f,
+                               date_to=date_to or dflt_t, top=top)
+    months = [r["month"] for r in vol]
+    # _sites 只挂在 article_monthly_trend 的第一行上，**必须先取出来**：
+    # 下面按尾部 N 个月切片之后，行首已经不是原来那一行了。
+    sites = (vol[0].get("_sites") if vol else []) or []
+    tmap = {r["month"]: r for r in themes}
+    kept = (themes[0].get("_kept") if themes else []) or []
+    dropped = (themes[0].get("_dropped") if themes else []) or []
+    trows = []
+    for m in months:
+        t = tmap.get(m)
+        trows.append({"month": m, "total": (t or {}).get("total", 0),
+                      "problems": (t or {}).get("problems",
+                                                 {k: 0 for k in kept})})
+    # ---- AI 口径（同一批月份，横轴对齐）----
+    ai = None
+    if include_ai:
+        arows = d.ai_theme_monthly(months=months, site=site,
+                                   date_from=date_from or dflt_f,
+                                   date_to=date_to or dflt_t)
+        totals = (arows[0].get("_totals") if arows else {}) or {}
+        top_ai = [k for k, _ in sorted(totals.items(),
+                                       key=lambda kv: -kv[1])[:top]]
+        amap = {r["month"]: r for r in arows}
+        ai = {
+            "rows": [{"month": m,
+                      "labeled": (amap.get(m) or {}).get("labeled", 0),
+                      "themes": {k: (amap.get(m) or {}).get("themes", {}).get(k, 0)
+                                 for k in top_ai}}
+                     for m in months],
+            "kept": top_ai,
+            "coverage": d.theme_coverage(site=site,
+                                         date_from=date_from or dflt_f,
+                                         date_to=date_to or dflt_t),
+        }
+    last_month = months[-1] if months else ""
+    # ---- 只截**尾部** N 个月，且**在服务端切** ----
+    #   前端再自己 slice 一次的话，两边口径就对不上了
+    #   （网页的月份下拉是面板全局筛选，时间轴必须跟着它走）。
+    if months_n and len(months) > months_n:
+        keep = set(months[-months_n:])
+        vol = [r for r in vol if r["month"] in keep]
+        trows = [r for r in trows if r["month"] in keep]
+        if ai:
+            ai["rows"] = [r for r in ai["rows"] if r["month"] in keep]
+        months = [r["month"] for r in vol]
+        last_month = months[-1] if months else ""
+
+    # ---- 出图（服务端）----
+    # 发文量按站点堆叠；没有站点维度时退化成单序列「发文量」
+    vkeys = list(sites) or ["发文量"]
+    vrows = [{"month": r["month"],
+              "problems": ({s: r.get(s, 0) for s in vkeys} if sites
+                           else {"发文量": r["total"]})}
+             for r in vol]
+    vpal = _tl_palette(vkeys)
+    tpal = _tl_palette(kept)
+    apal = _tl_palette(ai["kept"] if ai else [])
+    charts = {
+        "volume": _svg_stack(vrows, vkeys, vpal, unit=" 篇",
+                             partial_last=True)
+                   + _tl_legend(vkeys, vpal),
+        "theme_kw": (_svg_stack(trows, kept, tpal, unit=" 次",
+                                partial_last=True) + _tl_legend(kept, tpal)
+                     if kept else '<div class="empty">该筛选下无主题数据</div>'),
+        "theme_ai": ((_svg_stack([{"month": r["month"], "problems": r["themes"]}
+                                 for r in ai["rows"]],
+                                ai["kept"], apal, unit=" 次",
+                                partial_last=True)
+                      + _tl_legend(ai["kept"], apal))
+                     if ai and ai["kept"]
+                     else '<div class="empty">还没有 AI 主题标注。<br>'
+                          '点「AI 标主题」生成 —— 会真的调用模型烧配额，'
+                          '先看预览再决定。</div>'),
+    }
+    return {
+        "site": site,
+        "months": vol,
+        "themes": trows,
+        "ai": ai,
+        "charts": charts,
+        "sites": vkeys,
+        "palette": {**vpal, **tpal, **apal},
+        "kept": kept,
+        "dropped": dropped,
+        "last_month": last_month,
+        # 口径回显（P7 立下的规矩：任何数字型选择都要说清分母）
+        "scope": {
+            "range": f"{date_from or dflt_f} ~ {date_to or dflt_t}",
+            "months": len(months),
+            "articles_total": sum(r["total"] for r in vol),
+            "articles_with_body": sum(r["total"] for r in trows),
+            "site": site or "两站合计",
+            "last_month_partial": True,
+        },
+        "note": ("发文量按所有文章计（含正文为空的列表页占位），"
+                 "主题分布按有正文的文章计，两个分母不同；"
+                 "关键词主题为粗筛，一篇可命中多类，各月相加会超过该月文章数；"
+                 "AI 主题只统计**已被 AI 标注过**的文章，覆盖率见 ai.coverage；"
+                 f"末月 {last_month} 尚未过完，不可与整月直接比较。"),
+    }
+
+
+class ThemeReq(BaseModel):
+    sites: List[str] = []        # 空 = 全部启用站点
+    date_from: str = ""
+    date_to: str = ""
+    limit: int = 20               # 本次最多处理多少篇（分批调用）
+    per_call: int = 12            # 每次 LLM 调用装几篇（MiroFish 式批量）
+    dry_run: bool = True          # 铁律：默认只预览，真跑要显式改
+
+
+_AI_THEME_LOCK = threading.Lock()
+_AI_THEME_STATE: Dict[str, Any] = {"running": False, "done": 0,
+                                    "failed": 0, "dropped": 0, "log": []}
+
+
+@app.post("/api/panel/ai-themes")
+def api_panel_ai_themes(req: ThemeReq):
+    """
+    批量用 AI 给文章打主题标签（时间轴的 AI 口径数据源）。
+
+    ⚠ dry_run 默认 True：误触按钮会真烧配额。
+    ⚠ 只给**还没标过**的文章打（UNIQUE(article_id,task)），
+      重复跑不会重复烧钱 —— 增量靠 SQL 保证，不靠记状态。
+    ⚠ 批量策略参考 MiroFish：多个请求打包成一次 LLM 调用
+      （成本约降一半、速度提升数倍），而不是逐篇调。
+    """
+    d = _db()
+    dfrom = req.date_from or _PANEL_D0
+    dto = req.date_to or _PANEL_D1
+    one_site = req.sites[0] if len(req.sites) == 1 else ""
+    cov = d.theme_coverage(site=one_site, date_from=dfrom, date_to=dto)
+    todo = max(0, cov["total"] - cov["labeled"])
+    if req.dry_run:
+        take = min(int(req.limit), todo)
+        per = max(1, int(req.per_call))
+        return {"dry_run": True, "coverage": cov,
+                "plan": f"将取 {take} 篇未标注文章，每批 {per} 篇，"
+                        f"共约 {(take + per - 1) // per} 次调用",
+                "labels": list(THEME_LABELS),
+                "note": "这是预览，不会发任何请求。确认无误后把 dry_run 改为 false。"}
+
+    if not _AI_THEME_LOCK.acquire(blocking=False):
+        return {"error": "已有主题标注任务在跑", "state": dict(_AI_THEME_STATE)}
+    try:
+        cfg = _cfg()
+        if AI.build(cfg, task="theme") is None:
+            return {"error": "AI 未配置：请在设置里填好 API 后再试"}
+        where, args = ["pub_day>=?", "pub_day<=?",
+                       "COALESCE(content_empty,0)=0"], [dfrom, dto]
+        if req.sites:
+            where.append("site IN (%s)" % ",".join("?" * len(req.sites)))
+            args += req.sites
+        with d._lock:
+            arts = [dict(r) for r in d.conn.execute(
+                f"SELECT a.id, a.title, a.content_text, a.pub_day, a.site "
+                f"FROM articles a WHERE {' AND '.join(where)} "
+                f"AND a.id NOT IN (SELECT article_id FROM ai_annotations "
+                f"WHERE task='theme') LIMIT ?", args + [int(req.limit)])]
+        if not arts:
+            return {"done": 0, "message": "没有待标注的文章（可能已全标完）",
+                    "coverage": cov}
+        _AI_THEME_STATE.update({"running": True, "done": 0, "failed": 0,
+                                "dropped": 0, "log": []})
+        done = failed = dropped = 0
+        n = max(1, int(req.per_call))
+        ids = {a["id"] for a in arts}
+        for i in range(0, len(arts), n):
+            chunk = arts[i:i + n]
+            try:
+                res = AI.theme_many(cfg, chunk, dry_run=False, per_call=n)
+                rows = res.get("rows", []) if isinstance(res, dict) else []
+                # ⚠ id 对齐必须验：模型可能回批内序号也可能回文章 id。
+                #   对不上就**整批跳过并记日志**，绝不能按顺序硬塞 ——
+                #   那样会把 A 篇的主题写到 B 篇头上，图看着完全正常。
+                for k, row in enumerate(rows):
+                    aid = row.get("id")
+                    themes = [t for t in (row.get("themes") or []) if t]
+                    if not themes:
+                        continue
+                    real = aid if aid in ids else None
+                    if real is None and isinstance(aid, int) and 1 <= aid <= len(chunk):
+                        real = chunk[aid - 1]["id"]     # 批内序号（1 起）
+                    if real is None:
+                        _AI_THEME_STATE["log"].append(
+                            f"第{i//n+1}批 有 id 无法对齐，已跳过：{aid}")[:200]
+                        continue
+                    d.save_annotation(real, "theme",
+                                      json.dumps(themes, ensure_ascii=False),
+                                      model=str(cfg.get("model", "")))
+                    done += 1
+                dropped += res.get("dropped", 0) if isinstance(res, dict) else 0
+            except Exception as e:      # 单批失败不拖垮整轮
+                failed += len(chunk)
+                _AI_THEME_STATE["log"].append(f"第{i//n+1}批失败: {e}"[:200])
+            _AI_THEME_STATE.update({"done": done, "failed": failed,
+                                    "dropped": dropped})
+        return {"done": done, "failed": failed, "dropped": dropped,
+                "asked": len(arts),
+                "coverage": d.theme_coverage(site=one_site, date_from=dfrom,
+                                              date_to=dto),
+                "log": _AI_THEME_STATE["log"][:10]}
+    finally:
+        _AI_THEME_STATE["running"] = False
+        if _AI_THEME_LOCK.locked():
+            _AI_THEME_LOCK.release()
+
+
+@app.get("/api/panel/timeline")
+def api_panel_timeline(site: str = "", top: int = Query(_TL_TOP, ge=1, le=10),
+                       date_from: str = "", date_to: str = "",
+                       include_ai: bool = True,
+                       months: int = Query(0, ge=0, le=120)):
+    """时间轴 —— 对应老师要求的「发文量/主题随时间的变化」。
+
+    months=0 表示不截断（给 CSV 导出用）；网页传面板的月份下拉值。
+    """
+    return _timeline_impl(site, int(top), date_from, date_to,
+                          include_ai, int(months))
 
 
 @app.get("/api/panel/problems")
@@ -553,6 +815,137 @@ def _svg_bars(rows: List[dict], unit: str = "", w: int = 900,
     return "".join(out)
 
 
+def _svg_stack(rows: List[dict], keys: List[str],
+               colors: Dict[str, str], w: int = 900, h: int = 320,
+               unit: str = "", partial_last: bool = False) -> str:
+    """
+    纯 SVG 堆叠面积图 —— 时间轴两张图共用（发文量分站点 / 主题随时间）。
+
+    ⚠ 堆的是**命中次数**不是互斥分类：一篇可命中多类，
+      面积总和会超过发文量 —— 图例必须写明，否则
+      「加起来怎么比发文量还多」答不上来。
+    ⚠ 同样钳制：任一层高度不超过 plot_h。钳制在 mx 计算正确时是冗余的
+      （mx ≥ 每个值），但它防的是「mx 被上游改错」这一类事故：
+      SVG 越界不会报错，只会把图画到画布外，整页版面被撑坏。
+      ⚠ 真正兜底的是下面 `_clip`：单独钳单层是**假的安全** ——
+        两层各自顶满 plot_h 时，「base + 本层」会跑到 pad_t - plot_h
+        （=-192px，画布外）。反向验证把 _nice_max 打桩成返回 1
+        当场顶出这个洞。前两处 min() 只让降级后的形状还算可读，
+        不承担正确性 —— 所以唯一的不变式测试挂在 _clip 上。
+    """
+    if not rows or not keys:
+        return '<div class="empty">无数据</div>'
+    pad_l, pad_b, pad_t, pad_r = 62, 92, 18, 18
+    plot_w, plot_h = w - pad_l - pad_r, h - pad_t - pad_b
+    n = len(rows)
+    step = plot_w / max(1, n)
+    mx = _nice_max(max((sum(r["problems"].get(k, 0) for k in keys)
+                        for r in rows), default=0))
+    out = [f'<svg viewBox="0 0 {w} {h}" class="chart" '
+           f'preserveAspectRatio="xMidYMid meet">']
+    for i in range(5):
+        v = mx * i // 4
+        y = pad_t + plot_h - plot_h * i / 4
+        out.append(f'<line x1="{pad_l}" y1="{y:.1f}" x2="{w-pad_r}" '
+                   f'y2="{y:.1f}" class="grid"/>')
+        out.append(f'<text x="{pad_l-10}" y="{y+4:.1f}" class="axis" '
+                   f'text-anchor="end">{v:,}{unit}</text>')
+    base = [0.0] * n
+    top_y = pad_t + plot_h          # 绘图区上沿：任何坐标都不许越过它
+
+    def _clip(y: float) -> float:
+        return min(top_y, max(pad_t, y))
+
+    for sk in keys:
+        col = colors.get(sk, "#8ab4f8")
+        up, dn = [], []
+        for i, r in enumerate(rows):
+            # ⚠ 钳制要**钳三处**，只钳一层是假的：
+            #   单层 ≤ plot_h、累计 base ≤ plot_h 都不代表
+            #   「base + 本层高度」≤ plot_h —— 两层各自顶满时
+            #   上沿会跑到 pad_t - plot_h（= -192px，画布外）。
+            #   反向验证（把 _nice_max 打桩成返回 1）当场把它顶出来过。
+            v = min(plot_h, r["problems"].get(sk, 0) / (mx or 1) * plot_h)
+            x = pad_l + i * step + step / 2
+            up.append((x, _clip(pad_t + plot_h - base[i] - v)))
+            dn.append((x, _clip(pad_t + plot_h - base[i])))
+            base[i] = min(plot_h, base[i] + v)
+        up_s = " L".join(f"{x:.1f} {y:.1f}" for x, y in up)
+        dn_s = " L".join(f"{x:.1f} {y:.1f}" for x, y in reversed(dn))
+        out.append(f'<path d="M{up_s} L{dn_s} Z" fill="{col}" '
+                   f'fill-opacity="0.72" stroke="{col}" stroke-width="1">'
+                   f'<title>{_esc(sk)}</title></path>')
+    for i in _tick_idx(n, max(1, n // 8)):
+            x = pad_l + i * step + step / 2
+            out.append(f'<text x="{x:.1f}" y="{pad_t+plot_h+18}" class="axis" '
+                       f'text-anchor="middle">{_esc(rows[i]["month"])}</text>')
+    if partial_last and n:
+        # 末月还没过完 → 单独一条虚线竖标，否则最后一点天然偏低，
+        # 会被读成「发文量在跌」（真跌和没过完长得一模一样）。
+        x = pad_l + (n - 1) * step + step / 2
+        out.append(f'<line x1="{x:.1f}" y1="{pad_t}" x2="{x:.1f}" '
+                   f'y2="{pad_t+plot_h}" stroke="#8b93a3" stroke-width="1" '
+                   f'stroke-dasharray="3 3"/>')
+        out.append(f'<text x="{x-5:.1f}" y="{pad_t+11}" class="axis" '
+                   f'text-anchor="end">末月未过完</text>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+# 时间轴配色：**按名字**固定，不按排名。
+# 早期版本按 kept 顺序取色，结果换个筛选，主题的颜色就全变了 ——
+# 同一张图里两次出现的「未成年人」颜色不同，读者会当成两个东西。
+_TL_PALETTE = ("#5b8def", "#4caf7d", "#f2a33c", "#e0605f", "#9b7ede",
+               "#39a0b8", "#d98cb3", "#8aa63c", "#c98a4b", "#6f8faf",
+               "#b08050", "#5aa06a", "#a06a9b", "#7a8ba6", "#cf7b7b",
+               "#7b9fd4", "#9cb85a", "#b08a7a", "#7fae8a", "#8e8ec4")
+
+
+def _tl_color(key: str) -> str:
+    """稳定取色：用 crc32 而不是内置 hash —— 后者按进程加盐，
+    重启一次颜色全变，同一张导出图前后对不上。"""
+    import zlib
+    return _TL_PALETTE[zlib.crc32(key.encode("utf-8")) % len(_TL_PALETTE)]
+
+
+def _tl_palette(keys: List[str]) -> Dict[str, str]:
+    """**必须按名字取色，不能按排名取色**（enumerate）。
+
+    按排名取色时，换个筛选让「未成年人」从第 3 名掉到第 1 名，
+    它的颜色就变了 —— 同一份 PPT 里两次出现的同一主题两个颜色，
+    读者会当成两个东西。
+    """
+    return {k: _tl_color(k) for k in keys}
+
+
+def _tl_legend(keys: List[str], palette: Dict[str, str]) -> str:
+    if not keys:
+        return ""
+    item = ('<span class="lg"><i style="background:%s"></i>%s</span>'
+            % ("{c}", "{k}"))
+    body = "".join(item.format(c=palette.get(k, "#9aa0a6"), k=_esc(k))
+                   for k in keys)
+    return ('<div class="legend">' + body + "</div>")
+
+
+def _tick_idx(n: int, every: int) -> List[int]:
+    """要标刻度的下标：等间隔 + **末尾**，但末尾离前一个太近就把前一个让掉。
+
+    ⚠ 只按 `i % every == 0 or i == n-1` 画，末尾那个会跟前一个叠在一起 ——
+      34 个月、每 4 个一格时，最后两个标签相距不到半个字宽，
+      屏幕上就是「2026056-10」这种糊成一团的字符串。
+    """
+    if n <= 0:
+        return []
+    every = max(1, every)
+    idxs = list(range(0, n, every))
+    if idxs[-1] != n - 1:
+        if (n - 1) - idxs[-1] < every / 2:
+            idxs.pop()
+        idxs.append(n - 1)
+    return idxs
+
+
 def _table(head: List[str], rows: List[List[Any]]) -> str:
     th = "".join(f"<th>{_esc(h)}</th>" for h in head)
     tr = "".join("<tr>" + "".join(f"<td>{_esc(c)}</td>" for c in r) + "</tr>"
@@ -578,6 +971,10 @@ h1{font-size:25px;margin:0 0 6px;letter-spacing:.5px}
 .chart .grid{stroke:#1e2430;stroke-width:1}
 .chart .axisline{stroke:#3a4150;stroke-width:1}
 .chart .axis{fill:#8b93a3;font-size:12.5px;font-family:Consolas,monospace}
+.legend{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 2px;
+        font-size:11.5px;color:#8b93a3}
+.legend .lg{display:inline-flex;align-items:center;gap:5px}
+.legend .lg i{width:11px;height:11px;border-radius:2px;display:inline-block}
 .chart .bar rect{fill:#3b82f6}
 .chart .bar:hover rect{fill:#60a5fa}
 .rank{display:flex;align-items:center;gap:10px;padding:7px 0;
@@ -690,6 +1087,26 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
         " %", label_every=max(1, len(jit)//12)) if jit else \
         '<div class="empty">无数据</div>'
 
+    # ---- 时间轴（PPT 明确要的「时间轴」）----
+    # ⚠ 调的是 _timeline_impl 而不是路由函数，且**参数与网页端一致**
+    #   （同一个 top、同一段月份），所以下面这三段 SVG 与页面上看到的
+    #   逐字符相同 —— 「屏幕 = 导出」靠的是同一个函数，不是两处人工同步。
+    tl = _timeline_impl(site=site, top=_TL_TOP,
+                        date_from=_PANEL_D0, date_to=_PANEL_D1,
+                        include_ai=True, months_n=months)
+    tl_m = tl["months"]
+    tl_t = tl["themes"]
+    ai_cov = (tl.get("ai") or {}).get("coverage") or {"labeled": 0,
+                                                       "total": 0, "pct": 0}
+    tl_kw_rows = [[r["month"], r["total"]] + [r["problems"].get(k, 0)
+                                              for k in tl["kept"]]
+                  for r in tl_t]
+    tl_ai_rows = [[r["month"], r["labeled"]] + [r["themes"].get(k, 0)
+                                                for k in
+                                                ((tl.get("ai") or {})
+                                                 .get("kept") or [])]
+                  for r in ((tl.get("ai") or {}).get("rows") or [])]
+
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -715,6 +1132,36 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
 <div class="card"><h2>栏目 Top {len(rank)}</h2>
 {rank_html(rank)}
 {_table(["栏目", "文章数"], [[x["k"], f'{x["n"]:,}'] for x in rank])}
+</div>
+
+<div class="card" style="grid-column:1/-1"><h2>时间轴 —— 发文量月度趋势（分站点）</h2>
+{tl["charts"]["volume"]}
+<div class="note">按所有文章计（含正文为空的列表页占位）；末月虚线段尚未过完，
+不可与整月直接比较。</div>
+{_table(["月份"] + list(tl["sites"]),
+        [[r["month"], f'{r["total"]:,}'] + [f'{r.get(s, 0):,}' for s in tl["sites"]]
+         for r in tl_m])}
+</div>
+
+<div class="card" style="grid-column:1/-1"><h2>时间轴 —— 主题分布随时间（关键词粗筛）</h2>
+{tl["charts"]["theme_kw"]}
+<div class="note">堆的是「命中次数」不是互斥分类，一篇可命中多类，
+<b>各月相加会超过该月发文量</b>。关键词主题只统计有正文的文章，
+与上一张图的分母不同。</div>
+{_table(["月份", "有正文", "合计命中"] + list(tl["kept"]),
+        [[r["month"], f'{r["total"]:,}',
+          f'{sum(r["problems"].values()):,}']
+         + [f'{r["problems"].get(k, 0):,}' for k in tl["kept"]]
+         for r in tl_t])}
+</div>
+
+<div class="card" style="grid-column:1/-1"><h2>时间轴 —— 主题分布随时间（AI 分类）</h2>
+{tl["charts"]["theme_ai"]}
+<div class="note">AI 主题已标注 {ai_cov["labeled"]}/{ai_cov["total"]} 篇
+（{ai_cov["pct"]}%）—— 只统计**已被标注过**的文章，没标过的不在这个分母里。</div>
+{_table(["月份", "已标注", "合计命中"]
+         + list((tl.get("ai") or {}).get("kept") or []),
+        tl_ai_rows) if tl_ai_rows else ""}
 </div>
 
 <div class="card"><h2>检索行为（近 {days} 天）</h2>
