@@ -411,7 +411,17 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
     hi = int(max_degree or 0)
     core = [n for n, d in d_of.items()
             if d >= min_degree and (not hi or d <= hi)]
-    core.sort(key=lambda n: -d_of[n])
+    # ⚠⚠ 排序**必须带第二判据（节点名）**。
+    #   只按度数排时，度数并列的节点之间顺序 = 建图时的插入顺序，
+    #   而插入顺序又取决于关系行的返回顺序 —— SQL 只要多一个 where
+    #   （比如页面上勾了站点/时间筛选），查询计划就可能变、行序就变、
+    #   被 limit 截掉的那批同度数节点就换人。
+    #   实测（真实库 8419 条关系，min_degree=2 / limit=300）：
+    #   同一批数据只换行序，修复前能画出 1448 / 1449 / 1450 / 1458 四种边数；
+    #   加上第二判据后恒为 1449。
+    #   报告里写死一个边数、页面刷新一次变成另一个 —— 两边都不报错，
+    #   老师一对数字就露馅。**截断必须只由图的性质决定，不由行序决定。**
+    core.sort(key=lambda n: (-d_of[n], n))
     core = core[:limit]
 
     keep = set(core)
@@ -454,6 +464,16 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
             "title": f"{s} → {d}\n权重 {dat.get('weight'):.1f}"
                       + (f"\n类型 {'、'.join(ts)}" if ts else ""),
         })
+    # ⚠ 输出次序也要定死。sub.edges() 的遍历顺序跟建图插入顺序走，
+    #   同一张图两次打开可能先画这条后画那条 —— 边是叠在一起的，
+    #   谁在上面会变，看上去就是「图在闪」。
+    #   ⚠⚠ 只排**列表次序**，绝不去改 from/to：
+    #     types 是以 (s, d) 为键的，而且 undirected=False 时用的是
+    #     DiGraph —— `target`（机构针对问题）这类关系**方向本身带语义**。
+    #     把首尾对调「规范化」会让 types.get((s, d)) 查不到，类型整片丢失。
+    edges.sort(key=lambda e: (min(e["from"], e["to"]),
+                              max(e["from"], e["to"])))
+
     # 图例要显示「每类各多少个」，所以把**画出来的**这批节点按类型点一次数。
     # ⚠ 必须数 nodes 而不是全图：图例写在图下面，标的是屏幕上看得见的那些，
     #   标成全图 1633 节点里的 856 个机构，图上只有 300 个，数字对不上。
