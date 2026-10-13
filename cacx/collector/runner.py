@@ -197,7 +197,10 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
 
                 # list-only 是**纯只读盘点**：只报增量，不碰数据库。
                 if mode == "list-only":
-                    if not d.get_by_url(site, it["url"]):
+                    if d.get_url_owner(it["url"], exclude_site=site):
+                        skipped["dup_other_site"] = skipped.get(
+                            "dup_other_site", 0) + 1
+                    elif not d.get_by_url(site, it["url"]):
                         listed_new += 1
                         say(f"      + {it['date']} {it['title'][:46]}")
                     continue
@@ -207,6 +210,24 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
                 # 「有标题无正文、content_empty 却是 0」的幽灵行 —— 已修正。
                 exists = d.get_by_url(site, it["url"])
                 if exists and mode != "full":
+                    continue
+
+                # ---- 跨站去重（2026-10-13 加）----
+                # 同一个 URL 若已被**别的站**收过，就到此为止：既不抓正文也不写库。
+                # 为什么不能只看 (site, url)：articles 的唯一键就是 (site, url)，
+                # 所以换站再采一遍同一篇文章，库里就会多一行。
+                # 实测：通用采集器验证源 zjwx-api 把 zjwx 已有的 10 篇又收了一遍，
+                # 凭空多出 62 条关系（8801 → 8863），报告里的核心数字全被带偏。
+                # 放在抓正文**之前**，是因为正文抓取带 3 次退避重试，很贵 ——
+                # 已知是重复就不该发出这个请求。db.upsert_article 里还有一道兜底，
+                # 两层都留着：这里管"别浪费请求"，那里管"别写脏数据"。
+                owner = d.get_url_owner(it["url"], exclude_site=site)
+                if owner:
+                    skipped["dup_other_site"] = skipped.get(
+                        "dup_other_site", 0) + 1
+                    samples = skip_samples.setdefault("dup_other_site", [])
+                    if len(samples) < 3:
+                        samples.append(f"已由 {owner['site']} 收录 {it['url'][:46]}")
                     continue
 
                 art = col.fetch_article(it["url"], it)

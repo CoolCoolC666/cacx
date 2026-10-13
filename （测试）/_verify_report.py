@@ -37,11 +37,11 @@ q = lambda s: db.execute(s).fetchone()[0]
 print("=" * 70)
 print("① 语料规模")
 print("=" * 70)
-check("2024 年以来 4515 篇",
-      q("SELECT COUNT(*) FROM articles WHERE year>=2024") == 4515,
+check("2024 年以来 4519 篇",
+      q("SELECT COUNT(*) FROM articles WHERE year>=2024") == 4519,
       str(q("SELECT COUNT(*) FROM articles WHERE year>=2024")))
-check("有正文 4513 篇",
-      q("SELECT COUNT(*) FROM articles WHERE year>=2024 AND content_text IS NOT NULL AND LENGTH(content_text)>0") == 4513,
+check("有正文 4517 篇",
+      q("SELECT COUNT(*) FROM articles WHERE year>=2024 AND content_text IS NOT NULL AND LENGTH(content_text)>0") == 4517,
       str(q("SELECT COUNT(*) FROM articles WHERE year>=2024 AND content_text IS NOT NULL AND LENGTH(content_text)>0")))
 check("栏目 25 个",
       q("SELECT COUNT(DISTINCT column_code) FROM articles WHERE year>=2024") == 25,
@@ -53,8 +53,8 @@ print()
 print("=" * 70)
 print("② 抽取规模")
 print("=" * 70)
-check("去重实体 16558",
-      q("SELECT COUNT(DISTINCT name) FROM entities") == 16558,
+check("去重实体 16561",
+      q("SELECT COUNT(DISTINCT name) FROM entities") == 16561,
       str(q("SELECT COUNT(DISTINCT name) FROM entities")))
 check("关系 8801", q("SELECT COUNT(*) FROM relations") == 8801,
       str(q("SELECT COUNT(*) FROM relations")))
@@ -78,8 +78,8 @@ print("④ 覆盖率 27.9%")
 print("=" * 70)
 cov = q("SELECT COUNT(DISTINCT article_id) FROM relations")
 check("关系覆盖 1257 篇 / 27.9%",
-      cov == 1257 and abs(100 * cov / 4513 - 27.9) < 0.15,
-      f"{cov} 篇 = {100*cov/4513:.1f}%")
+      cov == 1257 and abs(100 * cov / 4517 - 27.9) < 0.15,
+      f"{cov} 篇 = {100*cov/4517:.1f}%")
 
 print()
 print("=" * 70)
@@ -131,7 +131,7 @@ for x in tl["themes"]:
 want = {
     "2024": {"生成式AI": 11.0, "个人信息": 25.6, "未成年人": 20.7, "数据安全": 16.9},
     "2025": {"生成式AI": 14.7, "个人信息": 31.5, "未成年人": 14.8, "数据安全": 21.7},
-    "2026": {"生成式AI": 17.6, "个人信息": 26.8, "未成年人": 18.4, "数据安全": 16.8},
+    "2026": {"生成式AI": 17.5, "个人信息": 26.8, "未成年人": 18.5, "数据安全": 16.8},
 }
 for yr, items in want.items():
     c = agg[yr]
@@ -152,12 +152,12 @@ check("两次都在最近 14 个月", first == ["2025-08", "2026-09"], str(first
 
 print()
 print("=" * 70)
-print("⑧ 发文量（报告：1527 / 1579 / 1409，2025-09 峰值 198）")
+print("⑧ 发文量（报告：1527 / 1579 / 1413，2025-09 峰值 198）")
 print("=" * 70)
 yr = Counter()
 for x in tl["months"]:
     yr[x["month"][:4]] += x["total"]
-for y, w in [("2024", 1527), ("2025", 1579), ("2026", 1409)]:
+for y, w in [("2024", 1527), ("2025", 1579), ("2026", 1413)]:
     check(f"{y} = {w}", yr[y] == w, str(yr[y]))
 pk = max(tl["months"], key=lambda x: x["total"])
 check("单月峰值 198（2025-09）",
@@ -169,8 +169,8 @@ print("⑨ 浙江对照")
 print("=" * 70)
 rows = db.execute("SELECT site, COUNT(*) n FROM articles WHERE year>=2024 GROUP BY site").fetchall()
 d = dict(rows)
-check("中央网信办 2956 + 浙江 1559 = 4515",
-      d.get("cac", 0) + d.get("zjwx", 0) == 4515, str(d))
+check("中央网信办 2960 + 浙江 1559 = 4519",
+      d.get("cac", 0) + d.get("zjwx", 0) == 4519, str(d))
 check("浙江网信网 1559 篇", d.get("zjwx") == 1559, str(d))
 # 两省是否真有直接联合发文
 cross = q("""SELECT COUNT(*) FROM relations WHERE year>=2024
@@ -249,13 +249,13 @@ else:
     check("docx 已生成", True, f"{docx_path.stat().st_size:,} 字节")
 
     # 关键数字一个都不能少 —— Word 版最常见的失真就是转档时漏句/漏行
-    MUST = ["4513", "4515", "668 万字", "16558", "8801", "1257", "27.9%",
+    MUST = ["4517", "4519", "668 万字", "16561", "8801", "1257", "27.9%",
             "243", "126", "102", "0.194", "0.1173", "0.8282", "0.0272",
             "1633", "3921", "115", "244", "1015",
             "5415", "2222", "609", "555", "61.5%",
-            "1527", "1579", "1409", "198",
-            "2956", "1559", "24 条", "3 条", "21 条", "12 个端点",
-            "11.0%", "17.6%", "31.5%", "26.8%"]
+            "1527", "1579", "1413", "198",
+            "2960", "1559", "24 条", "3 条", "21 条", "12 个端点",
+            "11.0%", "17.5%", "18.5%", "31.5%", "26.8%"]
     missing = [m for m in MUST if m not in full]
     check(f"关键数字 {len(MUST)} 个全部保留",
           not missing, f"缺 {missing}" if missing else "无缺失")
@@ -264,10 +264,11 @@ else:
     residue = [tok for tok in ("**", "`") if tok in full]
     check("无 markdown 标记残留", not residue, f"残留 {residue}" if residue else "")
 
-    # 表格结构：主题占比表 表头+3 年 = 4 行 x 5 列，问题应对表 表头+5 行 = 6 行 x 3 列
+    # 表格结构：主题占比表 表头+3 年 = 4 行 x 5 列；
+    # 问题应对表 表头+6 类问题（2026-10 新增「跨站重复入库」一行）= 7 行 x 3 列
     shapes = [(len(t.rows), len(t.columns)) for t in d.tables]
     check("主题表 4x5（表头+2024/2025/2026）", (4, 5) in shapes, f"实际表格 {shapes}")
-    check("问题应对表 6x3（表头+5 行）", (6, 3) in shapes, f"实际表格 {shapes}")
+    check("问题应对表 7x3（表头+6 类问题）", (7, 3) in shapes, f"实际表格 {shapes}")
 
     # 六个一级章节标题都在
     heads = [p.text for p in d.paragraphs if p.style.name.startswith("Heading")]
