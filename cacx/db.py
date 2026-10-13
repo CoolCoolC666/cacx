@@ -2102,6 +2102,32 @@ class Database:
         with self._lock:
             return [dict(r) for r in self.conn.execute(sql, args)]
 
+    def entity_type_counts(self) -> Dict[str, Dict[str, int]]:
+        """
+        {实体名: {类型: 条数}} —— 给图谱定节点类型用（节点要显示哪种颜色/形状）。
+
+        ⚠ 为什么不能用 distinct_entity_names 顶替：那个只给名字，不给类型，
+          而图例筛选和颜色形状编码缺的就是类型。
+        ⚠ 为什么不能 list_entities(limit=None) 再在内存里数：那条要 JOIN
+          articles 再逐行造 11 列 dict，43529 条要 0.7 秒，而图谱页
+          每次拖筛选都调 —— 这里只要 name、type 两列，快一个数量级。
+
+        ⚠ 同一名字可能既是机构又是政策（实测 16561 个去重名里 28 个跨类型），
+          所以返回**计数**而不是单一类型，由调用方按众数决定；
+          在这里就定死类型会把「取众数」的判据藏进数据层。
+        """
+        out: Dict[str, Dict[str, int]] = {}
+        with self._lock:
+            for nm, ty in self.conn.execute(
+                    "SELECT name,type FROM entities"):
+                nm = (nm or "").strip()
+                ty = (ty or "").strip()
+                if not nm or not ty:
+                    continue
+                out.setdefault(nm, {})
+                out[nm][ty] = out[nm].get(ty, 0) + 1
+        return out
+
     def distinct_entity_names(self, type: str = "") -> List[str]:
         """
         某类实体的**去重名**清单（建图 / 焦点候选用）。
