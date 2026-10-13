@@ -92,11 +92,19 @@ _[a-z0-9]*.txt
 #                         上一版就出过「说明写 4416、库里还是 4515」的文档与数据各说各话。
 #                         ⚠ 改完 _export_pack.py 必须两个一起跑才算改完。
 !（测试）/_verify_datapack.py
+#   _mutcheck_group_field.py 反向验证 —— 把 to_pyvis 里「给节点定 group」那三行
+#                         换成不发 group（也就是本 bug 的原始形态），断言
+#                         tests_graph_nodetype 必须红；还原后必须绿、文件逐字节还原。
+#                         为什么值得单独守：这个 bug 已经上线很久了，它能活下来
+#                         只因为**没有任何测试断言过 group**。
+!（测试）/_mutcheck_group_field.py
 
 # ---- 开发归档目录（测试脚本 + 开发期产物）----
 # 测试脚本本身要入库；日志与截图不入库。
 （测试）/_logs/
 （测试）/截图/
+# 图例/图谱验收时抓的临时截图：随时可重跑生成
+_legend_shots/
 
 # ---- 自动演示的产物 ----
 # autodemo.py / run-demo.bat **入库**（演示要用），

@@ -1605,10 +1605,80 @@ def _blocked_for_graph(d) -> set:
     return GA.blocked_names(ents, _GRAPH_BLOCK_TYPES)
 
 
+def _node_types(d) -> Dict[str, str]:
+    """
+    {实体名: 类型}。图例筛选与颜色形状编码的**唯一**数据源。
+
+    ⚠ 这条链路以前整个不存在 —— 建图只吃关系的两端名字，实体类型在建图时
+      被丢掉，前端 `n.group || 'org'` 于是把所有节点都当成机构，画出一片
+      蓝点，图例上的颜色+形状编码一条都没生效。
+
+    ⚠ 按 (name,type) 两列取，不走 list_entities：后者要 JOIN articles 并逐行
+      造 11 列 dict（0.7 秒），图谱每次拖筛选都调，得走窄列那条路。
+    ⚠ 按 db 路径 + 行数缓存：抽取会改库，不按路径缓存就会在「刚抽完抽取」之后
+      拿到旧类型映射，图例配色对不上新节点 —— 而且没有任何报错。
+    """
+    try:
+        with d._lock:
+            n_row = d.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+    except Exception:
+        return {}
+    key = (str(getattr(d, "db_path", "") or id(d)), int(n_row or 0))
+    if _NODE_TYPES_CACHE["key"] == key:
+        return _NODE_TYPES_CACHE["map"]
+    m = GA.node_type_map_from_counts(d.entity_type_counts())
+    _NODE_TYPES_CACHE["key"] = key
+    _NODE_TYPES_CACHE["map"] = m
+    return m
+
+
+# 节点类型映射的缓存。key 含 db 路径与实体行数，抽取后行数变，自动失效。
+_NODE_TYPES_CACHE: Dict[str, Any] = {"key": None, "map": {}}
+
+
+def _empty_graph_payload(min_degree, max_degree, rel_types, keyword,
+                         focus, hop, site, date_from, date_to,
+                         summary, node_types: str = "",
+                         rel_rows_all: int = 0) -> Dict[str, Any]:
+    """
+    空结果的统一形状。
+
+    ⚠ 抽出来是因为**形状必须只有一处**：以前「没有关系数据」那套内联字面量
+      就写死了一份，现在多了一种空法（图例一个类型都没选），
+      两份字面量迟早会漂 —— 漂了之后前端某个键读到 undefined，
+      表现是「筛选后页面某块白掉」，极难定位。
+    """
+    return {"nodes": 0, "edges": 0, "degree": [], "strength": [],
+            "betweenness": [], "pagerank": [], "communities": [],
+            "summary": summary, "by_type": [],
+            "graph": {"nodes": [], "edges": [], "by_group": [],
+                      "avail_by_group": []},
+            "filters": {"min_degree": min_degree,
+                        "max_degree": int(max_degree or 0),
+                        "rel_types": sorted(
+                            {t.strip() for t in (rel_types or "").split(",")
+                             if t.strip()}),
+                        "keyword": keyword, "focus": focus, "hop": hop,
+                        "site": [s.strip() for s in (site or "").split(",")
+                                 if s.strip()],
+                        "date_from": date_from, "date_to": date_to,
+                        "node_types": [t.strip() for t in
+                                       (node_types or "").split(",")
+                                       if t.strip()],
+                        "graph_nodes_all": 0, "graph_edges_all": 0,
+                        "graph_nodes_typed": 0, "graph_edges_typed": 0,
+                        "by_type_all": {}, "by_site_all": {},
+                        "rel_rows_all": rel_rows_all,
+                        "rel_rows": 0,
+                        "scope_note": summary, "scope_nodes": 0,
+                        "scope_edges": 0}}
+
+
 def _graph_payload(min_degree: int, limit: int, min_weight: float,
                    topn: int, max_degree: int = 0, rel_types: str = "",
                    keyword: str = "", focus: str = "", hop: int = 1,
-                   site: str = "", date_from: str = "", date_to: str = ""
+                   site: str = "", date_from: str = "", date_to: str = "",
+                   node_types: str = ""
                    ) -> Dict[str, Any]:
     """
     关联分析的**内部实现**（路由和 pyvis 产物都调它）。
@@ -1632,26 +1702,26 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
     if (site or date_from or date_to):
         rows_all = d.list_relations(limit=None)
     if not rows:
-        return {"nodes": 0, "edges": 0, "degree": [], "strength": [],
-                "betweenness": [], "pagerank": [], "communities": [],
-                "summary": "没有关系数据", "by_type": [], "graph": {"nodes": [], "edges": []},
-                "filters": {"min_degree": min_degree,
-                            "max_degree": int(max_degree or 0),
-                            "rel_types": sorted(
-                                {t.strip() for t in (rel_types or "").split(",")
-                                 if t.strip()}),
-                            "keyword": keyword, "focus": focus, "hop": hop,
-                            "site": [s.strip() for s in (site or "").split(",") if s.strip()],
-                            "date_from": date_from, "date_to": date_to,
-                            "graph_nodes_all": 0, "graph_edges_all": 0,
-                            "graph_nodes_typed": 0, "graph_edges_typed": 0,
-                            "by_type_all": {}, "by_site_all": {},
-                            "rel_rows_all": len(rows_all or []),
-                            "rel_rows": 0,
-                            "scope_note": "", "scope_nodes": 0,
-                            "scope_edges": 0}}
+        return _empty_graph_payload(min_degree, max_degree, rel_types,
+                                    keyword, focus, hop, site,
+                                    date_from, date_to,
+                                    "没有关系数据", node_types=node_types)
 
     want = {t.strip() for t in (rel_types or "").split(",") if t.strip()}
+
+    # ---- 实体类型筛选（图例那四个）----
+    # ⚠ node_types 为空 = 不筛（默认全选）；**「全不选」当非法输入处理**，
+    #   返回空图会让用户以为「这类一个都没有」，其实是筛选写法有问题。
+    #   前端会挡住，但后端也得挡 —— MCP/直接调 API 绕不过前端。
+    ntypes_map = _node_types(d)
+    want_nt = {t.strip() for t in (node_types or "").split(",") if t.strip()}
+    want_nt = {t for t in want_nt if t in GA.ENTITY_TYPES}
+    empty_pick = bool((node_types or "").strip()) and not want_nt
+    if empty_pick:
+        return _empty_graph_payload(min_degree, max_degree, rel_types,
+                                    keyword, focus, hop, site,
+                                    date_from, date_to,
+                                    "没有选中任何实体类型（至少选一类）")
 
     # 低置信实体不进图（与 build_graph 的口径一致）
     blocked = _blocked_for_graph(d)
@@ -1674,7 +1744,9 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
     #   而口径面板明明写着「介数只在这张子图里算」，那就是骗用户。
     #   所以这里裁一次子图，两边共用同一份分析结果。
     sub, scope_note = GA.crop_scope(G, focus=focus,
-                                    keyword=keyword, hop=hop)
+                                    keyword=keyword, hop=hop,
+                                    node_types=ntypes_map,
+                                    want_types=want_nt or None)
     if sub.number_of_nodes():
         r = GA.analyze(sub, types, topn=topn)
     else:
@@ -1692,9 +1764,43 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
         r["node_betweenness"] = {}
         r["node_pagerank"] = {}
         r["graph_fingerprint"] = None
+    # ⚠ 图例禁用态要依据的计数：**剔除实体类型筛选之前**的子图。
+    #   判据必须是「这个类型在当前范围内存不存在」，而不是「筛完还剩几个」——
+    #   用后者的话，取消勾选「政策」后计数变 0 → 判成 disabled →
+    #   于是**再也点不回来**，用户把自己锁死了（实测真会发生）。
+    #   只改前端判据是治不好的，因为信息在响应里就已经混了。
+    pre, _pre_note = GA.crop_scope(G, focus=focus, keyword=keyword, hop=hop)
+    avail_by_group = {t: sum(1 for x in pre.nodes()
+                              if ntypes_map.get(x) == t)
+                      for t in GA.ENTITY_TYPES}
     ne = GA.to_pyvis_nodes_edges(r, G, types, min_degree=min_degree,
                                  limit=limit, max_degree=max_degree,
-                                 keyword=keyword, focus=focus, hop=hop)
+                                 keyword=keyword, focus=focus, hop=hop,
+                                 node_types=ntypes_map,
+                                 want_types=want_nt or None,
+                                 avail_by_group=avail_by_group)
+    # ⚠⚠ **一张边都没有的图，等价于空图**，排名必须一起清掉。
+    #   这不是假想：「只看政策」会得到 448 个政策节点、但**零条边** ——
+    #   因为本库关系全是 org→X 单向，政策之间没有边。
+    #   此时 sub.number_of_nodes() 是 448（非空），于是 analyze 照常跑，
+    #   排出一份"介数 Top"名单，值全是 0.0 —— 而屏幕上一个点都没有。
+    #   用户看到的是「图空白 + 一屏指标」，正是这个项目反复防的
+    #   「图是一套口径、数字是另一套」。
+    if ne and not ne.get("edges"):
+        for k in ("degree", "strength", "betweenness", "pagerank",
+                  "communities"):
+            r[k] = []
+        r["node_betweenness"] = {}
+        r["node_pagerank"] = {}
+        r["graph_fingerprint"] = None
+        r["by_type"] = []
+        # ⚠ 原因已经写在 crop_by_node_types 的 scope_note 里了（它同时判
+        #   节点与边），这里只补一句"排名已清空"，别把原因重复一遍 ——
+        #   两处各写一份说明，早晚会漂成两种说法。
+        if "排名已清空" not in (ne.get("scope_note") or ""):
+            ne["scope_note"] = ((ne.get("scope_note") or "") +
+                                "；这批实体之间没有边（指标无法计算，排名已清空）"
+                                ).lstrip("；")
     # 内部用的全量映射与指纹，去掉以免响应多大几十 KB
     r.pop("node_community", None)
     r.pop("node_betweenness", None)
@@ -1721,6 +1827,10 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
         "keyword": keyword, "focus": focus, "hop": hop,
         "site": [s.strip() for s in (site or "").split(",") if s.strip()],
         "date_from": date_from, "date_to": date_to,
+        # 图例筛了哪几类实体。⚠ 必须回显：筛完之后的度/介数是**子图口径**，
+        #   和不筛时不是一个数，界面上得说清，否则用户会把两次数值直接比大小。
+        "node_types": sorted(want_nt) or list(GA.ENTITY_TYPES),
+        "node_types_active": bool(want_nt),
         "graph_nodes_all": n_all,
         "graph_edges_all": e_all,
         "graph_nodes_typed": G.number_of_nodes(),
@@ -1748,7 +1858,8 @@ def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
                        hop: int = Query(1, ge=1, le=4),
                        site: str = "",
                        date_from: str = "",
-                       date_to: str = ""):
+                       date_to: str = "",
+                       node_types: str = ""):
     """
     关联指标（networkx）：度/加权度/介数/PageRank/Louvain 社区。
 
@@ -1756,17 +1867,24 @@ def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
     **介数**才说明谁在协作网络里居中协调。
 
     筛选：
-      · rel_types  逗号分隔的关系类型（co_issue/issue/target）
-      · max_degree 度数上限（0 = 不限），用来压掉「一颗星把整张图盖住」
-      · keyword    只保留名称含此词的节点
-      · focus+hop  只看以某节点为中心 hop 跳的邻域（指标在子图上重算）
-      · site       逗号分隔的来源站点（关系所在文章的站点）
+      · rel_types   逗号分隔的关系类型（co_issue/issue/target/adopt）
+      · node_types  逗号分隔的**实体类型**（org/policy/problem/measure），
+                    就是图例那四个勾选项；空 = 全选
+      · max_degree  度数上限（0 = 不限），用来压掉「一颗星把整张图盖住」
+      · keyword     只保留名称含此词的节点
+      · focus+hop   只看以某节点为中心 hop 跳的邻域（指标在子图上重算）
+      · site        逗号分隔的来源站点（关系所在文章的站点）
       · date_from/date_to 关系来源文章的发表日期范围，支持 YYYY 或 YYYY-MM
+
+    ⚠ node_types 与 focus/keyword 的**先后顺序固定为 类型 → 聚焦 → 关键词**
+      （见 graph_analysis.crop_scope）。所以「只看政策 + 聚焦某机构」=
+      先砍到政策类、再在政策里找那个机构的邻域；换个顺序含义就变了。
     """
     return _graph_payload(int(min_degree), int(limit), float(min_weight),
                           int(topn), int(max_degree), rel_types,
                           keyword, focus, int(hop),
-                          site, date_from, date_to)
+                          site, date_from, date_to,
+                          node_types=node_types)
 
 
 @app.get("/api/graph/facets")
@@ -1884,7 +2002,8 @@ def api_graph_vis(min_degree: int = Query(1, ge=1, le=50),
                   max_degree: int = Query(0, ge=0, le=500),
                   rel_types: str = "", keyword: str = "",
                   focus: str = "", hop: int = Query(1, ge=1, le=4),
-                  site: str = "", date_from: str = "", date_to: str = ""):
+                  site: str = "", date_from: str = "", date_to: str = "",
+                  node_types: str = ""):
     """
     产出 pyvis 用的单文件 HTML（vis.js **内联**，零 CDN）。
 
@@ -1897,7 +2016,8 @@ def api_graph_vis(min_degree: int = Query(1, ge=1, le=50),
     """
     data = _graph_payload(int(min_degree), int(limit), 1.0, 20,
                           int(max_degree), rel_types, keyword, focus,
-                          int(hop), site, date_from, date_to)
+                          int(hop), site, date_from, date_to,
+                          node_types=node_types)
     g = data.get("graph") or {}
     if not g.get("nodes"):
         return {"error": "当前筛选下没有可显示的节点"}

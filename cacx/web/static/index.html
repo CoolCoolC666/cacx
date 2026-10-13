@@ -124,6 +124,11 @@
   .form label{display:flex;align-items:center;gap:8px;
               color:var(--dim);font-size:12.5px;flex-wrap:wrap}
   .form label.inline{gap:6px}
+  /* 图例的勾选项。⚠ 不能只靠 .inline —— 那条规则写在 .form 作用域下，
+     而图例不在任何 .form 里，直接用 .inline 拿不到 gap，勾选框和文字会粘在一起。 */
+  .lg-pick{display:inline-flex;align-items:center;gap:5px;font-size:12px;
+           cursor:pointer;user-select:none}
+  .lg-pick[data-off]{cursor:not-allowed;opacity:.45}
   /* 同步中的栏目进度：一眼看出卡在哪个栏目 */
   .colprog{display:flex;flex-wrap:wrap;gap:6px}
   .colprog-item{display:flex;align-items:center;gap:6px;font-size:12px;
@@ -388,7 +393,7 @@
         <div id="gp_canvas" style="height:620px;background:#0f1115;border-radius:6px;
              border:1px solid var(--line)"></div>
         <div id="gp_legend" style="margin-top:10px;display:flex;gap:14px;flex-wrap:wrap;
-             font-size:12px;color:var(--dim)"></div>
+             align-items:center;font-size:12px;color:var(--dim)"></div>
       </div>
       <div class="box" style="flex:1;min-width:280px">
         <h3 id="gp_detail_title">关系详情</h3>
@@ -1730,6 +1735,10 @@ const GP_STYLE = {
   problem: {c:'#ff6b6b', s:'triangle',  cn:'治理问题'},
   measure: {c:'#5ddc9a', s:'diamond',   cn:'措施'},
 };
+// 图例勾选了哪几类（实体类型筛选器）。⚠ 默认全选，与后端"空 = 不筛"一致。
+//   必须存成模块级变量而不是每次读 DOM：loadGraph 会重建图例的 innerHTML，
+//   只看 DOM 的话重绘后勾选状态就没了，表现为"点了一下没反应"。
+let GP_LEGEND_ON = new Set(Object.keys(GP_STYLE));
 const GP_SHAPE_CN = {dot:'圆', square:'方块', triangle:'三角', diamond:'菱形'};
 
 // vis-network 懒加载：只有进图谱页/导出时才拉那 469KB。
@@ -1792,6 +1801,18 @@ function gpQuery(){
   if(df) q.set('date_from', df);
   const dt = ($('gp_dto')?.value||'').trim();
   if(dt) q.set('date_to', dt);
+  // 实体类型（图例那四个）。⚠ 与关系类型同样的口径约定：
+  //   **全勾 = 不筛**，传空串，而不是把四类都传出去 ——
+  //   后端收到全量会走"不筛"的快路径，而若传全量则语义上是
+  //   "显式只要这四类"，将来第五类加进来时两边含义就对不上了。
+  // ⚠ 只数**可用**（非 disabled）的勾选项：措施类在本图恒为 0、被禁用，
+  //   它仍处于 checked 状态，若把它算进去，"全都勾着"就永远不等于 4，
+  //   于是每次都在发一个其实没变的筛选参数 —— 口径面板会一直显示
+  //   「筛选后的子图」，而用户什么都没筛。
+  const lgAll = [...document.querySelectorAll('#gp_legend input[value]')]
+      .filter(x=>GP_STYLE[x.value] && !x.disabled);
+  const lgOn = lgAll.filter(x=>x.checked).map(x=>x.value);
+  if(lgOn.length && lgOn.length < lgAll.length) q.set('node_types', lgOn.join(','));
   q.set('limit','300'); q.set('topn','12');
   return q;
 }
@@ -1806,6 +1827,12 @@ function gpReset(){
   $('gp_dto').value = '';
   document.querySelectorAll('#gp_types input').forEach(x=>x.checked = true);
   document.querySelectorAll('#gp_sites input').forEach(x=>x.checked = true);
+  // 图例也要复位到全选，否则「重置」之后图上仍是筛过的，
+  // 而界面上其它条件都写着"不限"，看着像重置没生效。
+  // ⚠ 要同时清 GP_LEGEND_ON —— 重置后图例 innerHTML 会重建，
+  //   只改 DOM 的话下次 loadGraph 又按旧状态渲染，又变回筛过的。
+  GP_LEGEND_ON = new Set(Object.keys(GP_STYLE));
+  document.querySelectorAll('#gp_legend input[value]').forEach(x=>x.checked = true);
   loadGraph();
 }
 
@@ -1857,13 +1884,22 @@ function gpRenderScope(an){
   const g = an?.graph || {};
   if(!f){ box.innerHTML = ''; return; }
   const bits = [];
-  const hasScope = (f.rel_types||[]).length || (f.site||[]).length
+  const ntActive = !!f.node_types_active;
+  // ⚠ 图例筛了类型 = 这是一张**子图**，指标全是子图口径。
+  //   所以 hasScope 必须把它算进去，否则警告那句不会显示，
+  //   用户会把筛后的介数（0.0965）和全图介数（0.194）直接比大小。
+  const hasScope = ntActive || (f.rel_types||[]).length || (f.site||[]).length
                    || f.date_from || f.date_to || f.keyword || f.focus;
   bits.push(hasScope ? '全库 <b>' + f.graph_nodes_all + '</b> 节点 / <b>'
     + f.graph_edges_all + '</b> 边 / <b>' + f.rel_rows_all + '</b> 条关系'
     : '全图 <b>' + f.graph_nodes_all + '</b> 节点 / <b>'
     + f.graph_edges_all + '</b> 边');
   const cond = [];
+  if(ntActive){
+    const NTCN = {org:'机构',policy:'政策',problem:'治理问题',measure:'措施'};
+    const on = (f.node_types||[]).map(t=>NTCN[t]||t);
+    cond.push('实体类型 <b>' + on.join('、') + '</b>');
+  }
   if((f.rel_types||[]).length) cond.push('类型 <b>' + f.rel_types.join('、') + '</b>');
   if((f.site||[]).length) cond.push('站点 <b>' + f.site.join('、') + '</b>');
   if(f.date_from || f.date_to)
@@ -1873,8 +1909,8 @@ function gpRenderScope(an){
     bits.push(`来源限定：${cond.join(' · ')} → <b>${f.rel_rows}</b> 条关系`
       + ` → <b>${f.graph_nodes_typed}</b> 节点 / ${f.graph_edges_typed} 边`);
   }
-  if(f.focus || f.keyword){
-    bits.push(f.scope_note + ` → <b>${f.scope_nodes}</b> 节点 / ${f.scope_edges} 边`);
+  if(f.focus || f.keyword || ntActive){
+    bits.push((f.scope_note || '当前范围') + ` → <b>${f.scope_nodes}</b> 节点 / ${f.scope_edges} 边`);
   }
   const degTxt = f.max_degree
     ? `度数 ${f.min_degree}–${f.max_degree}` : `度数 ≥ ${f.min_degree}`;
@@ -1990,13 +2026,35 @@ function renderNet(a){
   const nodes = (a && a.graph && a.graph.nodes) || [];
   const edges = (a && a.graph && a.graph.edges) || [];
   GP_NODES = nodes;
+  // 图例每类的计数。⚠ 必须在**空图判断之前**算好 ——
+  //   空图分支也要渲染图例（它是唯一的改筛选入口），那里同样要用这个计数。
+  //   放在后面的话，空图那次就是拿一个未声明的变量，等于 ReferenceError，
+  //   而症状是"空图时点图例没反应"，很难联想到是变量提升顺序。
+  const byGroup = {};
+  (((a||{}).graph||{}).by_group||[]).forEach(x=>{ byGroup[x.group] = x.n; });
+  if(!Object.keys(byGroup).length){
+    nodes.forEach(n=>{ const g=n.group||'org'; byGroup[g]=(byGroup[g]||0)+1; });
+  }
   if(!nodes.length){
-    host.innerHTML = `<div class="empty" style="padding:80px 20px;line-height:1.9">
-      还没有关系数据。<br>
-      点右上角「🔧 去抽取数据」，在样本配置器里按同一口径跑一次规则抽取。<br>
-      <span style="font-size:11.5px">或让 AI 通过 MCP 的
-      <code>cacx_put_entities</code> / <code>cacx_put_relations</code> 写入。</span></div>`;
+    // ⚠ 空图有两种成因，提示必须分开：
+    //   ① 后端说了原因（scope_note，比如「只看政策而本库是机构→X 单向」）
+    //      → 把原因原样显示，别再补一句「去抽取数据」，那是误导；
+    //   ② 全库真的一条关系都没有 → 才提示去抽取。
+    //   以前这两种共用一句话，于是筛出空图时用户被告知"还没抽取数据"，
+    //   而数据明明在那儿。
+    const why = (a && a.graph && a.graph.scope_note)
+             || (a && a.summary) || '';
+    host.innerHTML = `<div class="empty" style="padding:60px 20px;line-height:1.9">
+      当前筛选下没有可显示的节点。<br>
+      <span style="color:var(--warn);font-size:13px">${esc(why)}</span><br>
+      <span style="font-size:11.5px">放宽筛选试试：把图例的实体类型多勾几类、
+      或把度数下限调低。</span></div>`;
     $('gp_cnt').textContent = '';
+    // 图例要照常渲染，否则用户连"去哪儿改筛选"都看不到 ——
+    // 图例同时就是筛选器，藏起来等于把唯一的出路也藏了。
+    // ⚠ 必须传真实的 a.graph：avail_by_group 在里面，
+    //   传空对象会让四类全被判成"本范围没有"而全部禁用。
+    renderLegend(byGroup, a.graph || {});
     return;
   }
   const hidden = a.graph.hidden_nodes || 0;
@@ -2059,14 +2117,86 @@ function renderNet(a){
     if(p.nodes.length) focusNode(p.nodes[0]);
   });
 
-  $('gp_legend').innerHTML = Object.keys(GP_STYLE).map(k=>{
+  renderLegend(byGroup, a.graph);
+}
+
+// 图例 = 颜色/形状说明 **+ 实体类型筛选器**（两用）。
+// ⚠ 单独抽出来是因为空图时也要渲染：图例就是改筛选的唯一入口，
+//   筛出空图却把图例藏掉，用户就只能刷新，没有任何出路。
+// ⚠ 选中状态必须**跨重绘保持**：每次 loadGraph 都会重建图例的 innerHTML，
+//   若一律写成 checked，用户勾掉「政策」后下一次重绘又变回全选，
+//   表现为"点了没反应"。
+function renderLegend(byGroup, graph){
+  const box = $('gp_legend');
+  if(!box) return;
+  const shapes = {dot:'●', square:'■', triangle:'▲', diamond:'◆'};
+  // ⚠ 禁用态看的是 avail（**尚未按类型筛选**时的节点数），
+  //   不是 byGroup（筛完剩下的数）。
+  //   早先拿 byGroup 判禁用，结果是：取消勾选「政策」→ 计数变 0 → 判为禁用
+  //   → 那个复选框再也点不回来，用户把自己锁死在筛掉的状态里。
+  //   这是 UI 上"再也回不去"的典型成因，而且看起来像"图例坏了"。
+  const avail = {};
+  ((graph&&graph.avail_by_group)||[]).forEach(x=>{ avail[x.group]=x.n; });
+  // 总开关的勾选态 = 「所有可用的类型都在勾选中」。
+  // ⚠ 别用 GP_LEGEND_ON.size：它初始化就装了 4 个 key，恒为真 ——
+  //   总开关会永远显示成"已勾"，而实际用户可能已经关掉了三类。
+  const enabled = Object.keys(GP_STYLE).filter(k=>!avail || avail[k]!==0);
+  const allOn = enabled.length>0 && enabled.every(k=>GP_LEGEND_ON.has(k));
+  box.innerHTML = Object.keys(GP_STYLE).map(k=>{
     const st = GP_STYLE[k];
-    const shapes = {dot:'●', square:'■', triangle:'▲', diamond:'◆'};
-    return `<span style="display:inline-flex;align-items:center;gap:5px">
+    // 显示的计数 = 当前屏幕上真的画出来的这批节点
+    const n = (byGroup[k]||0);
+    // 只有"这个类型在当前范围里一个都没有"才禁用
+    const off = avail[k] === 0;
+    const on = GP_LEGEND_ON.has(k);
+    return `<label class="lg-pick" ${off?'data-off="1"':''}
+        title="${esc(st.cn)}类：当前图上 ${n} 个节点`
+      + `${off?'（本范围里没有这类实体，勾选也不会有东西）':''}">
+      <input type="checkbox" value="${k}" ${on?'checked':''} ${off?'disabled':''}>
       <span style="color:${st.c};font-size:13px">${shapes[st.s]}</span>
-      ${st.cn}</span>`;
-  }).join('') + `<span style="opacity:.7">节点大小 ∝ 度　·　
-    悬停看指标　·　单击/双击边看原文</span>`;
+      ${st.cn} <b style="color:var(--acc2)">${n}</b></label>`;
+  }).join('') +
+    `<label class="lg-pick" style="margin-left:2px"
+       title="四类实体的总开关（取消会全部选中 —— 至少要留一类）">
+      <input type="checkbox" ${allOn?'checked':''}
+             onclick="gpLegendMaster(this)">
+      实体类型</label>` +
+    `<span style="opacity:.7">节点大小 ∝ 度　·
+    悬停看指标　·　单击/双击边看原文　·　<b>点图例可只看某几类</b></span>`;
+
+  // 点一下任意一项 → 重取。图谱与度/介数一起重算（后端裁子图），
+  // 所以筛选后的指标和屏幕上的图是同一口径。
+  box.querySelectorAll('input[value]').forEach(cb=>{
+    if(!cb.value || !GP_STYLE[cb.value]) return;
+    cb.onchange = ()=>{
+      const on = [...box.querySelectorAll('input[value]')]
+        .filter(x=>GP_STYLE[x.value] && !x.disabled && x.checked)
+        .map(x=>x.value);
+      // 一个都不选：后端会当非法输入返回空图。与其让用户看一张空白 + 提示，
+      // 不如就地拦下并把最近一次勾的恢复回来 —— 空图没有任何解释力。
+      if(!on.length){
+        cb.checked = true;
+        alert('至少保留一类实体。本库的关系是「机构 → 政策/问题/措施」单向，'
+          + '所以像「只看政策」这种单选会得到空图 —— 请同时勾选「机构」。');
+        return;
+      }
+      GP_LEGEND_ON = new Set(on);
+      loadGraph();
+    };
+  });
+}
+
+// 图例总开关：**只做"全选"**，不做"全不选"。
+// ⚠ 少一类就空图是这里的数据形态决定的（关系全是 org→X 单向），
+//   给一个能点到"全不选"的开关，等于摆一个必然出错的按钮在用户面前。
+//   所以取消勾选时直接把它自己弹回全选。
+function gpLegendMaster(boxEl){
+  $('gp_legend').querySelectorAll('input[value]').forEach(x=>{
+    if(GP_STYLE[x.value] && !x.disabled) x.checked = true;
+  });
+  GP_LEGEND_ON = new Set(Object.keys(GP_STYLE));
+  boxEl.checked = true;
+  loadGraph();
 }
 
 function focusNode(id){

@@ -83,6 +83,93 @@ def build_graph(relations: Iterable[Dict[str, Any]],
     return G, types
 
 
+# 图例/配色用的四个实体类型。顺序即前端图例顺序，别随意改。
+ENTITY_TYPES = ("org", "policy", "problem", "measure")
+
+
+def node_type_map(entities: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+    """
+    {实体名: 类型} —— 给图上的节点定「它是哪一类实体」。
+
+    ⚠ 这张表以前**根本不存在**：建图只吃关系的两端名字，实体类型在建图
+      时被整个丢掉，前端那句 `n.group || 'org'` 于是把所有节点都当成机构，
+      画成一片蓝点 —— 图例上写着「政策■治理问题▲措施◆」，实际上一条都没生效。
+      要按类型筛选、要颜色形状双编码，都得先有这个映射。
+
+    ⚠ 同一名字可能既是机构又是政策（实测 16561 个去重名里 28 个跨类型，
+      如「南方AI破谣局」既被抽成 org 又被抽成 policy）。图里一个节点只能有
+      一个颜色，所以按**出现次数取众数**。多数实现请直接调
+      node_type_map_from_counts —— 那个拿着真实条数；这里按每条 1 折算，
+      逐条喂进来时权重是均等的。
+    """
+    acc: Dict[str, Dict[str, int]] = {}
+    for e in entities:
+        nm = (e.get("name") or "").strip()
+        ty = (e.get("type") or "").strip()
+        if not nm or not ty:
+            continue
+        acc.setdefault(nm, {})
+        acc[nm][ty] = acc[nm].get(ty, 0) + 1
+    return node_type_map_from_counts(acc)
+
+
+def node_type_map_from_counts(counts: Dict[str, Dict[str, int]]
+                              ) -> Dict[str, str]:
+    """
+    {实体名: {类型: 条数}} → {实体名: 类型}（按众数）
+
+    ⚠ 并列时按 ENTITY_TYPES 的顺序靠前者胜出 —— 保证同一份数据每次跑出来
+      的配色完全一致。颜色随机化的话，同一张图刷新两次长得不一样，
+      演示时截图对不上，报告里的图例也没法当证据。
+
+    ⚠ 名字在计数表里、但类型不在 ENTITY_TYPES 内的（脏数据）直接跳过，
+      不归到 org —— 归 org 会让脏节点混进「机构」这一类，
+      筛「只看机构」时它又冒出来，看着像筛选没生效。
+    """
+    rank = {t: i for i, t in enumerate(ENTITY_TYPES)}
+    out: Dict[str, str] = {}
+    for nm, c in (counts or {}).items():
+        cand = {t: n for t, n in (c or {}).items() if t in rank and n > 0}
+        if not cand:
+            continue
+        out[nm] = min(cand, key=lambda t: (-cand[t], rank[t]))
+    return out
+
+
+def crop_by_node_types(G, node_types: Optional[Dict[str, str]],
+                       want_types: Optional[set]):
+    """
+    只保留选中类型的节点 → (sub, note)
+
+    ⚠ 返回的是**诱导子图**：两端都被保留的边才留。所以筛成「仅政策」时
+      政策与政策之间的联合发文会显示，而政策与机构的边会整条消失 ——
+      这不是丢数据，是筛选的定义。note 要讲清楚，界面上得显示出来，
+      否则用户以为图坏了。
+
+    ⚠ want_types 为空/None = 不筛，返回原图。**别把「全不选」当成筛**：
+      调用方要把「一个都不选」当成非法输入挡掉，否则会得到一张空图，
+      而用户看到的是「图空了」而不是「你什么都没选」。
+    """
+    if not want_types or not node_types:
+        return G, ""
+    keep = [n for n in G.nodes() if node_types.get(n) in want_types]
+    nx = _nx()
+    sub = G.subgraph(keep).copy()
+    names = {"org": "机构", "policy": "政策",
+             "problem": "治理问题", "measure": "措施"}
+    shown = "、".join(names.get(t, t) for t in ENTITY_TYPES if t in want_types)
+    note = f"只看{shown}类实体"
+    # ⚠ 判空要**同时看节点和边**。本项目的实际形态是 org→X 单向，
+    #   筛成"只看政策"会得到 448 个政策节点、但**零条边** ——
+    #   节点数非零，只判 `not number_of_nodes()` 就漏掉了，
+    #   于是界面上出现"有节点却画不出任何连线、也没有提示"。
+    #   实测就踩过：节点在、边没了、用户以为图坏了。
+    if not sub.number_of_nodes() or not sub.number_of_edges():
+        note += ("；这批实体之间没有边（关系全是「机构→政策/问题/措施」单向，"
+                 "同类实体之间没有连线）。请同时勾选「机构」")
+    return sub, note
+
+
 def blocked_names(entities: Iterable[Dict[str, Any]],
                   types_wanted: Optional[set] = None) -> set:
     """
@@ -220,9 +307,11 @@ def _fingerprint(G) -> str:
 
 
 def crop_scope(G, focus: str = "", keyword: str = "",
-               hop: int = 1):
+               hop: int = 1,
+               node_types: Optional[Dict[str, str]] = None,
+               want_types: Optional[set] = None):
     """
-    按「聚焦邻域 / 名称含」裁出子图 → (sub, scope_note)
+    按「实体类型 / 聚焦邻域 / 名称含」裁出子图 → (sub, scope_note)
 
     ⚠ 单独抽出来是因为**指标和画图必须用同一张图**：
       画图在 to_pyvis_nodes_edges 里裁子图，指标在 analyze 里算 ——
@@ -230,27 +319,36 @@ def crop_scope(G, focus: str = "", keyword: str = "",
       而界面上写着「介数只在这张子图里算」，那就是骗用户。
       调用方裁一次，把 sub 同时喂给 analyze 和 to_pyvis。
 
+    ⚠ 筛选顺序：**类型 → 聚焦 → 关键词**。
+      类型放最前，因为它是「这张图里有哪些实体」的粗筛；若放在聚焦之后，
+      「只看政策」就变成「只看聚焦邻域里的政策」——同一条筛选语句，
+      换个顺序含义就变了，而用户以为自己选的是前者。
+      反过来放在最前也不损失什么：聚焦/关键词都是在这批节点里再挑。
+
     ⚠ 焦点不在图里要**说清楚**并返回空图，不能静默回退成整张图 ——
       用户会以为筛生效了，其实什么都没筛。
     """
     nx = _nx()
     sub = G
-    scope_note = ""
+    notes: List[str] = []
     focus = (focus or "").strip()
     kw = (keyword or "").strip()
+    if want_types and node_types:
+        sub, n1 = crop_by_node_types(sub, node_types, want_types)
+        if n1:
+            notes.append(n1)
     if focus:
-        if focus in G:
-            sub = nx.ego_graph(G, focus, radius=max(1, int(hop)))
-            scope_note = f"以「{focus}」为中心 {max(1, int(hop))} 跳邻域"
+        if focus in sub:
+            sub = nx.ego_graph(sub, focus, radius=max(1, int(hop)))
+            notes.append(f"以「{focus}」为中心 {max(1, int(hop))} 跳邻域")
         else:
             sub = nx.Graph()
-            scope_note = (f"「{focus}」不在当前图里"
-                          f"（可能度数不够或已被前面的筛子滤掉）")
+            notes.append(f"「{focus}」不在当前图里"
+                         f"（可能度数不够或已被前面的筛子滤掉）")
     if kw:
         sub = sub.subgraph([n for n in sub.nodes() if kw in n]).copy()
-        scope_note = (scope_note + "；" if scope_note else "") + \
-            f"名称含「{kw}」"
-    return sub, scope_note
+        notes.append(f"名称含「{kw}」")
+    return sub, "；".join(notes)
 
 
 def to_pyvis_nodes_edges(result: Dict[str, Any],
@@ -260,7 +358,11 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
                          max_degree: int = 0,
                          keyword: str = "",
                          focus: str = "",
-                         hop: int = 1) -> Dict[str, Any]:
+                         hop: int = 1,
+                         node_types: Optional[Dict[str, str]] = None,
+                         want_types: Optional[set] = None,
+                         avail_by_group: Optional[Dict[str, int]] = None
+                         ) -> Dict[str, Any]:
     """
     networkx 结果 → pyvis 前端要的 {nodes, edges}。
 
@@ -287,7 +389,8 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
     # ---- 焦点邻域 / 关键词：先裁子图 ----
     # ⚠ 传进来的 result 应当已经是在同一张子图上算的（见 crop_scope 的说明），
     #   这里只负责画；指标不重复计算，避免两处口径漂移。
-    sub, scope_note = crop_scope(G, focus=focus, keyword=keyword, hop=hop)
+    sub, scope_note = crop_scope(G, focus=focus, keyword=keyword, hop=hop,
+                                 node_types=node_types, want_types=want_types)
 
     # ⚠ 指标优先**复用** result 里已经算好的映射，但**必须先验明身份**。
     #   只有 result 确实是「对 sub 这张图」算出来的才复用；
@@ -315,9 +418,19 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
     nodes = []
     for n in core:
         d = d_of[n]
+        # ⚠ group 必须带上，且**只能有一份口径**：
+        #   前端按它决定颜色+形状（机构●政策■治理问题▲措施◆），
+        #   以前这个字段压根不存在，于是前端 `n.group || 'org'` 把
+        #   所有节点当成机构，图上一片蓝点、图例形同虚设。
+        #   取不到类型时归 org 而不是丢弃节点 —— 丢节点会静默改变
+        #   度/介数，用户只会觉得「图怎么少了点」，不会想到是缺字段。
+        grp = (node_types or {}).get(n) or "org"
+        if grp not in ENTITY_TYPES:
+            grp = "org"
         nodes.append({
             "id": n,
             "label": n,
+            "group": grp,
             "size": 12 + min(d * 3, 40),
             "degree": d,
             "strength": round(s_of.get(n, 0), 1),
@@ -341,8 +454,23 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
             "title": f"{s} → {d}\n权重 {dat.get('weight'):.1f}"
                       + (f"\n类型 {'、'.join(ts)}" if ts else ""),
         })
+    # 图例要显示「每类各多少个」，所以把**画出来的**这批节点按类型点一次数。
+    # ⚠ 必须数 nodes 而不是全图：图例写在图下面，标的是屏幕上看得见的那些，
+    #   标成全图 1633 节点里的 856 个机构，图上只有 300 个，数字对不上。
+    by_group: Dict[str, int] = {}
+    for x in nodes:
+        by_group[x["group"]] = by_group.get(x["group"], 0) + 1
     return {"nodes": nodes, "edges": edges,
             "scope_note": scope_note,
             "scope_nodes": sub.number_of_nodes(),
             "scope_edges": sub.number_of_edges(),
-            "hidden_nodes": max(0, sub.number_of_nodes() - len(nodes))}
+            "hidden_nodes": max(0, sub.number_of_nodes() - len(nodes)),
+            "by_group": [{"group": t, "n": by_group.get(t, 0)}
+                          for t in ENTITY_TYPES],
+            # ⚠ avail_by_group = 该类型在**尚未按类型筛选**时的节点数。
+            #   图例的禁用态必须看它，而不是 by_group：by_group 是筛完的结果，
+            #   拿它判禁用会让「取消勾选 → 计数 0 → 判为不存在 → 禁用 →
+            #   点不回来」形成死锁，用户把自己锁死在筛掉的���态里。
+            "avail_by_group": [
+                {"group": t, "n": int((avail_by_group or {}).get(t, 0))}
+                for t in ENTITY_TYPES]}
