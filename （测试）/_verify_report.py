@@ -227,6 +227,54 @@ for nm in ("吉林省网信办", "浙江省通信管理局", "中共浙江省委
     check(f"{nm} 不在默认图中", not hit,
           f"在图中，度={nodes[nm]['degree']}" if hit else "已正确拦截")
 
+print()
+print("=" * 70)
+print("⑬ Word 版（.docx）与 md 版是否同源、没漂移")
+print("=" * 70)
+docx_path = ROOT / "docs" / "报告-网信办角色与权责边界.docx"
+if not docx_path.exists():
+    check("docx 已生成", False, f"缺 {docx_path.name}，跑 py -3 md2docx.py")
+else:
+    import docx as _docx
+    d = _docx.Document(str(docx_path))
+
+    # 把段落 + 表格单元格拼成一个全文字符串
+    chunks = [p.text for p in d.paragraphs]
+    for t in d.tables:
+        for row in t.rows:
+            for c in row.cells:
+                chunks.append(c.text)
+    full = "\n".join(chunks)
+
+    check("docx 已生成", True, f"{docx_path.stat().st_size:,} 字节")
+
+    # 关键数字一个都不能少 —— Word 版最常见的失真就是转档时漏句/漏行
+    MUST = ["4513", "4515", "668 万字", "16558", "8801", "1257", "27.9%",
+            "243", "126", "102", "0.194", "0.1173", "0.8282", "0.0272",
+            "1633", "3921", "115", "244", "1015",
+            "5415", "2222", "609", "555", "61.5%",
+            "1527", "1579", "1409", "198",
+            "2956", "1559", "24 条", "3 条", "21 条", "12 个端点",
+            "11.0%", "17.6%", "31.5%", "26.8%"]
+    missing = [m for m in MUST if m not in full]
+    check(f"关键数字 {len(MUST)} 个全部保留",
+          not missing, f"缺 {missing}" if missing else "无缺失")
+
+    # markdown 残留：转换器失手时正文会露出星号或反引号
+    residue = [tok for tok in ("**", "`") if tok in full]
+    check("无 markdown 标记残留", not residue, f"残留 {residue}" if residue else "")
+
+    # 表格结构：主题占比表 表头+3 年 = 4 行 x 5 列，问题应对表 表头+5 行 = 6 行 x 3 列
+    shapes = [(len(t.rows), len(t.columns)) for t in d.tables]
+    check("主题表 4x5（表头+2024/2025/2026）", (4, 5) in shapes, f"实际表格 {shapes}")
+    check("问题应对表 6x3（表头+5 行）", (6, 3) in shapes, f"实际表格 {shapes}")
+
+    # 六个一级章节标题都在
+    heads = [p.text for p in d.paragraphs if p.style.name.startswith("Heading")]
+    for need in ("一、方法与口径", "二、角色画像", "三、权责边界",
+                 "四、发现的问题与应对措施", "五、已知局限", "六、结论"):
+        check(f"章节「{need}」", any(need in h for h in heads))
+
 db.close()
 print()
 print("=" * 70)
