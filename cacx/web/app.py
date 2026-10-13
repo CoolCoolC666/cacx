@@ -1399,6 +1399,57 @@ def _pyvis_lib_dir() -> Optional[str]:
     return None
 
 
+# 资源引用标签：<script …> / <link …>，只取开标签（不吞闭合）
+_RES_TAG_RE = re.compile(r"<(script|link)\b([^>]*)>", re.I)
+_RES_ATTR_RE = re.compile(r"(src|href)\s*=\s*[\"']([^\"']*)[\"']", re.I)
+# 内联资源不算「外部引用」：data: URI 与页内锚点都是自包含的
+_RES_INLINE_PREFIX = ("data:", "#", "http://", "https://")
+
+
+def _strip_local_refs(html: str) -> str:
+    """
+    删掉所有**相对路径**资源引用（`src="lib/…"` / `href="../node_modules/…"`），
+    保留内联数据与绝对 http(s) 引用（后者由调用方另行处理）。
+
+    ⚠⚠ 这里**绝对不能**用 `<script[^>]+src="…".*?</script>` 这种正则：
+      pyvis 模板里有**自闭合**的 `<script src=…>`（后面没有配套的
+      `</script>`），`.*?` 会一路跨到几百行之后的下一个 `</script>`，
+      把中间的**真实代码**整段吃掉。实测就栽在这：导出件少了 699 字符，
+      vis 还在、节点数据还在、控制台**一个错都不报**，但画布一片空白
+      —— 静默失败，最难查的一种。
+
+      所以逐个标签扫描，判据是 HTML 的真实语法 ——
+      跳过开标签后的空白，看**下一个东西是什么**：
+        · `</script>`  → 它有配对闭合，连闭合一起删（空壳或带内容都算）
+        · 别的 `<…>`   → 这是**自闭合** script（pyvis 那些就是：
+                        后面直接跟 `</head>`/`<body>`），
+                        **只删开标签就停手**
+        · 不是 `<`      → 它有内容，连内容与闭合一起删
+                        （否则残留的裸 JS 会被浏览器当正文渲染）
+    """
+    out, pos = [], 0
+    for m in _RES_TAG_RE.finditer(html):
+        am = _RES_ATTR_RE.search(m.group(2) or "")
+        if not am:
+            continue
+        ref = (am.group(2) or "").strip()
+        if not ref or ref.startswith(_RES_INLINE_PREFIX):
+            continue
+        out.append(html[pos:m.start()])
+        pos = m.end()
+        if m.group(1).lower() != "script":
+            continue
+        rest = html[pos:].lstrip()
+        # 自闭合的判据是「后面跟的不是本标签的闭合」。`</head>` 之类
+        # 也以 '<' 开头，但它不是 `</script>`，所以那个分支要排除掉。
+        if not rest.startswith("<") or rest.startswith("</script>"):
+            close = html.find("</script>", pos)
+            if close != -1:
+                pos = close + len("</script>")
+    out.append(html[pos:])
+    return "".join(out)
+
+
 def pyvis_html(nodes: List[dict], edges: List[dict],
                height: str = "620px") -> str:
     """
@@ -1459,6 +1510,17 @@ def pyvis_html(nodes: List[dict], edges: List[dict],
     #   保证「零外链」是硬保证而不是「基本没有」
     html = re.sub(r'<script[^>]+src="https?://[^"]*"[^>]*></script>', "", html)
     html = re.sub(r'<link[^>]+href="https?://[^"]*"[^>]*>', "", html)
+    # ⚠⚠ **相对路径**引用同样要去掉 —— 这是「零外链」判据的漏网之处。
+    #
+    #   「双击即开、断网可用」意味着用户只带走**这一个 .html**。
+    #   相对路径（lib/…、../node_modules/…）看着「不是外链」，其实一样会 404：
+    #   实测导出件里留着 3 个，控制台报 ERR_FILE_NOT_FOUND。
+    #   图之所以还能画出来，是因为 vis.js 已经内联，这 3 个是**死引用**：
+    #     · lib/bindings/utils.js      —— pyvis 的 notebook 辅助，静态页用不到
+    #     · ../node_modules/vis/dist/… —— pyvis 模板里的源码引用，node_modules 不存在
+    #   但「能用」不等于「对」：控制台红字在演示时很扎眼，而且哪天
+    #   pyvis 升级把某个函数挪回 utils.js 就会静默崩掉。所以主动剥掉。
+    html = _strip_local_refs(html)
     return html
 
 
@@ -1526,6 +1588,23 @@ def api_extract_run(req: ExtractReq):
     return res
 
 
+# 哪几类实体会被「低置信就踢出图」的规则扫到。集中一处，别在多个地方各写一遍。
+_GRAPH_BLOCK_TYPES = {"measure"}
+
+
+def _blocked_for_graph(d) -> set:
+    """
+    算出「不进图」的节点名集合。
+
+    ⚠ 只取 `measure` 类实体，**不要为了保险去拉全量实体**：
+      `blocked_names` 本来也只在 measure 里判（其余类型直接跳过），
+      结果一模一样，但代价差 25 倍 —— 全量 45409 条要 0.75 秒、
+      measure 只有 1249 条、约 0.03 秒。图谱每次拖筛选都会走这里。
+    """
+    ents = d.list_entities(type="measure", limit=None)
+    return GA.blocked_names(ents, _GRAPH_BLOCK_TYPES)
+
+
 def _graph_payload(min_degree: int, limit: int, min_weight: float,
                    topn: int, max_degree: int = 0, rel_types: str = "",
                    keyword: str = "", focus: str = "", hop: int = 1,
@@ -1544,11 +1623,14 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
     # ⚠ 站点/日期是**关系来源文章**的筛选，必须在建图之前做。
     #   事后挑边的话，边还在但权重已经是全时期的共现强度，
     #   「只看 2024 年」时那个权重并不是 2024 年的强度。
-    rows = d.list_relations(limit=5000, site=site,
+    # ⚠ limit=None = 全量。**建图绝不能带 LIMIT**：list_relations 是
+    #   `ORDER BY weight DESC`，截断专挑低权重的关系丢，图上会静默少一大块，
+    #   而界面没有任何提示。实测 8801 条关系取全量只要 0.08 秒。
+    rows = d.list_relations(limit=None, site=site,
                             date_from=date_from, date_to=date_to)
     rows_all = None
     if (site or date_from or date_to):
-        rows_all = d.list_relations(limit=5000)
+        rows_all = d.list_relations(limit=None)
     if not rows:
         return {"nodes": 0, "edges": 0, "degree": [], "strength": [],
                 "betweenness": [], "pagerank": [], "communities": [],
@@ -1572,8 +1654,7 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
     want = {t.strip() for t in (rel_types or "").split(",") if t.strip()}
 
     # 低置信实体不进图（与 build_graph 的口径一致）
-    ents = d.list_entities(limit=5000)
-    blocked = GA.blocked_names(ents, {"measure"})
+    blocked = _blocked_for_graph(d)
     G, types = GA.build_graph(rows, min_weight=min_weight,
                               blocked_nodes=blocked,
                               rel_types=want or None)
@@ -1586,7 +1667,6 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
         n_all, e_all = G_all.number_of_nodes(), G_all.number_of_edges()
     else:
         n_all, e_all = G.number_of_nodes(), G.number_of_edges()
-    r_all = GA.analyze(G, types, topn=topn)
 
     # ⚠ 介数/PageRank/度数排名必须和画出来的图是**同一张图**。
     #   排名表来自 analyze()，画图来自 to_pyvis_nodes_edges() ——
@@ -1600,13 +1680,26 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
     else:
         # 空子图（焦点查无此机构）：analyze 在空图上会退化，
         # 宁可把排名清空，也不能拿全图数字冒充子图数字
-        r = dict(r_all)
+        # ⚠ 兜底才需要那张**全图**分析结果，所以它放在这里现算。
+        #   原来无条件在上面先算一次 —— 而介数在 1600 节点图上要 2.7 秒，
+        #   等于每次打开图谱页（哪怕根本没填焦点）都白付一次钱。
+        r = dict(GA.analyze(G, types, topn=topn))
         for k in ("degree", "strength", "betweenness", "pagerank"):
             r[k] = []
+        # 映射与指纹也要清掉：这里是**全图**的分析结果，画的是空子图，
+        # 不清的话 to_pyvis 会先看到指纹不匹配而自己重算（正确），
+        # 但把全图的映射留在 r 里只会让下一个人误以为可以复用。
+        r["node_betweenness"] = {}
+        r["node_pagerank"] = {}
+        r["graph_fingerprint"] = None
     ne = GA.to_pyvis_nodes_edges(r, G, types, min_degree=min_degree,
                                  limit=limit, max_degree=max_degree,
                                  keyword=keyword, focus=focus, hop=hop)
-    r.pop("node_community", None)   # 内部用的，去掉以免响应过大
+    # 内部用的全量映射与指纹，去掉以免响应多大几十 KB
+    r.pop("node_community", None)
+    r.pop("node_betweenness", None)
+    r.pop("node_pagerank", None)
+    r.pop("graph_fingerprint", None)
     r["graph"] = ne
     r["blocked_count"] = len(blocked)
     # ---- 口径回显：界面必须能说清「这些数字是在什么范围里算的」----
@@ -1685,13 +1778,15 @@ def api_graph_facets(limit: int = Query(20, ge=1, le=60)):
       「筛完还有多少条 issue」。
     """
     d = _db()
-    rows = d.list_relations(limit=5000)
+    # ⚠ 这些计数是筛子的**候选说明**，必须是全量口径：截断了就会把
+    #   「全库 8801 条关系」显示成「5000 条」，还按 weight 只留下高权重的
+    #   那批，by_type / by_site / by_year 三个分布一起偏。
+    rows = d.list_relations(limit=None)
     by_type: Dict[str, int] = {}
     for x in rows:
         t = x.get("rel_type") or ""
         by_type[t] = by_type.get(t, 0) + 1
-    ents = d.list_entities(limit=5000)
-    blocked = GA.blocked_names(ents, {"measure"})
+    blocked = _blocked_for_graph(d)
     G, _ = GA.build_graph(rows, blocked_nodes=blocked)
     deg = dict(G.degree())
     # ⚠ 焦点候选必须按 name **去重**：同一个机构在多篇文章里会被反复抽成
@@ -1700,10 +1795,13 @@ def api_graph_facets(limit: int = Query(20, ge=1, le=60)):
     #   同名节点的度相同（无向图里度由邻接决定），取 max 即可。
     # 焦点候选只给机构类里度最高的那些 —— 随便点一个长尾节点
     # 邻域里可能只有 1 个点，图就空了。
+    # ⚠ 机构名要用**全量去重名**：早先走 list_entities(limit=5000)，
+    #   那按 name 排序截断，等于「只有笔画靠前的机构能当焦点」——
+    #   下拉框里机构缺了一大半，却完全看不出来。
     best: Dict[str, int] = {}
-    for e in ents:
-        n = (e.get("name") or "").strip()
-        if e.get("type") != "org" or not n or n in blocked:
+    for n in d.distinct_entity_names("org"):
+        n = (n or "").strip()
+        if not n or n in blocked:
             continue
         best[n] = max(best.get(n, 0), deg.get(n, 0))
     cands = [{"name": n, "degree": dv} for n, dv in best.items()

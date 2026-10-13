@@ -188,7 +188,35 @@ def analyze(G, types: Optional[Dict] = None,
         "summary": (f"{G.number_of_nodes()} 个实体 / {G.number_of_edges()} 条关系 / "
                     f"{len(comps)} 个连通块，最大块 {len(comps[0]) if comps else 0} 个节点"),
         "node_community": node_comm,
+        # ⚠ 全量映射也带出去（和 node_community 一个道理）：介数在图上是
+        #   最贵的一步（Brandes，1600 节点约 2.7 秒），而画图那边同样需要
+        #   逐节点的介数/PageRank。不带出去，to_pyvis_nodes_edges 就会把
+        #   同一张图的介数**再算一遍** —— 「同一张图算两次」不只是慢，
+        #   更是口径容易漂移的地方。
+        #   调用方在返回响应前 pop 掉这几个键（避免多传几十 KB）。
+        "node_betweenness": btw,
+        "node_pagerank": pr,
+        # ⚠ 必须带上「我算的是哪张图」的指纹。否则画图那边无从判断
+        #   传进来的 result 是不是**自己那张子图**的 —— 调用方完全可以
+        #   把全图的 analyze 结果传进来 + focus 参数，
+        #   于是「聚焦某机构」画出来的是子图、介数却是全图的。
+        #   这不是假想：tests_graph_filter 里就有一条测试专门守它，
+        #   复用功能上线当天就被它抓红了（值 0.05 vs 1.0）。
+        "graph_fingerprint": _fingerprint(G),
     }
+
+
+def _fingerprint(G) -> str:
+    """一张图的「身份」：节点数 + 边数 + 节点名排序后的摘要。
+
+    ⚠ 不能只比节点数/边数：两张不同的图完全可能同规模。
+      但也不必算哈希 —— 排序后的节点名串起来取个长度 + 首尾片段就够，
+      目的是「不是同一张图就别复用」，不是密码学意义上的判等。
+    """
+    names = sorted(G.nodes())
+    joined = "\x00".join(names)
+    return f"{G.number_of_nodes()}:{G.number_of_edges()}:{len(joined)}:" \
+           f"{joined[:24]}:{joined[-24:]}"
 
 
 def crop_scope(G, focus: str = "", keyword: str = "",
@@ -248,11 +276,12 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
     ⚠ focus 裁出的是**子图**，介数/PageRank 必须在子图上重算
       （沿用全图指标等于在两个不同口径的数字之间比较，没有意义）。
       scope_note 回传裁剪说明，界面要把它显示出来。
+
+    ⚠ 「在子图上重算」这件事由 **analyze() 负责**，这里只做画。
+      调用方按 crop_scope(sub) 裁一次，把同一份 result 同时喂给
+      analyze 与这里 —— 指标不重复计算，才不会出现两处口径漂移。
     """
-    deg = {n["name"]: n for n in result.get("degree", [])}
     nx = _nx()
-    full_deg = dict(G.degree())
-    full_str = dict(G.degree(weight="weight"))
     comm = result.get("node_community", {})
 
     # ---- 焦点邻域 / 关键词：先裁子图 ----
@@ -260,9 +289,19 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
     #   这里只负责画；指标不重复计算，避免两处口径漂移。
     sub, scope_note = crop_scope(G, focus=focus, keyword=keyword, hop=hop)
 
-    # ⚠ 指标在**子图**上重算，不是沿用全图结果
-    btw = nx.betweenness_centrality(sub, weight=None)
-    pr = nx.pagerank(sub) if sub.number_of_nodes() else {}
+    # ⚠ 指标优先**复用** result 里已经算好的映射，但**必须先验明身份**。
+    #   只有 result 确实是「对 sub 这张图」算出来的才复用；
+    #   否则自己算 sub 的 —— 沿用全图介数去画子图，就是两套口径混用
+    #   （tests_graph_filter.test_介数在子图上重算而非沿用全图 守这条）。
+    #   实测：自己重算在 1600 节点的图上要 2.7 秒，和 analyze 里那次一样 ——
+    #   所以 _graph_payload 一定会先把 sub 裁出来、喂给 analyze，再把同一份
+    #   result 传进来，这条快路径在正常路径上必然命中。
+    btw = result.get("node_betweenness")
+    pr = result.get("node_pagerank")
+    if (btw is None or pr is None
+            or result.get("graph_fingerprint") != _fingerprint(sub)):
+        btw = nx.betweenness_centrality(sub, weight=None)
+        pr = nx.pagerank(sub) if sub.number_of_nodes() else {}
     d_of = dict(sub.degree())
     s_of = dict(sub.degree(weight="weight"))
 

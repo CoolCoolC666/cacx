@@ -1881,8 +1881,13 @@ class Database:
 
     # ------------------------------------------------- 实体 / 关系（读取）
     def list_entities(self, type: str = "", q: str = "", article_id: Optional[int] = None,
-                      limit: int = 200) -> List[dict]:
-        """实体清单。type 为空=全部；q 对 name 做模糊匹配"""
+                      limit: Optional[int] = 200) -> List[dict]:
+        """
+        实体清单。type 为空=全部；q 对 name 做模糊匹配。
+
+        ⚠ `limit=None` 表示**不加 LIMIT**（全量）。建图/统计这类「要全部
+          才能算对」的场景必须传 None —— 见 list_relations 的说明。
+        """
         where, args = [], []
         if type:
             where.append("type=?"); args.append(type)
@@ -1891,19 +1896,21 @@ class Database:
         if article_id:
             where.append("article_id=?"); args.append(int(article_id))
         w = (" WHERE " + " AND ".join(where)) if where else ""
+        sql = (f"SELECT e.id,e.name,e.type,e.article_id,e.aliases,e.evidence,"
+               f"e.extractor,e.confidence,a.title AS article_title,"
+               f"a.pub_day,a.url "
+               f"FROM entities e LEFT JOIN articles a ON a.id=e.article_id"
+               f"{w} ORDER BY e.type, e.name")
+        if limit is not None:
+            sql += " LIMIT ?"
+            args = args + [int(limit)]
         with self._lock:
-            return [dict(r) for r in self.conn.execute(
-                f"SELECT e.id,e.name,e.type,e.article_id,e.aliases,e.evidence,"
-                f"e.extractor,e.confidence,a.title AS article_title,"
-                f"a.pub_day,a.url "
-                f"FROM entities e LEFT JOIN articles a ON a.id=e.article_id"
-                f"{w} ORDER BY e.type, e.name LIMIT ?",
-                args + [int(limit)])]
+            return [dict(r) for r in self.conn.execute(sql, args)]
 
     def list_relations(self, name: str = "", rel_type: str = "",
                        article_id: Optional[int] = None,
                        site: str = "", date_from: str = "", date_to: str = "",
-                       limit: int = 200) -> List[dict]:
+                       limit: Optional[int] = 200) -> List[dict]:
         """
         关系清单。name 非空时只看与该实体相连的关系（图谱点开一个点用）。
 
@@ -1911,6 +1918,13 @@ class Database:
           （关系表自己没存站点和日期，得 JOIN articles）。
           图谱按时间/站点筛选就靠这里 —— 同一对机构在两篇文章里出现，
           只筛其中一篇时，权重与介数必须一起变，不能只挑边不换来源。
+
+        ⚠ `limit=None` 表示**不加 LIMIT**（全量）。建图必须用 None：
+          这里带 `ORDER BY weight DESC`，所以截断不是随机丢——它**专挑
+          低权重的关系丢**。数据量一大就静默少画一大块图，而界面上
+          看不出来（没有"还有 N 条未显示"的提示），只会觉得"关系怎么这么少"。
+          实测：关系 8801 条、limit=5000 时丢掉 3801 条（43%），全是被
+          权重排序压在后面的共现关系。取全量 8801 行的代价只有 0.08 秒。
         """
         where, args = [], []
         if name:
@@ -1951,13 +1965,30 @@ class Database:
                 where.append("substr(COALESCE(a.pub_day,''),1,10) BETWEEN ? AND ?")
                 args += [lo, hi]
         w = (" WHERE " + " AND ".join(where)) if where else ""
+        sql = (f"SELECT r.*, a.title AS article_title, a.pub_day, a.url, "
+               f"a.site, a.site_name "
+               f"FROM relations r LEFT JOIN articles a ON a.id=r.article_id"
+               f"{w} ORDER BY r.weight DESC")
+        if limit is not None:
+            sql += " LIMIT ?"
+            args = args + [int(limit)]
         with self._lock:
-            return [dict(r) for r in self.conn.execute(
-                f"SELECT r.*, a.title AS article_title, a.pub_day, a.url, "
-                f"a.site, a.site_name "
-                f"FROM relations r LEFT JOIN articles a ON a.id=r.article_id"
-                f"{w} ORDER BY r.weight DESC LIMIT ?",
-                args + [int(limit)])]
+            return [dict(r) for r in self.conn.execute(sql, args)]
+
+    def distinct_entity_names(self, type: str = "") -> List[str]:
+        """
+        某类实体的**去重名**清单（建图 / 焦点候选用）。
+
+        ⚠ 别拿 list_entities 顶替：那个方法要 JOIN articles 再逐行造
+          11 列的 dict，实体上万条时慢一个数量级，而这里只要名字。
+        """
+        where, args = [], []
+        if type:
+            where.append("type=?"); args.append(type)
+        w = (" WHERE " + " AND ".join(where)) if where else ""
+        with self._lock:
+            return [r[0] for r in self.conn.execute(
+                f"SELECT DISTINCT name FROM entities{w}", args)]
 
     def relation_evidence(self, src_name: str, dst_name: str,
                           rel_type: str = "",
