@@ -114,10 +114,10 @@ if h2:
     print(f"        {h2[0].get('pub_day')}  {h2[0].get('article_title')}")
     print(f"        {h2[0].get('url')}")
 
-print("\n④ 兜底边 中央网信办 ↔ 工业和信息化部（文档写 65 条）")
+print("\n④ 兜底边 中央网信办 ↔ 工业和信息化部（文档写 64 条）")
 i3 = get(f"/api/graph/evidence?src={Q('中央网信办')}"
          f"&dst={Q('工业和信息化部')}&limit=200")["items"]
-check("证据 65 条", len(i3) == 65, f"实测 {len(i3)}")
+check("证据 64 条", len(i3) == 64, f"实测 {len(i3)}")
 
 print("\n⑤ 兜底话术引的「七部门」长句")
 uri = ("file:///" + os.path.join(ROOT, "data", "cacx.db").replace("\\", "/")
@@ -144,8 +144,38 @@ print("\n⑥ 04 里其余接口契约")
 rev = get(f"/api/graph/evidence?src={Q(B)}&dst={Q(A)}&limit=50")["items"]
 check("正反向都查（反向也能拿到 24 条）", len(rev) == 24, f"实测 {len(rev)}")
 w = {x.get("weight") for x in i1}
-check("weight 是共现篇数不是概率（取值 ≥ 2）", all(x >= 2 for x in w),
+check("weight ≥ 2（是命中强度，不是 0~1 的概率）", all(x >= 2 for x in w),
       f"实测 {sorted(w)}")
+
+# ⚠ con 在上面已经 close() 了，这三条断言要自己开只读连接，
+# 否则会撞 "Cannot operate on a closed database"。
+_w = sqlite3.connect("file:" + urllib.request.pathname2url(
+    os.path.join(ROOT, "data", "cacx.db")) + "?mode=ro", uri=True)
+_w.row_factory = sqlite3.Row
+
+# ⚠ 2026-10-13 修正：原文把 weight 写成「共现篇数」，是错的。
+# 真实语义 = 该文章内这条关系被规则命中的累计强度（每次 +2.0 / +3.0 累加）。
+# 这里用**反证**把它钉死：一条只有 1 篇文章支撑的边，weight 却远大于 1，
+# 所以它不可能是「跨几篇文章共现」。
+single = _w.execute("""
+    SELECT src_name, dst_name, rel_type, article_id, weight FROM relations r
+    WHERE NOT EXISTS (SELECT 1 FROM relations r2
+                      WHERE r2.src_name=r.src_name AND r2.dst_name=r.dst_name
+                        AND r2.rel_type=r.rel_type AND r2.article_id<>r.article_id)
+    ORDER BY weight DESC LIMIT 1""").fetchone()
+check("weight 不是「共现篇数」（单篇边也能 >3）",
+      single is not None and single["weight"] > 3,
+      f"{single['src_name'][:14]}↔{single['dst_name'][:14]} "
+      f"仅 1 篇文章却 weight={single['weight']}" if single else "没找到单篇边")
+
+# 权重应是 2.0/3.0 的整数倍（每次命中的固定增量）
+frac = _w.execute("""
+    SELECT COUNT(*) FROM relations
+    WHERE ABS(weight - ROUND(weight/2.0)*2.0) > 1e-6
+       AND ABS(weight - ROUND(weight/3.0)*3.0) > 1e-6""").fetchone()[0]
+check("weight 是 2.0/3.0 的整数倍（命中次数 × 固定增量）", frac == 0,
+      f"不满足的行数 {frac}")
+_w.close()
 
 print("\n" + "=" * 72)
 if FAILS:

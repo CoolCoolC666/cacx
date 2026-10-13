@@ -69,8 +69,16 @@ def setup_db(n=5, site="test.gov.cn"):
                           "column_name": "要闻",
                           "title": f"测试文章{i}", "url": url,
                           "pub_date": "2026-01-01", "chars": 100,
-                          "content_text": "正文" * 50})
-        arts.append(d.get_by_url(site, url))
+                          # 每篇正文必须唯一：upsert_article 有「同站同正文
+                          # 指纹」守卫（MIN_DEDUP_CHARS=100），五篇正文逐字
+                          # 相同会被判成一文多栏目发，第 2~5 篇入库返回
+                          # False，get_by_url 拿回 None，后面整批编排全崩。
+                          "content_text": "正文" * 50 + f"第{i}篇独有段落"})
+        a = d.get_by_url(site, url)
+        if a is None:
+            raise AssertionError(
+                f"第 {i} 篇没入库成功（守卫拒绝或 upsert 失败）：{url}")
+        arts.append(a)
     return tmp, d, arts
 
 

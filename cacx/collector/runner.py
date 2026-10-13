@@ -239,6 +239,7 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
                     continue
 
                 text = html_to_text(art["content_html"], col.base_url)
+                dup_body_before = d.dup_same_body
                 rec = {
                     "site": site, "site_name": col.name,
                     # 全部用 .get()：写入路径上一个 KeyError 会让整次同步中断，
@@ -257,6 +258,15 @@ def sync(cfg: Dict, sites: Optional[List[str]] = None, mode: str = "incremental"
                 if d.upsert_article(rec):
                     listed_new += 1
                     say(f"      + {it['date']} {it['title'][:46]}")
+                elif d.dup_same_body > dup_body_before:
+                    # 一文多栏目发：同一篇稿子在这个栏目又出现了一次。
+                    # upsert_article 内部按正文指纹拦掉的，URL 不重复，
+                    # 所以站在列表层面完全看不出来 —— 必须单独记一笔，
+                    # 否则统计上就是「这站这轮没新东西」。
+                    skipped["dup_same_body"] = skipped.get("dup_same_body", 0) + 1
+                    samples = skip_samples.setdefault("dup_same_body", [])
+                    if len(samples) < 3:
+                        samples.append(f"同正文已收录 {it['title'][:34]}")
                 emit("progress", site=site, listed=listed, new=listed_new,
                      failed=failed)
                 if limit and listed >= limit:

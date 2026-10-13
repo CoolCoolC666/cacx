@@ -37,17 +37,17 @@ q = lambda s: db.execute(s).fetchone()[0]
 print("=" * 70)
 print("① 语料规模")
 print("=" * 70)
-check("2024 年以来 4519 篇",
-      q("SELECT COUNT(*) FROM articles WHERE year>=2024") == 4519,
+check("2024 年以来 4416 篇",
+      q("SELECT COUNT(*) FROM articles WHERE year>=2024") == 4416,
       str(q("SELECT COUNT(*) FROM articles WHERE year>=2024")))
-check("有正文 4517 篇",
-      q("SELECT COUNT(*) FROM articles WHERE year>=2024 AND content_text IS NOT NULL AND LENGTH(content_text)>0") == 4517,
+check("有正文 4415 篇",
+      q("SELECT COUNT(*) FROM articles WHERE year>=2024 AND content_text IS NOT NULL AND LENGTH(content_text)>0") == 4415,
       str(q("SELECT COUNT(*) FROM articles WHERE year>=2024 AND content_text IS NOT NULL AND LENGTH(content_text)>0")))
 check("栏目 25 个",
       q("SELECT COUNT(DISTINCT column_code) FROM articles WHERE year>=2024") == 25,
       str(q("SELECT COUNT(DISTINCT column_code) FROM articles WHERE year>=2024")))
 zh = q("SELECT SUM(LENGTH(content_text)) FROM articles WHERE year>=2024")
-check("正文 668 万字", 6_600_000 <= zh <= 6_750_000, f"{zh/1e4:.0f} 万字")
+check("正文 650 万字", 6_450_000 <= zh <= 6_550_000, f"{zh/1e4:.0f} 万字")
 
 print()
 print("=" * 70)
@@ -56,30 +56,30 @@ print("=" * 70)
 check("去重实体 16561",
       q("SELECT COUNT(DISTINCT name) FROM entities") == 16561,
       str(q("SELECT COUNT(DISTINCT name) FROM entities")))
-check("关系 8801", q("SELECT COUNT(*) FROM relations") == 8801,
+check("关系 8419", q("SELECT COUNT(*) FROM relations") == 8419,
       str(q("SELECT COUNT(*) FROM relations")))
 
 print()
 print("=" * 70)
-print("③ 关系类型分布（报告：5415/2222/609/555）")
+print("③ 关系类型分布（报告：5313/2060/557/555）")
 print("=" * 70)
-for rt, want in [("co_issue", 5415), ("issue", 2222), ("target", 609), ("adopt", 555)]:
+for rt, want in [("co_issue", 5313), ("issue", 2060), ("target", 557), ("adopt", 489)]:
     got = q(f"SELECT COUNT(*) FROM relations WHERE rel_type='{rt}'")
     check(f"{rt} = {want}", got == want, str(got))
 ci = q("SELECT COUNT(*) FROM relations WHERE rel_type='co_issue'")
 tot = q("SELECT COUNT(*) FROM relations")
-check("co_issue 占 61.5%", abs(100 * ci / tot - 61.5) < 0.15,
+check("co_issue 占 63.1%", abs(100 * ci / tot - 63.1) < 0.15,
       f"实测 {100*ci/tot:.1f}%")
 check("无证据关系为 0", q("SELECT COUNT(*) FROM relations WHERE evidence IS NULL OR evidence=''") == 0)
 
 print()
 print("=" * 70)
-print("④ 覆盖率 27.9%")
+print("④ 覆盖率 27.1%")
 print("=" * 70)
 cov = q("SELECT COUNT(DISTINCT article_id) FROM relations")
-check("关系覆盖 1257 篇 / 27.9%",
-      cov == 1257 and abs(100 * cov / 4517 - 27.9) < 0.15,
-      f"{cov} 篇 = {100*cov/4517:.1f}%")
+check("关系覆盖 1196 篇 / 27.1%",
+      cov == 1196 and abs(100 * cov / 4415 - 27.1) < 0.15,
+      f"{cov} 篇 = {100*cov/4415:.1f}%")
 
 print()
 print("=" * 70)
@@ -129,9 +129,9 @@ for x in tl["themes"]:
     agg.setdefault(x["month"][:4], Counter())
     agg[x["month"][:4]].update(x["problems"])
 want = {
-    "2024": {"生成式AI": 11.0, "个人信息": 25.6, "未成年人": 20.7, "数据安全": 16.9},
-    "2025": {"生成式AI": 14.7, "个人信息": 31.5, "未成年人": 14.8, "数据安全": 21.7},
-    "2026": {"生成式AI": 17.5, "个人信息": 26.8, "未成年人": 18.5, "数据安全": 16.8},
+    "2024": {"生成式AI": 11.2, "个人信息": 24.5, "未成年人": 20.8, "数据安全": 17.6},
+    "2025": {"生成式AI": 15.1, "个人信息": 30.6, "未成年人": 14.5, "数据安全": 22.3},
+    "2026": {"生成式AI": 17.5, "个人信息": 27.0, "未成年人": 18.7, "数据安全": 17.2},
 }
 for yr, items in want.items():
     c = agg[yr]
@@ -152,16 +152,16 @@ check("两次都在最近 14 个月", first == ["2025-08", "2026-09"], str(first
 
 print()
 print("=" * 70)
-print("⑧ 发文量（报告：1527 / 1579 / 1413，2025-09 峰值 198）")
+print("⑧ 发文量（报告：1495 / 1541 / 1380，2025-09 峰值 193）")
 print("=" * 70)
 yr = Counter()
 for x in tl["months"]:
     yr[x["month"][:4]] += x["total"]
-for y, w in [("2024", 1527), ("2025", 1579), ("2026", 1413)]:
+for y, w in [("2024", 1495), ("2025", 1541), ("2026", 1380)]:
     check(f"{y} = {w}", yr[y] == w, str(yr[y]))
 pk = max(tl["months"], key=lambda x: x["total"])
-check("单月峰值 198（2025-09）",
-      pk["month"] == "2025-09" and pk["total"] == 198, f'{pk["month"]}={pk["total"]}')
+check("单月峰值 193（2025-09）",
+      pk["month"] == "2025-09" and pk["total"] == 193, f'{pk["month"]}={pk["total"]}')
 
 print()
 print("=" * 70)
@@ -169,9 +169,9 @@ print("⑨ 浙江对照")
 print("=" * 70)
 rows = db.execute("SELECT site, COUNT(*) n FROM articles WHERE year>=2024 GROUP BY site").fetchall()
 d = dict(rows)
-check("中央网信办 2960 + 浙江 1559 = 4519",
-      d.get("cac", 0) + d.get("zjwx", 0) == 4519, str(d))
-check("浙江网信网 1559 篇", d.get("zjwx") == 1559, str(d))
+check("中央网信办 2960 + 浙江 1456 = 4416",
+      d.get("cac", 0) + d.get("zjwx", 0) == 4416, str(d))
+check("浙江网信网 1456 篇", d.get("zjwx") == 1456, str(d))
 # 两省是否真有直接联合发文
 cross = q("""SELECT COUNT(*) FROM relations WHERE year>=2024
              AND site='zjwx' AND (src_name LIKE '%浙江%' OR dst_name LIKE '%浙江%')
@@ -249,13 +249,13 @@ else:
     check("docx 已生成", True, f"{docx_path.stat().st_size:,} 字节")
 
     # 关键数字一个都不能少 —— Word 版最常见的失真就是转档时漏句/漏行
-    MUST = ["4517", "4519", "668 万字", "16561", "8801", "1257", "27.9%",
+    MUST = ["4415", "4416", "650 万字", "16561", "8419", "1196", "27.1%",
             "243", "126", "102", "0.194", "0.1173", "0.8282", "0.0272",
             "1633", "3921", "115", "244", "1015",
-            "5415", "2222", "609", "555", "61.5%",
-            "1527", "1579", "1413", "198",
-            "2960", "1559", "24 条", "3 条", "21 条", "12 个端点",
-            "11.0%", "17.5%", "18.5%", "31.5%", "26.8%"]
+            "5313", "2060", "557", "489", "63.1%",
+            "1495", "1541", "1380", "193",
+            "2960", "1456", "24 条", "3 条", "21 条", "12 个端点",
+            "11.2%", "15.1%", "17.5%", "18.7%", "30.6%", "27.0%"]
     missing = [m for m in MUST if m not in full]
     check(f"关键数字 {len(MUST)} 个全部保留",
           not missing, f"缺 {missing}" if missing else "无缺失")
