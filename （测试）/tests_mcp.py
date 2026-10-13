@@ -522,8 +522,14 @@ def test_summarize_batch():
             "column_code": "yw", "column_name": "要闻",
             "title": title, "pub_date": f"2026-10-1{i}",
             "url": f"https://www.cac.gov/{i}.htm",
-            "content_text": "正文 " * 200, "chars": 1000,
+            # ⚠ 正文必须每篇唯一：upsert_article 有「同站同正文指纹」去重
+            #   守卫（MIN_DEDUP_CHARS=100），三篇正文逐字相同会被判成一文
+            #   多栏目发，第 2、3 篇返回 False，ids 里就混进了假值。
+            #   这个用例要的是「三篇不同文章」，不是「三篇长得一样的文章」。
+            "content_text": "正文 " * 200 + f"第{i}篇独有段落", "chars": 1000,
         })
+        assert aid, f"第 {i} 篇入库被拒：{title}"  # 入库被守卫拦下要当场炸，
+        # 而不是把 False 一路带到后面变成看不懂的 total=0
         ids.append(aid)
     # 给第一篇打 summarize annotation（模拟已摘要过）
     d.save_annotation(ids[0], "summarize", {"summary": "已有摘要"})

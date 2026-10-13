@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS articles (
     content_empty INTEGER DEFAULT 0,
     first_seen    TEXT,
     synced_at     TEXT,
+    body_hash     TEXT,                -- 规范化正文指纹，用于「一文多栏目发」去重
     UNIQUE (site, url)
 );
 
@@ -113,6 +114,7 @@ CREATE INDEX IF NOT EXISTS idx_articles_site    ON articles(site);
 CREATE INDEX IF NOT EXISTS idx_articles_col     ON articles(site, column_code);
 CREATE INDEX IF NOT EXISTS idx_articles_day     ON articles(pub_day);
 CREATE INDEX IF NOT EXISTS idx_articles_year    ON articles(year);
+CREATE INDEX IF NOT EXISTS idx_articles_bodyhash ON articles(site, body_hash);
 
 -- FTS5 外部内容索引
 CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
@@ -291,6 +293,41 @@ def _tokenize_for_search(q: str, tokenize: bool) -> List[str]:
 
 _PUNCT_ONLY = re.compile(r'^[\s,，、;；]+$')
 
+# ---------------------------------------------------------------- 正文指纹
+# 为什么要它：articles 的唯一键是 (site, url)，而政府站同一篇文章
+# 投到多个栏目时，**URL 是不同的**（浙江站就有两套路径格式：
+#   /col/col1694595/art/2025/art_a4fd48c8....html
+#   /art/2025/9/5/art_1694597_58877422.html
+#   /art/2025/9/5/art_1673576_58877421.html
+# 同一篇稿子，三个栏目三个地址）。所以 URL 去重完全抓不住，
+# 库里就出现了 112 组重复。
+#
+# 规则刻意做得**很朴素**：只去空白。
+# 实测比较过「顺带剥掉 来源/编辑/责任编辑 尾巴」——合并效果一模一样
+# （101 组 -> 101 组），白白多一个可能误伤的步骤，所以不做。
+#
+# 短文不参与去重：太短的正文（列表页残片、固定公告）撞车不代表同一篇。
+MIN_DEDUP_CHARS = 100
+_WS_ALL = re.compile(r"\s+")
+
+
+def normalize_body(text: Optional[str]) -> str:
+    """正文归一化：只去空白。**唯一的实现**，回填脚本与采集层都调它。"""
+    return _WS_ALL.sub("", text or "")
+
+
+def body_hash(text: Optional[str]) -> str:
+    """规范化正文的 md5；短于 MIN_DEDUP_CHARS 返回 '' 表示「不参与去重」。
+
+    同一站里规范化后完全相同的正文 = 同一篇文章，
+    无论它在几个栏目、拿几个 URL 出现过。
+    """
+    t = normalize_body(text)
+    if len(t) < MIN_DEDUP_CHARS:
+        return ""
+    import hashlib
+    return hashlib.md5(t.encode("utf-8")).hexdigest()
+
 
 class Database:
     def __init__(self, path: Path):
@@ -307,9 +344,30 @@ class Database:
         # 必须**报出来**：静默跳过只会让人以为「这站没抓到新东西」。
         self.dup_cross_site = 0
         self.dup_cross_site_samples: List[str] = []
+        # 同站多栏目重复（见 body_hash / upsert_article 的事故说明）
+        self.dup_same_body = 0
+        self.dup_same_body_samples: List[str] = []
+        # ⚠ 顺序有讲究：必须先补列再 executescript。
+        # SCHEMA 里有 CREATE INDEX ... ON articles(site, body_hash)，
+        # 老库的 articles 表还没有这一列时，建索引会直接报
+        # "no such column: body_hash"，整段 schema 初始化连带失败。
+        self._ensure_columns()
         self.conn.executescript(SCHEMA)
         self.set_meta("schema_version", str(SCHEMA_VERSION))
         self.conn.commit()
+
+    def _ensure_columns(self):
+        """给**已存在**的库补上新加的列。
+
+        SQLite 的 CREATE TABLE IF NOT EXISTS 对老库不会补列，
+        所以新增字段必须在这里显式 ALTER 一次。幂等：列已在就什么都不做。
+        表还不存在（全新库）也直接跳过 —— 随后的 CREATE TABLE 会带上新列。
+        """
+        have = {r[1] for r in self.conn.execute("PRAGMA table_info(articles)")}
+        if not have:
+            return                      # 全新库，表还没建，交给 SCHEMA
+        if "body_hash" not in have:
+            self.conn.execute("ALTER TABLE articles ADD COLUMN body_hash TEXT")
 
     # ---------------------------------------------------------- 基础
     def close(self):
@@ -339,17 +397,31 @@ class Database:
         已存在的行做幂等刷新（修字段用），但保留 first_seen ——
         重复导入应当能修正既有数据，而不是静默跳过。
 
-        额外加一道**跨站**守卫：同一 URL 若已被别的站占用，直接不写。
-        见 get_url_owner 的事故说明。
+        额外加两道守卫：
+          1. **跨站**：同一 URL 若已被别的站占用，不写。见 get_url_owner。
+          2. **同站多栏目**：同一篇文章在不同栏目有不同 URL，只能靠正文指纹
+             认。见 body_hash 的事故说明。
+        两道都必须**计数留痕**，静默跳过只会让人以为「这站没新东西」。
         """
         site = rec.get("site", "")
-        owner = self.get_url_owner(rec.get("url", ""), exclude_site=site)
+        url = rec.get("url", "")
+        owner = self.get_url_owner(url, exclude_site=site)
         if owner:
             self.dup_cross_site += 1
             if len(self.dup_cross_site_samples) < 5:
                 self.dup_cross_site_samples.append(
-                    f"[{owner['site']}#{owner['id']}] {rec.get('url','')}")
+                    f"[{owner['site']}#{owner['id']}] {url}")
             return False
+
+        bh = body_hash(rec.get("content_text", ""))
+        if bh:
+            twin = self.get_same_body_twin(site, bh, exclude_url=url)
+            if twin:
+                self.dup_same_body += 1
+                if len(self.dup_same_body_samples) < 5:
+                    self.dup_same_body_samples.append(
+                        f"[{twin['column_name']}#{twin['id']}] {url}")
+                return False
 
         pub = (rec.get("pub_date") or "").strip()
         day = pub[:10] if len(pub) >= 10 else ""
@@ -363,8 +435,8 @@ class Database:
                    (site, site_name, column_code, column_name, title, pub_date,
                     pub_day, year, month, url, source_text, chars,
                     content_text, content_html, local_path, content_empty,
-                    first_seen, synced_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    first_seen, synced_at, body_hash)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(site, url) DO UPDATE SET
                      -- 空值不得覆盖好值。
                      -- 教训：曾把 DO NOTHING 改成 DO UPDATE 后，某个 bug
@@ -386,6 +458,7 @@ class Database:
                      local_path   = COALESCE(NULLIF(excluded.local_path,''),   articles.local_path),
                      content_empty= CASE WHEN excluded.chars > 0 THEN excluded.content_empty
                                          ELSE articles.content_empty END,
+                     body_hash    = COALESCE(NULLIF(excluded.body_hash,''), articles.body_hash),
                      synced_at    = excluded.synced_at""",
                 (rec.get("site", ""), rec.get("site_name", ""),
                  rec.get("column_code", ""), rec.get("column_name", ""),
@@ -393,7 +466,7 @@ class Database:
                  rec.get("url", ""), rec.get("source_text", ""),
                  rec.get("chars", 0), rec.get("content_text", ""),
                  rec.get("content_html", ""), rec.get("local_path", ""),
-                 1 if rec.get("content_empty") else 0, now, now))
+                 1 if rec.get("content_empty") else 0, now, now, bh))
             return exists is None
 
     def upsert_external(self, rec: Dict[str, Any]):
@@ -874,6 +947,23 @@ class Database:
             r = self.conn.execute(
                 "SELECT id, site FROM articles WHERE url=? "
                 "AND site<>? LIMIT 1", (url, exclude_site or "\x00")).fetchone()
+        return dict(r) if r else None
+
+    def get_same_body_twin(self, site: str, bh: str,
+                           exclude_url: str = "") -> Optional[dict]:
+        """同站里有没有**正文完全相同**的另一篇。返回 {'id','url','column_name'}。
+
+        这就是「一文多栏目发」的克星：同一篇稿子投 3 个栏目就有 3 个 URL，
+        URL 去重看不见它，但正文是一样的。命中即判定为同一篇。
+        走 (site, body_hash) 索引，单次查询 O(log n)。
+        """
+        if not bh:
+            return None
+        with self._lock:
+            r = self.conn.execute(
+                "SELECT id, url, column_name FROM articles "
+                "WHERE site=? AND body_hash=? AND url<>? LIMIT 1",
+                (site, bh, exclude_url or "\x00")).fetchone()
         return dict(r) if r else None
 
     # ---------------------------------------------------------- 命中片段
