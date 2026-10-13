@@ -303,6 +303,10 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         # 写锁：共享连接下多线程同时写会撞 "database is locked"
         self._lock = threading.RLock()
+        # 跨站重复拦截计数（见 upsert_article / get_url_owner 的事故说明）。
+        # 必须**报出来**：静默跳过只会让人以为「这站没抓到新东西」。
+        self.dup_cross_site = 0
+        self.dup_cross_site_samples: List[str] = []
         self.conn.executescript(SCHEMA)
         self.set_meta("schema_version", str(SCHEMA_VERSION))
         self.conn.commit()
@@ -334,7 +338,19 @@ class Database:
         按 (site,url) 去重写入，返回是否**新增**。
         已存在的行做幂等刷新（修字段用），但保留 first_seen ——
         重复导入应当能修正既有数据，而不是静默跳过。
+
+        额外加一道**跨站**守卫：同一 URL 若已被别的站占用，直接不写。
+        见 get_url_owner 的事故说明。
         """
+        site = rec.get("site", "")
+        owner = self.get_url_owner(rec.get("url", ""), exclude_site=site)
+        if owner:
+            self.dup_cross_site += 1
+            if len(self.dup_cross_site_samples) < 5:
+                self.dup_cross_site_samples.append(
+                    f"[{owner['site']}#{owner['id']}] {rec.get('url','')}")
+            return False
+
         pub = (rec.get("pub_date") or "").strip()
         day = pub[:10] if len(pub) >= 10 else ""
         now = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -838,6 +854,27 @@ class Database:
                 "SELECT id FROM articles WHERE site=? AND url=?",
                 (site, url)).fetchone()
         return self.get_article(r["id"]) if r else None
+
+    def get_url_owner(self, url: str, exclude_site: str = "") -> Optional[dict]:
+        """这个 URL 在库里有没有被**别的站**占用。返回 {'id','site'} 或 None。
+
+        为什么要它：articles 的唯一键是 (site, url)，不是 url。
+        也就是说同一篇文章只要换个 site 再采一遍，就会**再插一行**。
+
+        2026-10-13 实测踩中：新增了一个通用采集器验证源 `zjwx-api`，
+        它抓的 10 篇 URL 与已有的 `zjwx` 完全重复，库里于是变成 20 行。
+        后果不是「多了 10 篇」这么简单 —— 它们被一起抽了关系，
+        凭空多出 62 条关系（8801 → 8863），而关系数是报告的核心数字之一。
+        更隐蔽的是分母：覆盖率 27.9% 也跟着动，看上去像「数据更新了」，
+        实际增长全部来自重复。
+
+        所以去重必须**跨站**做，不能只看 (site, url)。
+        """
+        with self._lock:
+            r = self.conn.execute(
+                "SELECT id, site FROM articles WHERE url=? "
+                "AND site<>? LIMIT 1", (url, exclude_site or "\x00")).fetchone()
+        return dict(r) if r else None
 
     # ---------------------------------------------------------- 命中片段
     @staticmethod

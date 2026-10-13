@@ -51,7 +51,11 @@ exit /b 2
 echo [INFO] Server is up. Starting the auto demo...
 echo [INFO] The browser window will open on screen. Do NOT minimize it.
 echo.
-py -3 autodemo.py %*
+REM -u = unbuffered stdout. 2026-10-13: without it, a crash lost every
+    REM buffered log line -- the output stopped dead after "Server is up"
+    REM with an empty stderr, which looks exactly like "it just didn't run".
+    REM Keep it. Diagnostics are worth losing a little speed.
+py -3 -u autodemo.py %*
 set RC=%ERRORLEVEL%
 
 echo.
