@@ -51,11 +51,35 @@ def split_sentences(text: str) -> List[Tuple[int, str]]:
 
 
 def sentence_at(text: str, pos: int) -> str:
-    """取包含 pos 的那一句 —— 规则命中位置 → 原文证据。"""
+    """取包含 pos 的那一句 —— 规则命中位置 → 原文证据。
+
+    ⚠ 边界必须用**半开区间**，不能是 `start <= pos <= start + len(s)`。
+
+      踩过的真事故：`split_sentences` 的句子是 `text[start:i+1]`，**含句尾
+      分隔符**，所以标题行是 `'…意见》\\n'`（长度 27）；而正文首句的起点也
+      正好是 27。闭区间下 pos=27 **同时命中两句**，遍历先撞到标题就返回了
+      —— 正文那句的关系全被挂上标题当证据。
+
+      症状：点边回溯，证据句里**两个机构名都不出现**。实测 1311 条关系里
+      417 条如此（31.8%）。而「标题 + 换行 + 正文」是公文最常见的结构，
+      这个撞车会反复发生，不是个例。
+
+      半开区间后边界只归**后一句**，正好是用户期望看到的判定依据
+      （触发词通常落在句首）。
+    """
+    last = ""
     for start, s in split_sentences(text):
-        if start <= pos <= start + len(s):
-            return s.strip()
-    return ""
+        core = s.strip()
+        if not core:
+            continue
+        if start <= pos < start + len(s):
+            return core
+        if start <= pos:
+            last = core          # 落在句间空白 → 兜底归前一句
+    # ⚠ 兜底只在 pos **确实落在文本范围内**时才生效。
+    #   否则 sentence_at(text, 999) 会返回最后一句 ——
+    #   调用方拿到一段"看起来像证据"的文本，比拿到空串危险得多。
+    return last if 0 <= pos < len(text) else ""
 
 
 # ── 政策 ───────────────────────────────────────────────────────────────

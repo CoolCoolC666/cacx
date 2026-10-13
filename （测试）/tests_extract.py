@@ -36,6 +36,28 @@ LONG_BODY = BASE["content_text"] + (
     "各地要加强对算法推荐和深度伪造信息的治理力度，"
     "推动构建新发展格局，以人民为中心的工作理念贯穿治理全过程。")
 
+# ⚠ 真库 data/cacx.db 里 articles.id=3131 的原文（真实公文，非合成中文）。
+#   合成句子的断句与机构分布跟真实公文差很远，测不出真实问题 ——
+#   本文件里「证据挂到前一句」那个 bug 就是在真语料上才暴露的。
+REAL_TITLE = "五部门联合印发《关于促进企业数据资源开发利用的意见》"
+REAL_BODY = (
+    "为充分释放企业数据资源价值，构建以数据为关键要素的数字经济，近日，"
+    "国家数据局联合中央网信办、工业和信息化部、公安部、国务院国资委印发了"
+    "《关于促进企业数据资源开发利用的意见》（以下简称《意见》）。"
+    "《意见》以习近平新时代中国特色社会主义思想为指导，全面贯彻落实党的"
+    "二十大和二十届二中、三中全会精神，完整准确全面贯彻新发展理念，着力"
+    "推动高质量发展，统筹数据发展和安全，以深化数据要素市场化配置改革为"
+    "主线，以激发企业创新活力为关键，以健全企业数据权益实现机制为重点，"
+    "充分发挥企业主体作用，分类推进企业数据资源开发利用，提升企业竞争力，"
+    "赋能产业数字化转型，助力提升治理效能和公共服务能力，为培育新质生产力、"
+    "推动高质量发展提供有力支撑。"
+    "《意见》从健全企业数据权益实现机制、培育企业数字化竞争力、赋能产业"
+    "转型升级、服务经济社会高质量发展、营造开放透明可预期的发展环境等"
+    "五个方面作出具体部署。"
+    "下一步，国家数据局将会同相关部门，加强统筹协调和政策保障，协同各行业"
+    "主管部门结合本领域实际，高质量推进企业数据资源开发利用。"
+)
+
 
 def art(**kw):
     a = dict(BASE)
@@ -63,6 +85,78 @@ class TestEvidence(unittest.TestCase):
         # 原因不能带具体字数，否则 500 篇会产出几十个不同 reason
         self.assertIn(str(extract.MIN_CHARS), r["reason"])
         self.assertNotIn("仅", r["reason"])
+
+    def test_句子边界不重叠_归后一句(self):
+        """⚠ 真事故：标题行与正文首句在边界处**同时命中**，证据挂错。
+
+        `split_sentences` 返回的句子是 `text[start:i+1]`，**含句尾分隔符**，
+        所以标题行是 `'标题\\n'`。而 full = 标题 + "\\n" + 正文，
+        正文首句的起点正好等于「标题 + 分隔符」的长度。
+
+        旧实现用闭区间 `start <= pos <= start+len(s)`：
+            pos = 27 同时满足标题（0<=27<=27）与正文首句（27<=27<=27+…），
+            遍历先撞到标题 → **返回标题**。
+        症状：点边回溯，证据句里两个机构名都不出现。
+        实测：1311 条关系里 417 条如此（31.8%）。
+
+        修法：半开区间 + 剥掉句尾分隔符后算右端点 → 边界只归后一句。
+        """
+        title = "五部门联合印发《关于促进企业数据资源开发利用的意见》"
+        body = ("为充分释放企业数据资源价值，近日，国家数据局联合中央网信办、"
+                "工业和信息化部、公安部、国务院国资委印发了《关于促进企业"
+                "数据资源开发利用的意见》。")
+        full = title + "\n" + body
+        boundary = len(title) + 1            # = 正文首句的起点，也是标题行的右端
+        self.assertEqual(len(title) + 1, len(title + "\n"))
+
+        got = extract.sentence_at(full, boundary)
+        self.assertIn("国家数据局", got,
+                      f"边界处应归**后一句**，实际拿到：{got[:40]}")
+        self.assertIn("公安部", got, f"证据句缺主体：{got[:40]}")
+        # 标题自身的位置仍要能取到标题
+        self.assertIn("五部门", extract.sentence_at(full, 0))
+
+    def test_sentence_at落空返回空串(self):
+        """越界位置不能抛异常（下游会把 "" 当无证据处理）。"""
+        self.assertEqual(extract.sentence_at("", 0), "")
+        self.assertEqual(extract.sentence_at("一句话。", 999), "")
+
+    def test_句间空白归前一句(self):
+        """pos 落在两句之间的空白上时，归前一句（不是返回空）。"""
+        txt = "第一句话。\n第二句话。"
+        nl = txt.index("\n")
+        self.assertEqual(extract.sentence_at(txt, nl), "第一句话。")
+
+    def test_所有关系的证据句都含主体名(self):
+        """端到端：断言**每一条** co_issue 的证据里都出现两个机构名。
+
+        这条比单点测边界更有价值 —— 它直接钉住「点边看证据」这个
+        老师点名要求的功能，而且是全量断言，不是抽样。
+
+        ⚠ 语料用**真库里的原文**（id=3131），不用合成中文：
+          合成句子的断句/机构分布跟真实公文差很远，测不出真实问题。
+          真库里这条曾经是 417/1311 条证据挂错的重灾区。
+        """
+        title = "五部门联合印发《关于促进企业数据资源开发利用的意见》"
+        body = REAL_BODY
+        a = art(title=title, content_text=body)
+        self.assertGreater(len(body), extract.MIN_CHARS)
+        r = extract.extract_article(a)
+        co = [x for x in r["relations"] if x["rel_type"] == "co_issue"]
+        self.assertTrue(co, f"真语料里应该抽得出 co_issue，实际 {len(co)} 条")
+        bad = [(x["src_name"], x["dst_name"], x["evidence"][:40])
+               for x in co
+               if x["src_name"] not in x["evidence"]
+               or x["dst_name"] not in x["evidence"]]
+        self.assertEqual(bad, [], f"证据句缺主体的 co_issue：{bad}")
+
+    def test_边界修复对真语料生效(self):
+        """同一篇真语料：正文首句起点处的关系，证据必须是正文句不是标题。"""
+        full = "五部门联合印发《关于促进企业数据资源开发利用的意见》\n" \
+               + REAL_BODY
+        got = extract.sentence_at(full, 27)
+        self.assertIn("国家数据局", got)
+        self.assertIn("公安部", got)
 
 
 class TestOrgFilter(unittest.TestCase):
