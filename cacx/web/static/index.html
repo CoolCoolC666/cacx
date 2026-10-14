@@ -305,6 +305,36 @@
         <b>先点「预览抽取」</b>看结果，满意了再点「抽取并写入」让图谱页出图。
       </div>
     </div>
+
+    <!-- T7-A：定制面板。⚠ 不是 dlSnapshot() 那种整个面板全量导出（那是另一回事、不动）；
+         这里复用上方 sp_* 口径，只画勾选的几张图，顶部印这组口径。 -->
+    <div class="box" style="margin-bottom:12px;padding:12px 14px">
+      <div style="font-size:12.5px;color:var(--dim);line-height:1.7;margin-bottom:10px">
+        <b>定制面板</b>：勾选要包含哪几张图，点「生成定制面板」只画选中的图，
+        并在顶部印出这组口径（站点/日期复用上方控件）。
+      </div>
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center">
+        <span style="font-size:12.5px;color:var(--dim)">包含图表</span>
+        <label class="inline" style="font-size:12.5px;cursor:pointer"><input type="checkbox" class="sp_cust" value="year" checked> 按年分布</label>
+        <label class="inline" style="font-size:12.5px;cursor:pointer"><input type="checkbox" class="sp_cust" value="month" checked> 按月分布</label>
+        <label class="inline" style="font-size:12.5px;cursor:pointer"><input type="checkbox" class="sp_cust" value="problems" checked> 治理问题</label>
+        <label class="inline" style="font-size:12.5px;cursor:pointer"><input type="checkbox" class="sp_cust" value="orgs" checked> 高频机构</label>
+        <label class="inline" style="font-size:12.5px;cursor:pointer"><input type="checkbox" class="sp_cust" value="joint" checked> 联合发文</label>
+        <button class="btn" style="padding:5px 14px" onclick="buildCustomPanel()">生成定制面板</button>
+      </div>
+      <div id="sp_custom" style="margin-top:12px"></div>
+    </div>
+
+    <!-- T7-B：达标判定。标准 = 阈值 + 判据 + 展示；只读调现有接口、不写库、不调 AI。
+         判定结果必须带「判据原文」，不能只给达标/不达标。 -->
+    <div class="box" style="margin-bottom:12px;padding:12px 14px">
+      <div style="font-size:12.5px;color:var(--dim);line-height:1.7;margin-bottom:10px">
+        <b>达标判定</b>：按上方口径只读计算指标，每条都写清<b>判据原文</b>与阈值，
+        老师问「凭什么达标」时直接看这里。
+      </div>
+      <button class="btn" style="padding:5px 14px" onclick="runStandards()">按当前口径判定</button>
+      <div id="sp_std" style="margin-top:12px"></div>
+    </div>
     <div class="box" id="sp_result" style="display:none">
       <h3>样本概览</h3>
       <div id="sp_summary"></div>
@@ -4351,6 +4381,101 @@ async function loadPanel(){
   catch(e){ console.error('时间轴加载失败', e);
     if($('tl_vol')) $('tl_vol').innerHTML =
       `<div class="empty" style="padding:20px">时间轴加载失败：${esc(e.message||e)}</div>`; }
+}
+
+/* T7-A：定制面板。复用 sp_* 口径（站点/日期），只画勾选的图，顶部印这组口径。
+   ⚠ 不是 dlSnapshot() 那种「整个面板全量导出」—— 那是另一处、这里不动；
+   这里只画用户勾的几张。口径横幅照 drawBars「口径：站点/年份范围」的做法。 */
+async function buildCustomPanel(){
+  const box = $('sp_custom');
+  if(!box) return;
+  const site = $('sp_site')?.value || '';
+  const df = $('sp_from')?.value || '';
+  const dt = $('sp_to')?.value || '';
+  const want = [...document.querySelectorAll('.sp_cust:checked')].map(x=>x.value);
+  if(!want.length){ box.innerHTML='<div class="empty" style="padding:16px">请至少勾选一张图</div>'; return; }
+  box.innerHTML = '<div style="color:var(--dim);font-size:12.5px">生成中…</div>';
+  // 三张作业图透传日期（与面板 T1 同一套：空则不传、走后端默认区间）
+  const pq = new URLSearchParams();
+  if(site) pq.set('site', site);
+  if(df)   pq.set('date_from', df);
+  if(dt)   pq.set('date_to', dt);
+  const ps = pq.toString() ? '?'+pq : '';
+  const siteQs = site ? '&site='+site : '';
+  const seg = [];
+  try{
+    if(want.includes('year')){
+      const y = await (await fetch('/api/trend?granularity=year'+siteQs)).json();
+      seg.push(['按年分布','spc_year', (y.items||[]).map(r=>({k:String(r.k||r.year||''), n:(r.n??r.total)||0}))]);
+    }
+    if(want.includes('month')){
+      const m = await (await fetch('/api/trend?granularity=month'+siteQs)).json();
+      seg.push(['按月分布','spc_month', (m.items||[]).map(r=>({k:String(r.k||r.month||''), n:(r.n??r.total)||0}))]);
+    }
+    if(want.includes('problems')){
+      const p = await (await fetch('/api/panel/problems'+ps)).json();
+      seg.push(['治理问题分布','spc_prob', (p.items||[]).map(x=>({k:x.problem, n:x.articles}))]);
+    }
+    if(want.includes('orgs')){
+      const o = await (await fetch('/api/panel/orgs'+ps)).json();
+      seg.push(['高频机构 Top12','spc_org', (o.items||[]).map(x=>({k:x.org, n:x.count}))]);
+    }
+    if(want.includes('joint')){
+      const j = await (await fetch('/api/panel/joint'+ps)).json();
+      seg.push(['联合发文趋势','spc_joint', (j.items||[]).map(x=>({k:x.month.slice(2), n:Math.round(x.pct*10)}))]);
+    }
+  }catch(e){ box.innerHTML='<div class="empty" style="padding:16px">生成失败：'+esc(e.message||e)+'</div>'; return; }
+  const scopeTxt = `口径：站点 ${site||'全部站点'} · 日期 ${df||'不限'} ~ ${dt||'不限'} · 图：${want.join('、')}`;
+  box.innerHTML = `<div style="font-size:12.5px;color:var(--dim);margin-bottom:10px;
+       padding:6px 10px;border-left:3px solid var(--line)">${esc(scopeTxt)}</div>`
+    + seg.map(([t,id])=>`<h3 style="font-size:13px;margin:10px 0 6px">${esc(t)}</h3><div class="bars" id="${id}"></div>`).join('');
+  for(const [t,id,rows] of seg){ if($(id)) drawBars($(id), rows); }
+}
+
+/* T7-B：达标判定。标准 = 阈值 + 判据 + 展示，三样都要有；只读调现有接口、不写库、不调 AI。
+   结果必须显示判据原文，不能只给「达标/不达标」。 */
+async function runStandards(){
+  const box = $('sp_std');
+  if(!box) return;
+  box.innerHTML = '<div style="color:var(--dim);font-size:12.5px">计算中…</div>';
+  const site = $('sp_site')?.value || '';
+  const rows = [];
+  // 标准1：证据可回溯率必须 100%（无原文证据的关系 = 0 条）
+  try{
+    const st = await (await fetch('/api/graph/stats')).json();
+    const total = st.relation_total||0;
+    const noEv = st.no_evidence||0;
+    const rate = total ? (total-noEv)/total : 0;
+    rows.push({
+      name:'证据可回溯率（必须 100%）',
+      crit:'每条关系都必须带可回溯的原文出处，即「无原文证据的关系」必须为 0 条（阈值 = 100%）。',
+      value:`关系共 ${total} 条，其中无原文证据 ${noEv} 条 → 可回溯率 ${(rate*100).toFixed(1)}%`,
+      pass: noEv===0,
+    });
+  }catch(e){ rows.push({name:'证据可回溯率', crit:'接口 /api/graph/stats', value:'读取失败：'+(e.message||e), pass:null}); }
+  // 标准2：高峰月（月发文量 ≥ 150 篇视为高峰月）
+  try{
+    const tq = site ? '&site='+site : '';
+    const m = await (await fetch('/api/trend?granularity=month'+tq)).json();
+    const items = (m.items||[]).map(r=>({k:String(r.k||r.month||''), n:(r.n??r.total)||0}));
+    const peak = items.filter(r=>r.n>=150);
+    rows.push({
+      name:'高峰月数量（月发文 ≥ 150 篇）',
+      crit:'单月发文量 ≥ 150 篇即视为「高峰月」（阈值 150 篇/月），用于判断舆情是否进入高发期。',
+      value:`区间共 ${items.length} 个月，其中 ${peak.length} 个月 ≥ 150 篇`
+        + (peak.length?`（如 ${peak.slice(0,3).map(r=>r.k+' '+r.n).join('、')}…）`:''),
+      pass: peak.length>0,
+    });
+  }catch(e){ rows.push({name:'高峰月数量', crit:'接口 /api/trend', value:'读取失败：'+(e.message||e), pass:null}); }
+  const badge = p => p===true ? '<b style="color:#9c9">达标 ✓</b>'
+                  : p===false ? '<b style="color:#d98">不达标 ✗</b>'
+                  : '<span style="color:var(--dim)">无法判定</span>';
+  box.innerHTML = rows.map(r=>`
+    <div style="border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin-bottom:8px;line-height:1.7">
+      <div style="font-size:12.5px">${esc(r.name)}　${badge(r.pass)}</div>
+      <div style="font-size:11.5px;color:var(--dim)">判据原文：${esc(r.crit)}</div>
+      <div style="font-size:11.5px;color:var(--dim)">实测：${esc(r.value)}</div>
+    </div>`).join('');
 }
 
 $('q').addEventListener('keydown',e=>{ if(e.key==='Enter') go(1); });
