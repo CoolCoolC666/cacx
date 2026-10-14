@@ -698,7 +698,7 @@ def cacx_sample(
         site / column: 都可空；column 传栏目名（如「网信要闻」）。
         date_from / date_to: 闭区间。默认 2024 至今 —— **不要**收窄到
             2025 或更晚，老师要「2024 年以来」的全貌。
-        limit: 篇数上限（1~5000）。
+        limit: 篇数上限（1~200000）。
         strategy: stratified（默认，按年份分层，保证每年都被抽到）
                   / recent（取最近 N 篇）
             ⚠ **除非明确只要最新动态，否则别用 recent**：

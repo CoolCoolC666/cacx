@@ -1219,7 +1219,8 @@ class Database:
     def facets(self) -> Dict[str, Any]:
         return self.facets_by_site("")
 
-    def facets_by_site(self, site: str = "") -> Dict[str, Any]:
+    def facets_by_site(self, site: str = "",
+                       date_from: str = "", date_to: str = "") -> Dict[str, Any]:
         """
         分面统计。site 非空时**只返回该站的栏目**。
 
@@ -1227,22 +1228,33 @@ class Database:
         早前端端一次拿全部 27 个栏目混在一起，切站点也不变 ——
         用户选了「浙江网信网」，栏目里还挂着国信的栏目，纯属噪音。
         站点列表本身始终返回全部（切站点要用），只过滤栏目。
+
+        date_from / date_to 非空时只过滤 **columns**（栏目 Top12 随日期变）；
+        sites / years / total / chars / days 等字段保持全量 ——
+        站点列表要全量供切站点，分母口径也不能跟着日期缩。
         """
         with self._lock:
             sites = [dict(r) for r in self.conn.execute(
             "SELECT site, site_name, COUNT(*) n, SUM(chars) c "
             "FROM articles GROUP BY site, site_name ORDER BY n DESC")]
+        dw = ""
+        dargs = []
+        if date_from:
+            dw += " AND pub_day >= ?"; dargs.append(date_from)
+        if date_to:
+            dw += " AND pub_day <= ?"; dargs.append(date_to)
         if site:
             cols = [dict(r) for r in self.conn.execute(
                 "SELECT site, column_code, column_name, COUNT(*) n "
-                "FROM articles WHERE site=? "
-                "GROUP BY site, column_code, column_name ORDER BY n DESC",
-                (site,))]
+                "FROM articles WHERE site=? " + dw +
+                " GROUP BY site, column_code, column_name ORDER BY n DESC",
+                (site,) + tuple(dargs))]
         else:
             cols = [dict(r) for r in self.conn.execute(
                 "SELECT site, column_code, column_name, COUNT(*) n "
-                "FROM articles GROUP BY site, column_code, column_name "
-                "ORDER BY site, n DESC")]
+                "FROM articles WHERE 1=1" + dw +
+                " GROUP BY site, column_code, column_name "
+                "ORDER BY site, n DESC", tuple(dargs))]
         years = [dict(r) for r in self.conn.execute(
             "SELECT year, COUNT(*) n FROM articles WHERE year<>'' "
             "GROUP BY year ORDER BY year")]
@@ -1329,7 +1341,7 @@ class Database:
         if strategy not in self.SAMPLE_STRATEGIES:
             raise ValueError(
                 f"未知抽样策略 {strategy}，可选：{self.SAMPLE_STRATEGIES}")
-        limit = max(1, min(int(limit), 5000))
+        limit = max(1, min(int(limit), 200000))
         where, args = ["pub_day>=?", "pub_day<=?"], [date_from, date_to]
         if site:
             where.append("site=?"); args.append(site)

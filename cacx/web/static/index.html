@@ -283,7 +283,7 @@
         <label style="font-size:12.5px">止
           <input type="date" id="sp_to" value="2099-12-31"></label>
         <label style="font-size:12.5px">篇数上限
-          <input type="number" id="sp_limit" value="500" min="1" max="5000"
+          <input type="number" id="sp_limit" value="500" min="1" max="200000"
                  style="width:78px"></label>
         <label style="font-size:12.5px">抽样
           <select id="sp_strategy">
@@ -1768,8 +1768,13 @@ async function runExtract(write){
     const t = r.types||{}, rt = r.rel_types||{};
     const TN = GP_STYLE;   // 实体类型中文名统一取 GP_STYLE[t].cn，别再抄第三份
     const RN = GP_REL_CN;   // 中文名统一取 GP_REL_CN，别再在这里抄一份
-    const sum = (obj,map)=>Object.keys(obj).map(k=>
-      `<span>${esc(map[k]||k)} <b style="color:var(--acc2)">${obj[k]}</b></span>`).join('　');
+    // ⚠ map 值可能是对象（GP_STYLE[t] 含 cn 字段），直接 esc(对象) 会输出 "[object Object]"；
+    //   关系那边 GP_REL_CN 是字符串所以没事。对象就取 .cn，无 cn 回退 k。
+    const sum = (obj,map)=>Object.keys(obj).map(k=>{
+      const m = map[k];
+      const label = (m && typeof m==='object') ? (m.cn||k) : (m||k);
+      return `<span>${esc(label)} <b style="color:var(--acc2)">${obj[k]}</b></span>`;
+    }).join('　');
     box.innerHTML = `
       <div style="font-size:13px;color:var(--acc2);font-weight:600;margin-bottom:6px">
         ${write?'✓ 已写入数据库':'预览结果（未写库）'}</div>
@@ -4282,9 +4287,17 @@ async function aiThemePreview(){
 
 async function loadPanel(){
   const site=$('pn_site')?.value||'';
-  const q = site ? '?site='+site : '';
+  // A1：栏目 Top12 与 problems/orgs/joint 共用同一对日期控件 pn_from/pn_to、同一优先级
+  //   （填了日期传日期，留空不传、走后端默认口径）。df/dt 在此提前，下方三张图直接复用。
+  const df = $('pn_from')?.value || '';
+  const dt = $('pn_to')?.value || '';
+  const q = new URLSearchParams();
+  if(site) q.set('site', site);
+  if(df)   q.set('date_from', df);
+  if(dt)   q.set('date_to', dt);
+  const qs = q.toString() ? '?' + q : '';
   await loadTrend();
-  const f=await (await fetch('/api/facets'+q)).json();
+  const f=await (await fetch('/api/facets'+qs)).json();
   // 每个站点各取 Top N，不能直接 slice(0,12) ——
   // /api/facets 的栏目是按 site 再按篇数排序的，CAC 库比浙江大一个量级，
   // slice(0,12) 会让 CAC 吃满全部名额，浙江一个栏目都不显示
@@ -4327,14 +4340,8 @@ async function loadPanel(){
     : `<div class="empty" style="padding:20px">${site?'该站点近 30 天没有行为记录':'还没有行为记录'}</div>`;
 
   // ---- 三张作业相关的图：直接服务「角色画像与权责边界」 ----
-  // 日期筛选：pn_from/pn_to 填了就按日期透传（优先级高于顶部月份数），留空则不传、走后端默认口径
-  const df = $('pn_from')?.value || '';
-  const dt = $('pn_to')?.value || '';
-  const sq = new URLSearchParams();
-  if(site) sq.set('site', site);
-  if(df)   sq.set('date_from', df);
-  if(dt)   sq.set('date_to', dt);
-  const s2 = sq.toString() ? '?' + sq : '';
+  // 日期筛选：复用顶部 qs（已含 site + pn_from/pn_to，留空则不传），与栏目 Top12 同一对控件、同一优先级
+  const s2 = qs;
   const prob = await (await fetch('/api/panel/problems'+s2)).json();
   const pit = prob.items||[];
   // 复用 drawBars：它会把数据存进 PN_CACHE，于是「⬇ 图」按钮直接可用

@@ -117,8 +117,11 @@ class T(unittest.TestCase):
     def test_limit被夹到安全范围(self):
         self.assertEqual(
             self.d.sample_articles("cac", limit=0)["limit"], 1)
+        # A3：上限从 5000 放宽到 200000；99999 在新上限内不再被夹
         self.assertEqual(
-            self.d.sample_articles("cac", limit=99999)["limit"], 5000)
+            self.d.sample_articles("cac", limit=99999)["limit"], 99999)
+        self.assertEqual(
+            self.d.sample_articles("cac", limit=999999)["limit"], 200000)
 
     # ------------------------------------------------ 可用性
     def test_只回元数据不带正文(self):
