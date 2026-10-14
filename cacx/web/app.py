@@ -39,6 +39,7 @@ import threading
 import time
 import uuid
 import webbrowser
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import quote
@@ -431,6 +432,13 @@ def _timeline_impl(site: str = "", top: int = _TL_TOP,
             ai["rows"] = [r for r in ai["rows"] if r["month"] in keep]
         months = [r["month"] for r in vol]
         last_month = months[-1] if months else ""
+    # 末月到底过没过完：**只有末月就是当前自然月时才算没过完**。
+    # ⚠ 不能写死 True —— 加了日期范围筛选后，date_to 能选到**历史区间**，
+    #   那时末月是个完整的月（例：选 2025 全年，末月 2025-12 已过完）。
+    #   这时候还标「末月未过完」是**反向误导**：读者会以为末月偏低是因为
+    #   没采集完，其实它是完整的一个月 —— 恰好掩盖掉真实的跌幅。
+    #   默认区间下末月恒为当月，写死恰好总是对的，所以这个坑此前露不出来。
+    last_partial = bool(last_month) and last_month == date.today().strftime("%Y-%m")
 
     # ---- 出图（服务端）----
     # 发文量按站点堆叠；没有站点维度时退化成单序列「发文量」
@@ -444,15 +452,15 @@ def _timeline_impl(site: str = "", top: int = _TL_TOP,
     apal = _tl_palette(ai["kept"] if ai else [])
     charts = {
         "volume": _svg_stack(vrows, vkeys, vpal, unit=" 篇",
-                             partial_last=True)
+                             partial_last=last_partial)
                    + _tl_legend(vkeys, vpal),
         "theme_kw": (_svg_stack(trows, kept, tpal, unit=" 次",
-                                partial_last=True) + _tl_legend(kept, tpal)
+                                partial_last=last_partial) + _tl_legend(kept, tpal)
                      if kept else '<div class="empty">该筛选下无主题数据</div>'),
         "theme_ai": ((_svg_stack([{"month": r["month"], "problems": r["themes"]}
                                  for r in ai["rows"]],
                                 ai["kept"], apal, unit=" 次",
-                                partial_last=True)
+                                partial_last=last_partial)
                       + _tl_legend(ai["kept"], apal))
                      if ai and ai["kept"]
                      else '<div class="empty">还没有 AI 主题标注。<br>'
@@ -477,13 +485,15 @@ def _timeline_impl(site: str = "", top: int = _TL_TOP,
             "articles_total": sum(r["total"] for r in vol),
             "articles_with_body": sum(r["total"] for r in trows),
             "site": site or "两站合计",
-            "last_month_partial": True,
+            "last_month_partial": last_partial,
         },
         "note": ("发文量按所有文章计（含正文为空的列表页占位），"
                  "主题分布按有正文的文章计，两个分母不同；"
                  "关键词主题为粗筛，一篇可命中多类，各月相加会超过该月文章数；"
                  "AI 主题只统计**已被 AI 标注过**的文章，覆盖率见 ai.coverage；"
-                 f"末月 {last_month} 尚未过完，不可与整月直接比较。"),
+                 + (f"末月 {last_month} 尚未过完，不可与整月直接比较。"
+                    if last_partial else
+                    f"末月 {last_month} 已过完（选的是历史区间），可与整月直接比较。")),
     }
 
 
@@ -1136,8 +1146,10 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
 
 <div class="card" style="grid-column:1/-1"><h2>时间轴 —— 发文量月度趋势（分站点）</h2>
 {tl["charts"]["volume"]}
-<div class="note">按所有文章计（含正文为空的列表页占位）；末月虚线段尚未过完，
-不可与整月直接比较。</div>
+<div class="note">按所有文章计（含正文为空的列表页占位）；{_esc(
+    f"末月虚线段尚未过完，不可与整月直接比较。"
+    if tl["scope"].get("last_month_partial")
+    else "所选区间末月已过完，可与整月直接比较。")}</div>
 {_table(["月份"] + list(tl["sites"]),
         [[r["month"], f'{r["total"]:,}'] + [f'{r.get(s, 0):,}' for s in tl["sites"]]
          for r in tl_m])}
