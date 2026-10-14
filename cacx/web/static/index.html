@@ -1722,7 +1722,7 @@ async function runExtract(write){
     if(r.error){ box.innerHTML =
       `<div style="color:var(--err);font-size:12.5px">✗ ${esc(r.error)}</div>`; return; }
     const t = r.types||{}, rt = r.rel_types||{};
-    const TN = {org:'机构',policy:'政策',problem:'治理问题',measure:'措施'};
+    const TN = GP_STYLE;   // 实体类型中文名统一取 GP_STYLE[t].cn，别再抄第三份
     const RN = GP_REL_CN;   // 中文名统一取 GP_REL_CN，别再在这里抄一份
     const sum = (obj,map)=>Object.keys(obj).map(k=>
       `<span>${esc(map[k]||k)} <b style="color:var(--acc2)">${obj[k]}</b></span>`).join('　');
@@ -1900,6 +1900,47 @@ function gpFindClear(){
   loadGraph();
 }
 
+// 低置信未进图节点的说明。
+//
+// ⚠ 原来只有一句「低置信节点 210 个未进图」，问题在于**它不能回答用户的问题**：
+//   用户看到图例上「措施 0」，会去找「这一类根本没抽出来」的原因 ——
+//   而库里其实有 1168 个措施实体、489 条 adopt 关系，只是全被门槛挡住了。
+//   只报总数，等于把读者指向一个**不存在的原因**，比不报更坏。
+//
+//   所以这里要说三件事：剔了多少、按哪类剔的、**为什么这一类会全灭**。
+function gpBlockedNote(a){
+  const n = (a||{}).blocked_count || 0;
+  if(!n) return '';
+  const byType = (a||{}).blocked_by_type || {};
+  // ⚠ 这里查的键是**实体类型**（org/policy/problem/measure），
+  //   中文名取 GP_STYLE[t].cn —— 曾经误用 GP_REL_CN（那是**关系类型**
+  //   issue/target/adopt/joint_issue 的映射），四个键全落空，
+  //   于是永远走到「合计 210」分支，点名的那部分从来没显示过。
+  const names = Object.keys(GP_STYLE);
+  const parts = [];
+  let wiped = [];
+  names.forEach(t=>{
+    const k = byType[t] || 0;
+    const cn = (GP_STYLE[t]||{}).cn || t;
+    if(k) parts.push(`${cn} ${k}`);
+    // 剔了、且该类在图上一个都不剩 → 这一类被「整类出局」，必须点名
+    const avail = (((a||{}).graph||{}).avail_by_group||[])
+                    .find(x=>x.group===t);
+    if(k > 0 && avail && avail.n === 0) wiped.push(cn);
+  });
+  if(!parts.length) parts.push(`合计 ${n}`);
+  let s = `低置信节点 ${n} 个未进图（${parts.join('、')}）。`;
+  if(wiped.length){
+    s += `<br><span style="color:var(--warn)">${wiped.join('、')}</span>类<b>整类出局</b>：
+      规则抽取给这一类的置信度上限恰好等于低置信门槛（≤0.8），
+      所以「措施」在本图里恒为 0 —— 不是没抽到，是抽到的全被门槛挡住了。`;
+    s += `<br>连带后果：<code>adopt</code>（机构采取措施）这类关系在本图里一条都画不出来。
+      上方关系类型筛选器里的条数走的是<b>全库口径</b>、不受本规则影响，
+      所以「采取 489」与图上空并不矛盾，但**确实会让人以为筛选坏了**。`;
+  }
+  return s;
+}
+
 // 高亮结论的一句话回显（命中 / 没命中），两个出口共用：
 // 空图分支与非空图分支必须说同一套话，否则「筛空了图 + 高亮没命中」
 // 会被读成两个互不相干的结论。
@@ -1977,8 +2018,8 @@ function gpRenderScope(an){
     + f.graph_edges_all + '</b> 边');
   const cond = [];
   if(ntActive){
-    const NTCN = {org:'机构',policy:'政策',problem:'治理问题',measure:'措施'};
-    const on = (f.node_types||[]).map(t=>NTCN[t]||t);
+    const NTCN = GP_STYLE;   // 同上：实体类型中文名只有 GP_STYLE 一份
+    const on = (f.node_types||[]).map(t=>NTCN[t]?.cn||t);
     cond.push('实体类型 <b>' + on.join('、') + '</b>');
   }
   if((f.rel_types||[]).length) cond.push('类型 <b>' + f.rel_types.join('、') + '</b>');
@@ -2085,7 +2126,7 @@ function renderMetrics(a){
       <b style="color:var(--warn)">介数</b> = 有多少最短路径经过它，
       这才反映「在部门协作里是不是居中协调」——
       <b>度中心性 ≠ 权责边界</b>，报告里要写清这个区分。
-      ${a.blocked_count?`低置信节点 ${a.blocked_count} 个未进图。`:''}
+      ${gpBlockedNote(a)}
     </div>
     <div class="row" style="gap:18px;align-items:flex-start;flex-wrap:wrap">
       ${col('介数 Top（协调中枢）', a.betweenness, 'betweenness', '← 权责边界')}
