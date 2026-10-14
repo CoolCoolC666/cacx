@@ -362,7 +362,8 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
                          node_types: Optional[Dict[str, str]] = None,
                          want_types: Optional[set] = None,
                          avail_by_group: Optional[Dict[str, int]] = None,
-                         find: str = ""
+                         find: str = "",
+                         hl: str = ""
                          ) -> Dict[str, Any]:
     """
     networkx 结果 → pyvis 前端要的 {nodes, edges}。
@@ -495,6 +496,43 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
     hit_nodes = len(hits)
     hit_edges = sum(1 for e in edges if e["hit"])
 
+    # ---- 点击聚焦高亮（hl）----
+    # ⚠ 与 find 的区别在**命中语义**，不在「标 vs 裁」：
+    #   find 是「搜包含该串的所有节点」，边要求**两端都命中**
+    #   （搜泛词时只点亮一端的边会几乎点亮整张图 = 等于没筛）；
+    #   hl 是「点击图上某节点/某条边时的聚焦」——
+    #     hl=<节点名>：该节点 + **一跳邻居** + 与它相连的全部边
+    #     hl=<a>|<b> ：恰好这 2 个节点 + 这 1 条边
+    #   两者都是**只标不改图**：图规模、指标一概不动，
+    #   所以导出的 HTML 也能带同样的聚焦态（「屏幕 = 导出」）。
+    # ⚠ 命中判定以**画出来的** nodes/edges 为界（keep）：
+    #   被 min_degree/limit 折叠掉的节点不在图上，谈聚焦没有意义。
+    hl = (hl or "").strip()
+    hl_node_set = set()
+    hl_edge_idx = set()
+    if hl:
+        if "|" in hl:
+            a, b = (x.strip() for x in hl.split("|", 1))
+            if a in keep and b in keep:
+                hl_node_set.update((a, b))
+                for i, e in enumerate(edges):
+                    if {e["from"], e["to"]} == {a, b}:
+                        hl_edge_idx.add(i)
+        else:
+            if hl in keep:
+                hl_node_set.add(hl)
+                for i, e in enumerate(edges):
+                    if hl in (e["from"], e["to"]):
+                        hl_node_set.add(e["from"])
+                        hl_node_set.add(e["to"])
+                        hl_edge_idx.add(i)
+    for x in nodes:
+        x["hl"] = x["id"] in hl_node_set
+    for i, e in enumerate(edges):
+        e["hl"] = i in hl_edge_idx
+    hl_hits = len(hl_node_set)
+    hl_edge_hits = len(hl_edge_idx)
+
     # 图例要显示「每类各多少个」，所以把**画出来的**这批节点按类型点一次数。
     # ⚠ 必须数 nodes 而不是全图：图例写在图下面，标的是屏幕上看得见的那些，
     #   标成全图 1633 节点里的 856 个机构，图上只有 300 个，数字对不上。
@@ -506,6 +544,9 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
             "find": find,
             "find_hits": hit_nodes,
             "find_edge_hits": hit_edges,
+            "hl": hl,
+            "hl_hits": hl_hits,
+            "hl_edge_hits": hl_edge_hits,
             "scope_nodes": sub.number_of_nodes(),
             "scope_edges": sub.number_of_edges(),
             "hidden_nodes": max(0, sub.number_of_nodes() - len(nodes)),

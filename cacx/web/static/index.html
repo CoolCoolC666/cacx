@@ -395,7 +395,11 @@
     <div class="row" style="align-items:flex-start;gap:12px">
       <div class="box" style="flex:2;min-width:0">
         <h3>网络图
-          <span id="gp_cnt" style="font-weight:400;color:var(--dim);font-size:12px"></span></h3>
+          <span id="gp_cnt" style="font-weight:400;color:var(--dim);font-size:12px"></span>
+          <!-- 点击聚焦/点空白的动态回显容器：保持空，由 gpApplyFocus/gpTapBlank 填充 -->
+          <span id="gp_focus_note" style="display:none"></span>
+          <span id="gp_blank_note" style="display:none"></span>
+        </h3>
         <div id="gp_canvas" style="height:620px;background:#0f1115;border-radius:6px;
              border:1px solid var(--line)"></div>
         <div id="gp_legend" style="margin-top:10px;display:flex;gap:14px;flex-wrap:wrap;
@@ -625,6 +629,25 @@
         <button class="btn" style="padding:3px 10px;font-size:12px"
           onclick="dlPanel('timeline')"
           title="下载时间轴的原始数据（CSV）">⬇ 数据</button>
+      </div>
+      <div class="row" style="gap:12px;align-items:center;margin-top:8px">
+        <span style="font-size:12.5px;color:var(--dim)">日期范围</span>
+        <label class="inline" style="font-size:12.5px">从
+          <input type="date" id="tl_from" style="width:150px"
+                 onchange="loadTimeline()"
+                 title="发文时间从哪天开始。留空 = 不限"></label>
+        <label class="inline" style="font-size:12.5px">至
+          <input type="date" id="tl_to" style="width:150px"
+                 onchange="loadTimeline()"
+                 title="发文时间到哪天为止。留空 = 不限"></label>
+        <button class="btn" style="padding:3px 10px;font-size:12px"
+          onclick="tlApplyRange()"
+          title="按选中的日期范围筛选时间轴">按范围筛选</button>
+        <button class="btn" style="padding:3px 10px;font-size:12px"
+          onclick="tlClearRange()"
+          title="清空日期范围，恢复全部时间">恢复全部</button>
+        <span style="font-size:11.5px;color:var(--dim)">
+          与「近 N 个月」叠加：日期范围选区间，近 N 个月取区间尾部的 N 个月</span>
       </div>
       <div id="tl_note" class="dim"
            style="font-size:11.5px;margin-top:6px;line-height:1.7"></div>
@@ -1732,6 +1755,9 @@ async function runExtract(write){
 let GP_ANA = null;        // 关联分析结果
 let GP_NET = null;        // vis.Network 实例
 let GP_NODES = [];        // 供点击回调按 id 查
+let GP_HL = '';           // 点击聚焦目标：'' | 节点名 | 'a|b'（随 gpQuery 传给后端，导出也带）
+let GP_DS_NODES = null;   // 当前 vis DataSet —— 点击聚焦时**本地改色**用（不整图重载）
+let GP_DS_EDGES = null;
 
 // 四类实体：颜色 + 形状双编码。
 // ⚠ 不能只靠颜色 —— 色盲同学分不出蓝/绿。图例里也写明形状。
@@ -1830,6 +1856,9 @@ function gpQuery(){
       .filter(x=>GP_STYLE[x.value] && !x.disabled);
   const lgOn = lgAll.filter(x=>x.checked).map(x=>x.value);
   if(lgOn.length && lgOn.length < lgAll.length) q.set('node_types', lgOn.join(','));
+  // 点击聚焦（hl）：与 find 独立，**必须一起带进导出请求** ——
+  // 「屏幕 = 导出」：导出的 HTML 也要能看到点击聚焦态。
+  if(GP_HL) q.set('hl', GP_HL);
   q.set('limit','300'); q.set('topn','12');
   return q;
 }
@@ -1851,6 +1880,9 @@ function gpReset(){
   //   只改 DOM 的话下次 loadGraph 又按旧状态渲染，又变回筛过的。
   GP_LEGEND_ON = new Set(Object.keys(GP_STYLE));
   document.querySelectorAll('#gp_legend input[value]').forEach(x=>x.checked = true);
+  // 点击聚焦也要复位 —— 不清的话重置后图还是黄的，像没重置
+  GP_HL = '';
+  GP_DS_NODES = null; GP_DS_EDGES = null;
   loadGraph();
 }
 
@@ -2113,6 +2145,19 @@ function renderNet(a){
   // 用户搜「宣传部」命中 0 个时，图和没搜时长得一模一样，
   // 分不清是"确实没有"还是"高亮根本没生效" —— 而这两件事要做的动作完全相反。
   $('gp_cnt').insertAdjacentHTML('beforeend', gpFindNote(a));
+  // 点击聚焦回显（重绘后按后端回传重建 —— 与屏幕、导出同源）
+  const fnote = $('gp_focus_note');
+  if(fnote){
+    const g = (a && a.graph) || {};
+    if(GP_HL && g.hl_hits){
+      fnote.style.display = '';
+      fnote.innerHTML = `　<span style="color:${GP_HIT_COLOR}">◆ 聚焦「${esc(GP_HL.replace('|',' → '))}」：${g.hl_hits} 个节点 / ${g.hl_edge_hits} 条关系</span>`;
+    }else{
+      fnote.style.display = 'none';
+    }
+  }
+  const bnote = $('gp_blank_note');
+  if(bnote) bnote.style.display = 'none';
   host.innerHTML = '';
 
   // vis-network 由后端内联进来了（零 CDN）。若没加载成功给出明确提示，
@@ -2129,25 +2174,37 @@ function renderNet(a){
     const st = GP_STYLE[g] || GP_STYLE.org;
     // 命中节点盖掉类型配色。**高亮优先于类型** —— 否则命中项还是原来的蓝，
     // 用户根本看不出哪儿被标了，等于高亮没生效。
-    const bg = n.hit ? GP_HIT_COLOR : st.c;
-    const bd = n.hit ? '#fff' : '#e6e8ee';
+    // hit=检索高亮（find），hl=点击聚焦：两者画法一致，可并存。
+    const hit = !!(n.hit || n.hl);
+    const bg = hit ? GP_HIT_COLOR : st.c;
+    const bd = hit ? '#fff' : '#e6e8ee';
     return {id:n.id, label:n.label||n.id, group:g,
             size:n.size||16, title:n.title||'',
             color:{background:bg, border:bd,
                    highlight:{background:bg, border:'#fff'}},
             shape:st.s, font:{color:'#e6e8ee', size:13},
-            borderWidth: n.hit ? 3 : (n.degree>=20 ? 2 : 1),
-            value: n.degree||1};
+            borderWidth: hit ? 3 : (n.degree>=20 ? 2 : 1),
+            value: n.degree||1,
+            // 聚焦标记必须**随条目进 DataSet**：重绘后 gpApplyFocus
+            // 要在 DataSet 上数/改色，丢了它重绘后「再点同一项取消」的
+            // 计数和颜色就全错了。
+            hl: !!n.hl};
   }));
-  const de = new vis.DataSet(edges.map((e,i)=>({
+  const de = new vis.DataSet(edges.map((e,i)=>{
+    const hit = !!(e.hit || e.hl);
+    return {
     id:'e'+i, from:e.from, to:e.to,
-    width: e.hit ? 3 : Math.min(6, Math.max(1, (e.weight||1)*0.6)),
-    color:{color:e.hit ? GP_HIT_COLOR : '#3a4a63',
+    width: hit ? 3 : Math.min(6, Math.max(1, (e.weight||1)*0.6)),
+    color:{color:hit ? GP_HIT_COLOR : '#3a4a63',
            highlight:'#7ab8ff', hover:'#7ab8ff',
-           opacity: e.hit ? 1 : 0.85},
+           opacity: hit ? 1 : 0.85},
     title:e.title||'', weight:e.weight||1, types:e.types||[],
     _from:e.from, _to:e.to,
-  })));
+    hl: !!e.hl,
+  };}));
+  // 点击聚焦要在**当前这版 DataSet**上本地改色，必须存起来；
+  // 重新 loadGraph 时 GP_DS_* 会被下面这行覆盖成新版。
+  GP_DS_NODES = ds; GP_DS_EDGES = de;
 
   GP_NET = new vis.Network(host, {nodes:ds, edges:de}, {
     physics:{stabilization:{iterations:220},
@@ -2167,13 +2224,17 @@ function renderNet(a){
       if(e) showEdgeEvidence(e._from, e._to, (e.types||[])[0]||'');
     }
   });
-  // 单击边也响应 —— 演示时未必记得双击
+  // 单击边也响应 —— 演示时未必记得双击。
+  // 点击高亮（R4）在**原交互里追加，不替换**：
+  //   点边 → 原文证据（老师要的核心交互，不能破坏）+ 聚焦这条边；
+  //   点节点 → 拉镜头看详情（focusNode）+ 聚焦这个节点。
   GP_NET.on('click', p=>{
     if(p.edges.length){
       const e = de.get(p.edges[0]);
-      if(e){ showEdgeEvidence(e._from, e._to, (e.types||[])[0]||''); return; }
+      if(e){ showEdgeEvidence(e._from, e._to, (e.types||[])[0]||''); gpTapEdge(e); return; }
     }
-    if(p.nodes.length) focusNode(p.nodes[0]);
+    if(p.nodes.length){ focusNode(p.nodes[0]); gpTapNode(p.nodes[0]); return; }
+    gpTapBlank();
   });
 
   renderLegend(byGroup, a.graph);
@@ -2276,6 +2337,94 @@ function focusNode(id){
        介数高说明它在部门协作路径中居中，是「牵头协调」的量化迹象；
        单看度数高只能说明它出现得多。</div>`;
   $('gp_detail_title').textContent = '节点详情';
+}
+
+// ---- 点击聚焦（R4）----
+// ⚠ 语义与 find 高亮**不同**：
+//   find 是「搜包含该串的所有节点」，边要**两端都命中**（泛词才不点成一片）；
+//   点击是「精确聚焦这一个」—— 点节点 = 它 + **一跳邻居** + 关联边，
+//   点边 = 两端点 + 这条边。两者都只改颜色、**绝不裁图**。
+// ⚠ 不整图重载：loadGraph() 会重建 Network（镜头重置 + 220 次布局迭代），
+//   点一下就闪一下没法用。所以**本地改色**（vis DataSet.update）；
+//   但 GP_HL 状态会被 gpQuery 带去后端 —— 下次重绘/导出时由后端回传
+//   hl 标记，与屏幕一致（「屏幕 = 导出」不变量不破）。
+function gpTapNode(id){
+  const want = (GP_HL === id) ? '' : id;    // 再点同一项 = 取消
+  GP_HL = want;
+  gpApplyFocus();
+}
+function gpTapEdge(e){
+  const pair = e._from + '|' + e._to;
+  const want = (GP_HL === pair) ? '' : pair; // 再点同一条 = 取消
+  GP_HL = want;
+  gpApplyFocus();
+}
+function gpTapBlank(){
+  // 点空白：不取消聚焦，只回一句指引 —— 用户不知道「可以点」时
+  // 就只会盯着图看，而点空白回指引是成本最低的引导。
+  const note = $('gp_blank_note');
+  if(!note) return;
+  note.style.display = '';
+  note.textContent = '点击节点或关系可聚焦；再次点击同一项取消';
+}
+function gpApplyFocus(){
+  const note = $('gp_focus_note'); if(note) note.style.display = 'none';
+  const blank = $('gp_blank_note'); if(blank) blank.style.display = 'none';
+  const ds = GP_DS_NODES, de = GP_DS_EDGES;
+  if(!ds || !de) return;
+  // 命中集合：与后端 to_pyvis_nodes_edges 的 hl 语义**逐字一致**
+  const hlNodes = new Set(), hlEdges = new Set();
+  if(GP_HL){
+    if(GP_HL.indexOf('|') >= 0){
+      const [a, b] = GP_HL.split('|');
+      hlNodes.add(a); hlNodes.add(b);
+      de.forEach(e=>{
+        if((e._from===a&&e._to===b)||(e._from===b&&e._to===a)) hlEdges.add(e.id);
+      });
+    }else{
+      hlNodes.add(GP_HL);
+      de.forEach(e=>{
+        if(e._from===GP_HL||e._to===GP_HL){
+          hlNodes.add(e._from); hlNodes.add(e._to); hlEdges.add(e.id);
+        }
+      });
+    }
+  }
+  // 只更新**变了颜色**的项 —— DataSet.update 全量刷会把 hover 状态也打掉
+  const nupd = [];
+  ds.forEach(n=>{
+    const hl = hlNodes.has(n.id);
+    if(!!n.hl === hl) return;
+    n.hl = hl;
+    const g = n.group || 'org';
+    const st = GP_STYLE[g] || GP_STYLE.org;
+    const hit = !!(n.hit || hl);
+    nupd.push({id:n.id,
+      color:{background:hit?GP_HIT_COLOR:st.c, border:hit?'#fff':'#e6e8ee',
+             highlight:{background:hit?GP_HIT_COLOR:st.c, border:'#fff'}},
+      borderWidth: hit ? 3 : (n.degree>=20 ? 2 : 1)});
+  });
+  if(nupd.length) ds.update(nupd);
+  const eupd = [];
+  de.forEach(e=>{
+    const hl = hlEdges.has(e.id);
+    if(!!e.hl === hl) return;
+    e.hl = hl;
+    const hit = !!(e.hit || hl);
+    eupd.push({id:e.id,
+      color:{color:hit?GP_HIT_COLOR:'#3a4a63', highlight:'#7ab8ff',
+             hover:'#7ab8ff', opacity: hit?1:0.85},
+      width: hit ? 3 : Math.min(6, Math.max(1, (e.weight||1)*0.6))});
+  });
+  if(eupd.length) de.update(eupd);
+  // 反馈必须明说命中几个 —— 只靠变色，用户分不清「没有」和「没生效」
+  if(GP_HL){
+    const s = $('gp_focus_note');
+    if(s){
+      s.style.display = '';
+      s.innerHTML = `　<span style="color:${GP_HIT_COLOR}">◆ 聚焦「${esc(GP_HL.replace('|',' → '))}」：${hlNodes.size} 个节点 / ${hlEdges.size} 条关系</span>`;
+    }
+  }
 }
 
 function showEdgeEvidence(src, dst, relType){
@@ -3871,6 +4020,16 @@ function tlMode(){
   return document.querySelector('input[name=tl_mode]:checked')?.value || 'kw';
 }
 
+// 日期范围筛选：显式按钮 + 输入框 onchange 双入口。
+// 「恢复全部」只是清空两个日期框再重载 —— 后端留空即全区间，
+// 绝不在这里做任何 slice（尾部月数截断归服务端 months 参数管）。
+function tlApplyRange(){ loadTimeline(); }
+function tlClearRange(){
+  if($('tl_from')) $('tl_from').value = '';
+  if($('tl_to')) $('tl_to').value = '';
+  loadTimeline();
+}
+
 async function loadTimeline(){
   const box = $('tl_vol');
   if(!box) return;                    // 面板未渲染，别往下走
@@ -3882,6 +4041,13 @@ async function loadTimeline(){
   //   这正是「屏幕 = 导出」最容易漏的一处。
   const q=new URLSearchParams({include_ai:'true', top:'6', months:String(months)});
   if(site) q.set('site', site);
+  // 日期范围：**两个 id 必须叫 tl_from/tl_to** —— date_from/date_to
+  // 已被关系图谱页占用（同文档 id 重复会让 $() 取错元素）。
+  // 留空 = 后端走默认全区间，行为与改动前完全一致。
+  const tdf=($('tl_from')?.value||'').trim();
+  const tdt=($('tl_to')?.value||'').trim();
+  if(tdf) q.set('date_from', tdf);
+  if(tdt) q.set('date_to', tdt);
   const d = await (await fetch('/api/panel/timeline?'+q.toString())).json();
   TL_DATA = d;
 
