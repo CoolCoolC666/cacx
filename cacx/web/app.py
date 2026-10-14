@@ -251,12 +251,16 @@ def api_trend(site: str = "", granularity: str = "month"):
 
 
 @app.get("/api/facets")
-def api_facets(site: str = ""):
+def api_facets(site: str = "", date_from: str = "", date_to: str = ""):
     """
     分面。site 非空时只返回该站栏目 —— 栏目下拉靠它跟随站点联动。
-    不带参数时行为与从前完全一致（向后兼容）。
+    date_from/date_to 非空时只过滤 columns（栏目 Top12 随日期变），
+    sites/total 等字段保持全量。空则不传，走全区间。
     """
-    return _db().facets_by_site(site)
+    kw = {}
+    if date_from: kw["date_from"] = date_from
+    if date_to:   kw["date_to"] = date_to
+    return _db().facets_by_site(site, **kw)
 
 
 @app.get("/api/stats")
@@ -1242,7 +1246,7 @@ def api_sample_options(date_from: str = "2024-01-01",
 @app.get("/api/sample")
 def api_sample(site: str = "", column: str = "",
                date_from: str = "2024-01-01", date_to: str = "2099-12-31",
-               limit: int = Query(500, ge=1, le=5000),
+               limit: int = Query(500, ge=1, le=200000),
                strategy: str = "stratified",
                with_items: bool = False):
     """
@@ -1284,7 +1288,7 @@ def api_sample_years(site: str = "", column: str = "",
 def api_sample_export(site: str = "", column: str = "",
                       date_from: str = "2024-01-01",
                       date_to: str = "2099-12-31",
-                      limit: int = Query(500, ge=1, le=5000),
+                      limit: int = Query(500, ge=1, le=200000),
                       strategy: str = "stratified"):
     """
     把样本导成 CSV（utf-8-sig，Excel 直接双击不乱码）。
