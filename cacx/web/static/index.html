@@ -1758,6 +1758,16 @@ let GP_NODES = [];        // 供点击回调按 id 查
 let GP_HL = '';           // 点击聚焦目标：'' | 节点名 | 'a|b'（随 gpQuery 传给后端，导出也带）
 let GP_DS_NODES = null;   // 当前 vis DataSet —— 点击聚焦时**本地改色**用（不整图重载）
 let GP_DS_EDGES = null;
+let GP_BLOCKED_BY_TYPE = {};   // 各实体类型被「低置信门槛」挡掉多少（后端下发）
+
+// 默认勾选哪些实体类型：**排除被低置信门槛挡着的那几类**。
+// ⚠ measure 必须默认不勾 —— 默认图口径（1633 节点 / 300 节点画布 / 1410 边）
+//   与报告里引的数字都是「措施被挡在图外」这套口径算出来的，
+//   一旦默认勾上，默认基线就变了、报告也得跟着改。
+//   但它**必须可勾**：勾了后端才解除过滤（allow_types），否则「勾选」是假开关。
+function gpDefaultTypes(){
+  return Object.keys(GP_STYLE).filter(k=>(GP_BLOCKED_BY_TYPE[k]||0) === 0);
+}
 
 // 四类实体：颜色 + 形状双编码。
 // ⚠ 不能只靠颜色 —— 色盲同学分不出蓝/绿。图例里也写明形状。
@@ -1775,10 +1785,14 @@ const GP_HIT_COLOR = '#ffd479';
 //   而漏掉的那处会**静默**退回显示英文原名，不报任何错。
 const GP_REL_CN = {issue:'发布', target:'针对', adopt:'采取',
                    joint_issue:'联合发文'};
-// 图例勾选了哪几类（实体类型筛选器）。⚠ 默认全选，与后端"空 = 不筛"一致。
+// 图例勾选了哪几类（实体类型筛选器）。⚠ 初始是 **null**，不是全选也不是默认集：
+//   「哪些类被低置信门槛挡着」要等后端第一次响应才知道（GP_BLOCKED_BY_TYPE），
+//   在那之前瞎猜会把 measure 勾上、默认基线当场就变了。
+//   null 的含义 = 「还没初始化」：此时 gpQuery 不传 node_types（空=不筛），
+//   正好落在后端默认口径上；首次 renderLegend 再按 blocked 定下默认勾选。
 //   必须存成模块级变量而不是每次读 DOM：loadGraph 会重建图例的 innerHTML，
 //   只看 DOM 的话重绘后勾选状态就没了，表现为"点了一下没反应"。
-let GP_LEGEND_ON = new Set(Object.keys(GP_STYLE));
+let GP_LEGEND_ON = null;
 const GP_SHAPE_CN = {dot:'圆', square:'方块', triangle:'三角', diamond:'菱形'};
 
 // vis-network 懒加载：只有进图谱页/导出时才拉那 469KB。
@@ -1855,7 +1869,16 @@ function gpQuery(){
   const lgAll = [...document.querySelectorAll('#gp_legend input[value]')]
       .filter(x=>GP_STYLE[x.value] && !x.disabled);
   const lgOn = lgAll.filter(x=>x.checked).map(x=>x.value);
-  if(lgOn.length && lgOn.length < lgAll.length) q.set('node_types', lgOn.join(','));
+  // ⚠⚠ 「全勾」时**不能**一概不传 node_types。
+  //   后端把 node_types 当成两件事用：① 裁剪要保留的类型
+  //   ② 用户显式勾选了哪些类（`_blocked_for_graph(allow_types=...)`
+  //   据此解除低置信过滤）。而「空 = 不筛」在 ② 上被读成「什么都没勾」。
+  //   于是用户**勾上措施** → 四类全勾 → 这里判定为「不需要传」→ 后端看到空
+  //   → 措施照旧被门槛挡 → 图上一个措施节点都不出现，勾选成了假开关。
+  //   判据：只要勾到了「被门槛挡过」的类，就一定要传。
+  const needsGatedType = lgOn.some(t => (GP_BLOCKED_BY_TYPE[t]||0) > 0);
+  if(lgOn.length && (lgOn.length < lgAll.length || needsGatedType))
+    q.set('node_types', lgOn.join(','));
   // 点击聚焦（hl）：与 find 独立，**必须一起带进导出请求** ——
   // 「屏幕 = 导出」：导出的 HTML 也要能看到点击聚焦态。
   if(GP_HL) q.set('hl', GP_HL);
@@ -1878,8 +1901,10 @@ function gpReset(){
   // 而界面上其它条件都写着"不限"，看着像重置没生效。
   // ⚠ 要同时清 GP_LEGEND_ON —— 重置后图例 innerHTML 会重建，
   //   只改 DOM 的话下次 loadGraph 又按旧状态渲染，又变回筛过的。
-  GP_LEGEND_ON = new Set(Object.keys(GP_STYLE));
-  document.querySelectorAll('#gp_legend input[value]').forEach(x=>x.checked = true);
+  GP_LEGEND_ON = new Set(gpDefaultTypes());
+  document.querySelectorAll('#gp_legend input[value]').forEach(x=>{
+    if(GP_STYLE[x.value] && !x.disabled) x.checked = gpDefaultTypes().includes(x.value);
+  });
   // 点击聚焦也要复位 —— 不清的话重置后图还是黄的，像没重置
   GP_HL = '';
   GP_DS_NODES = null; GP_DS_EDGES = null;
@@ -1918,25 +1943,46 @@ function gpBlockedNote(a){
   //   于是永远走到「合计 210」分支，点名的那部分从来没显示过。
   const names = Object.keys(GP_STYLE);
   const parts = [];
-  let wiped = [];
+  let gated = [];
   names.forEach(t=>{
     const k = byType[t] || 0;
     const cn = (GP_STYLE[t]||{}).cn || t;
-    if(k) parts.push(`${cn} ${k}`);
-    // 剔了、且该类在图上一个都不剩 → 这一类被「整类出局」，必须点名
+    if(!k) return;
+    parts.push(`${cn} ${k}`);
+    // 图上一个都不剩、且用户也没勾它 → 仍然被门槛整类挡着
     const avail = (((a||{}).graph||{}).avail_by_group||[])
                     .find(x=>x.group===t);
-    if(k > 0 && avail && avail.n === 0) wiped.push(cn);
+    const checked = !!(GP_LEGEND_ON && GP_LEGEND_ON.has(t));
+    if(k > 0 && avail && avail.n === 0 && !checked) gated.push(cn);
   });
   if(!parts.length) parts.push(`合计 ${n}`);
   let s = `低置信节点 ${n} 个未进图（${parts.join('、')}）。`;
-  if(wiped.length){
-    s += `<br><span style="color:var(--warn)">${wiped.join('、')}</span>类<b>整类出局</b>：
+  const freed = (a||{}).blocked_kept_out || 0;
+  if(freed > 0){
+    // ⚠ 说「调小最小度数就能看全」是**假提示** —— 实测调成 1 之后画布上的
+    //   措施节点一个都没多（仍是 9 个）。真正的瓶颈是**画布上限**：
+    //   画布只画度数靠前的 limit=300 个节点，而措施类度数普遍 1~5，
+    //   绝大多数排在 300 名之外；界面上也没有提高上限的控件。
+    //   宁可如实说「看不全」，也别给一个点了没用的操作。
+    // ⚠ byGroup 在本函数里**不存在**（它只是 renderLegend 的形参），
+    //   取值要走响应里的 graph.by_group（数组形式 [{group,n}]）。
+    const bg = ((((a||{}).graph)||{}).by_group)||[];
+    const shown = (bg.find(x=>x.group==='measure')||{}).n || 0;
+    s += `<br><span style="color:var(--acc2)">已按勾选解除过滤：${freed} 个低置信实体已进图范围</span>`
+      + `（当前画布上显示 ${shown} 个）。`
+      + `这类实体多为「下架」「关闭」这类泛词、度数普遍偏低，`
+      + `而画布只画度数靠前的 300 个节点，所以<b>图上只看得到一部分</b>；`
+      + `调小「最小度数」不会让它们变多（实测调成 1 也是 ${shown} 个）。`;
+    return s;
+  }
+  if(gated.length){
+    s += `<br><span style="color:var(--warn)">${gated.join('、')}</span>类<b>整类出局</b>：
       规则抽取给这一类的置信度上限恰好等于低置信门槛（≤0.8），
-      所以「措施」在本图里恒为 0 —— 不是没抽到，是抽到的全被门槛挡住了。`;
-    s += `<br>连带后果：<code>adopt</code>（机构采取措施）这类关系在本图里一条都画不出来。
+      所以「${gated[0]}」在本图里恒为 0 —— 不是没抽到，是抽到的全被门槛挡住了。
+      <b>勾选该类即可放行</b>（默认不勾：默认图口径与报告都建立在不勾的基础上）。`;
+    s += `<br>连带后果：<code>adopt</code>（机构采取措施）这类关系在默认图里一条都画不出来。
       上方关系类型筛选器里的条数走的是<b>全库口径</b>、不受本规则影响，
-      所以「采取 489」与图上空并不矛盾，但**确实会让人以为筛选坏了**。`;
+      所以「采取 489」与默认图为空并不矛盾，但**确实会让人以为筛选坏了**。`;
   }
   return s;
 }
@@ -2278,7 +2324,7 @@ function renderNet(a){
     gpTapBlank();
   });
 
-  renderLegend(byGroup, a.graph);
+  renderLegend(byGroup, a.graph, a.blocked_by_type);
 }
 
 // 图例 = 颜色/形状说明 **+ 实体类型筛选器**（两用）。
@@ -2287,9 +2333,12 @@ function renderNet(a){
 // ⚠ 选中状态必须**跨重绘保持**：每次 loadGraph 都会重建图例的 innerHTML，
 //   若一律写成 checked，用户勾掉「政策」后下一次重绘又变回全选，
 //   表现为"点了没反应"。
-function renderLegend(byGroup, graph){
+function renderLegend(byGroup, graph, blockedByType){
   const box = $('gp_legend');
   if(!box) return;
+  GP_BLOCKED_BY_TYPE = blockedByType || {};
+  // 首次渲染：此时才知道哪些类被门槛挡着，据此定下默认勾选
+  if(GP_LEGEND_ON===null) GP_LEGEND_ON = new Set(gpDefaultTypes());
   const shapes = {dot:'●', square:'■', triangle:'▲', diamond:'◆'};
   // ⚠ 禁用态看的是 avail（**尚未按类型筛选**时的节点数），
   //   不是 byGroup（筛完剩下的数）。
@@ -2307,12 +2356,19 @@ function renderLegend(byGroup, graph){
     const st = GP_STYLE[k];
     // 显示的计数 = 当前屏幕上真的画出来的这批节点
     const n = (byGroup[k]||0);
-    // 只有"这个类型在当前范围里一个都没有"才禁用
-    const off = avail[k] === 0;
+    const bkd = GP_BLOCKED_BY_TYPE[k]||0;
+    // ⚠ 只有「本范围真的一类都没有」才禁用。
+    //   avail=0 但被门槛挡掉过一批 ≠ 不存在 —— measure 正是这种：
+    //   禁用它用户就永远勾不上，「勾选」成了假开关。
+    const off = avail[k] === 0 && bkd === 0;
+    const gated = avail[k] === 0 && bkd > 0;
     const on = GP_LEGEND_ON.has(k);
-    return `<label class="lg-pick" ${off?'data-off="1"':''}
-        title="${esc(st.cn)}类：当前图上 ${n} 个节点`
-      + `${off?'（本范围里没有这类实体，勾选也不会有东西）':''}">
+    const tip = gated
+      ? `${st.cn}类：${bkd} 个低置信实体被门槛挡在图外（当前 0 个）。`
+        + `勾选后端会解除该类过滤，它们就会进来 —— 名字多为「下架」「关闭」这类泛词。`
+      : `${st.cn}类：当前图上 ${n} 个节点`
+        + `${off?'（本范围里没有这类实体，勾选也不会有东西）':''}`;
+    return `<label class="lg-pick" ${off?'data-off="1"':''} title="${esc(tip)}">
       <input type="checkbox" value="${k}" ${on?'checked':''} ${off?'disabled':''}>
       <span style="color:${st.c};font-size:13px">${shapes[st.s]}</span>
       ${st.cn} <b style="color:var(--acc2)">${n}</b></label>`;
@@ -2352,10 +2408,11 @@ function renderLegend(byGroup, graph){
 //   给一个能点到"全不选"的开关，等于摆一个必然出错的按钮在用户面前。
 //   所以取消勾选时直接把它自己弹回全选。
 function gpLegendMaster(boxEl){
+  const def = gpDefaultTypes();
   $('gp_legend').querySelectorAll('input[value]').forEach(x=>{
-    if(GP_STYLE[x.value] && !x.disabled) x.checked = true;
+    if(GP_STYLE[x.value] && !x.disabled) x.checked = def.includes(x.value);
   });
-  GP_LEGEND_ON = new Set(Object.keys(GP_STYLE));
+  GP_LEGEND_ON = new Set(def);
   boxEl.checked = true;
   loadGraph();
 }

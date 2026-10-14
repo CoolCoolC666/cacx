@@ -1621,7 +1621,7 @@ def api_extract_run(req: ExtractReq):
 _GRAPH_BLOCK_TYPES = {"measure"}
 
 
-def _blocked_for_graph(d) -> set:
+def _blocked_for_graph(d, allow_types: Optional[set] = None) -> set:
     """
     算出「不进图」的节点名集合。
 
@@ -1629,9 +1629,19 @@ def _blocked_for_graph(d) -> set:
       `blocked_names` 本来也只在 measure 里判（其余类型直接跳过），
       结果一模一样，但代价差 25 倍 —— 全量 45409 条要 0.75 秒、
       measure 只有 1249 条、约 0.03 秒。图谱每次拖筛选都会走这里。
+
+    ⚠ `allow_types` = 用户在图例里**显式勾选**的类型，勾了就解除过滤。
+      起因：`measure` 的 confidence 上限恰好等于低置信门槛（0.8），
+      于是「<=0.8」的规则把这一类**100% 剔光**，图例上「措施」恒为 0、
+      复选框还被判成 disabled —— 用户想看也点不开。
+      默认不勾（默认图与报告口径完全不变），
+      但勾了要真的能看见，否则「勾选」就是个假开关。
     """
+    types = _GRAPH_BLOCK_TYPES - {t for t in (allow_types or set())}
+    if not types:
+        return set()
     ents = d.list_entities(type="measure", limit=None)
-    return GA.blocked_names(ents, _GRAPH_BLOCK_TYPES)
+    return GA.blocked_names(ents, types)
 
 
 def _node_types(d) -> Dict[str, str]:
@@ -1752,8 +1762,17 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
                                     date_from, date_to,
                                     "没有选中任何实体类型（至少选一类）")
 
-    # 低置信实体不进图（与 build_graph 的口径一致）
-    blocked = _blocked_for_graph(d)
+    # 低置信实体不进图（与 build_graph 的口径一致）。
+    # ⚠ 用户在图例里**显式勾选**的类型要解除这道过滤 —— 默认全拦（口径不变），
+    #   勾了才放行。measure 是唯一会踩到的类型：它的 confidence 上限恰好
+    #   等于门槛 0.8，默认口径下整类 100% 出局。
+    # ⚠⚠ blocked_all 是**不过滤时**会被挡掉的量，用于给界面**说明**；
+    #   建图用的是 allow 之后的 blocked。
+    #   两者不能混：勾选放行后 blocked 变空，若拿它说明，
+    #   界面上「已放行 210 个措施」这句话就一起消失了 —— 用户只看到
+    #   措施从 0 变成 9，不知道中间发生了什么。
+    blocked_all = _blocked_for_graph(d)
+    blocked = _blocked_for_graph(d, allow_types=want_nt)
     G, types = GA.build_graph(rows, min_weight=min_weight,
                               blocked_nodes=blocked,
                               rel_types=want or None)
@@ -1837,7 +1856,10 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
     r.pop("node_pagerank", None)
     r.pop("graph_fingerprint", None)
     r["graph"] = ne
-    r["blocked_count"] = len(blocked)
+    # 说明用**不过滤**的量（勾选放行后也要说得清「放行了多少」），
+    # 建图用的是 allow 之后的 blocked —— 两者刻意不共用。
+    r["blocked_count"] = len(blocked_all)
+    r["blocked_kept_out"] = len(blocked_all) - len(blocked)
     # ⚠⚠ blocked_count 只给总数是不够的：用户看到「低置信节点 210 个未进图」
     #   之后，**不会自动联想到「措施 210 个」**，于是图例上「措施 0」看起来
     #   像"这一类根本没抽出来"，而库里其实有 1168 个措施实体、489 条 adopt 关系。
@@ -1845,7 +1867,7 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
     #   典型现场：措施只被抽成 confidence<=0.8，而踢出门槛就是「<=0.8」，
     #   于是**整类 100% 出局** —— 图例恒为 0，且没有任何地方说明为什么。
     blocked_by_type: Dict[str, int] = {}
-    for nm in blocked:
+    for nm in blocked_all:
         t = ntypes_map.get(nm) or "其他"
         blocked_by_type[t] = blocked_by_type.get(t, 0) + 1
     r["blocked_by_type"] = blocked_by_type
