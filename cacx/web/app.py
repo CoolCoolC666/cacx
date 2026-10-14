@@ -1346,12 +1346,21 @@ class RelationIn(BaseModel):
 
 
 @app.get("/api/graph")
-def api_graph(limit: int = Query(300, ge=1, le=2000)):
+def api_graph(site: str = "", date_from: str = "", date_to: str = "",
+              limit: int = Query(300, ge=1, le=2000)):
     """
     关系图谱：{nodes, edges}。
     edges 带 article_ids —— 前端「点一条关系回溯原文」直接用它。
+
+    ⚠ site/date_from/date_to 与 /api/graph/analysis 同一套口径：
+      画布筛了，边列表必须同步筛，否则两个数字打架。
+      date_from/date_to 空串不传（SQLite 碰巧对、PostgreSQL 会错），
+      走 db 默认区间（2024-01-01 ~ 2099-12-31）。
     """
-    return _db().graph(limit)
+    kw = {"site": site, "limit": limit}
+    if date_from: kw["date_from"] = date_from
+    if date_to:   kw["date_to"] = date_to
+    return _db().graph(**kw)
 
 
 @app.get("/api/graph/stats")

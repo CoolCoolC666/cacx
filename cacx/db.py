@@ -2257,23 +2257,38 @@ class Database:
             self.conn.commit()
         return {"deleted": n, "tables": targets}
 
-    def graph(self, limit: int = 300) -> Dict[str, Any]:
+    def graph(self, site: str = "", date_from: str = "2024-01-01",
+              date_to: str = "2099-12-31", limit: int = 300) -> Dict[str, Any]:
         """
         关系图谱：节点 + 边。边按「跨多少篇文章」聚合 —— 这就是权重。
 
         ⚠ 刻意把 article_ids 全部带出来：答辩时要能「点一条关系
         回溯原文」，前端拿到的是文章 id 列表，直接跳原文即可。
+
+        ⚠ site / date_from / date_to 筛的是**文章**的站点与发表日期
+          （关系/实体表自己没存站点和日期，得 JOIN articles）。
+          边列表必须与画布（/api/graph/analysis）同一套口径：
+          画布筛了、边列表不筛，两个数字打架。
+          site 空串 = 不筛站点（SQL 里 `? = '' OR a.site = ?` 短路）。
         """
         with self._lock:
             nodes = [dict(r) for r in self.conn.execute(
-                "SELECT type, name, COUNT(*) n FROM entities "
-                "GROUP BY type, name ORDER BY n DESC LIMIT ?", (int(limit),))]
+                "SELECT r.type, r.name, COUNT(*) n "
+                "FROM entities r JOIN articles a ON a.id = r.article_id "
+                "WHERE (? = '' OR a.site = ?) "
+                "AND a.pub_day >= ? AND a.pub_day <= ? "
+                "GROUP BY r.type, r.name ORDER BY n DESC LIMIT ?",
+                (site, site, date_from, date_to, int(limit)))]
             edges = [dict(r) for r in self.conn.execute(
-                "SELECT src_name, dst_name, rel_type, COUNT(*) n, "
-                "GROUP_CONCAT(article_id) article_ids, "
-                "SUM(weight) weight "
-                "FROM relations GROUP BY src_name,dst_name,rel_type "
-                "ORDER BY n DESC LIMIT ?", (int(limit),))]
+                "SELECT r.src_name, r.dst_name, r.rel_type, COUNT(*) n, "
+                "GROUP_CONCAT(r.article_id) article_ids, "
+                "SUM(r.weight) weight "
+                "FROM relations r JOIN articles a ON a.id = r.article_id "
+                "WHERE (? = '' OR a.site = ?) "
+                "AND a.pub_day >= ? AND a.pub_day <= ? "
+                "GROUP BY r.src_name, r.dst_name, r.rel_type "
+                "ORDER BY n DESC LIMIT ?",
+                (site, site, date_from, date_to, int(limit)))]
         for e in edges:
             e["article_ids"] = [int(x) for x in (e.get("article_ids") or "").split(",") if x]
         return {"nodes": nodes, "edges": edges}

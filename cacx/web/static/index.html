@@ -2139,7 +2139,13 @@ async function loadGraph(){
     GP_ANA = an;
     gpRenderScope(an);
     renderMetrics(an);
-    const g = await fetch('/api/graph?limit=500').then(x=>x.json());
+    // T3：边列表复用画布同一套筛选（site/date_from/date_to），与 /api/graph/analysis 同口径 ——
+    //   画布筛了边列表必须同步变窄，否则两个口径打架。
+    //   gpQuery() 还会带 min_degree/max_degree/rel_types/node_types/hl/find/topn 等
+    //   analysis 专用参数；/api/graph 路由只声明 site/date_from/date_to/limit，
+    //   FastAPI 自动忽略未知参数，对边列表无害。gpQuery() 自带 limit=300
+    //   （与 renderEdges 只渲前 300 行一致），这里不再单独拼 limit。
+    const g = await fetch('/api/graph?' + gpQuery()).then(x=>x.json());
     GP_CACHE = g.edges || [];
     renderEdges();
   }catch(e){
