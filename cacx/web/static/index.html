@@ -1840,6 +1840,11 @@ const GP_REL_CN = {issue:'发布', target:'针对', adopt:'采取',
 //   必须存成模块级变量而不是每次读 DOM：loadGraph 会重建图例的 innerHTML，
 //   只看 DOM 的话重绘后勾选状态就没了，表现为"点了一下没反应"。
 let GP_LEGEND_ON = null;
+// 「默认口径」（四类全选 = 措施放行，默认图与报告都用它）那一版的节点·边数。
+// ⚠ 不写死：库会增长、抽取版本会换，写死的「1759/4154」早晚和画布实时数字打架
+//   （本轮就是这么暴露的）。它只在**恰好四类全选**的那次 /api/graph/analysis 响应里
+//   才出现，所以抓到就存下来（见 gpBlockedNote），取消勾选措施后拿它做「默认 vs 当前」对照。
+let GP_DEFAULT_SCOPE = null;
 const GP_SHAPE_CN = {dot:'圆', square:'方块', triangle:'三角', diamond:'菱形'};
 
 // vis-network 懒加载：只有进图谱页/导出时才拉那 469KB。
@@ -1998,6 +2003,18 @@ function gpBlockedNote(a){
   const n = (a||{}).blocked_count || 0;
   if(!n) return '';
   const byType = (a||{}).blocked_by_type || {};
+  // 默认口径（四类全选 = 措施放行）的节点·边数：只在恰好全选的那次响应里出现，
+  // 顺手缓存，供下面「整类出局」分支做「默认 vs 当前」的对照。
+  // ⚠ 判据走响应回显（node_types_active + 四类齐），不依赖渲染顺序或前端勾选态。
+  // ⚠ 必须放在下面 freed>0 的**提前 return 之前**：默认态走的正是那条分支，
+  //   放它后面就等于永远不缓存（本轮实测确认过：缓存恒为 null）。
+  const fca = (a||{}).filters || {};
+  const _nt = fca.node_types || [];
+  if(fca.node_types_active
+     && Object.keys(GP_STYLE).every(k=>_nt.includes(k))
+     && fca.graph_nodes_all!=null && fca.graph_edges_all!=null){
+    GP_DEFAULT_SCOPE = {n: fca.graph_nodes_all, e: fca.graph_edges_all};
+  }
   // ⚠ 这里查的键是**实体类型**（org/policy/problem/measure），
   //   中文名取 GP_STYLE[t].cn —— 曾经误用 GP_REL_CN（那是**关系类型**
   //   issue/target/adopt/joint_issue 的映射），四个键全落空，
@@ -2037,11 +2054,19 @@ function gpBlockedNote(a){
     return s;
   }
   if(gated.length){
+    // ⚠ 这一句里的两个口径数字**不许写死** —— 旧版写死「1759/4154、1633/3921」，
+    //   与画布实时数（1757/4191、1631/3958）打架，且屏幕可见。
+    //   两个数都从响应取：当前口径 = filters.graph_nodes_all / graph_edges_all；
+    //   默认口径 = GP_DEFAULT_SCOPE（上面那次全选响应缓存的）。取不到就只讲规则、不编数字。
+    const curTxt = (fca.graph_nodes_all!=null && fca.graph_edges_all!=null)
+      ? `${fca.graph_nodes_all} 节点 / ${fca.graph_edges_all} 边` : null;
+    const defTxt = GP_DEFAULT_SCOPE
+      ? `${GP_DEFAULT_SCOPE.n} 节点 / ${GP_DEFAULT_SCOPE.e} 边` : null;
     s += `<br><span style="color:var(--warn)">${gated.join('、')}</span>类<b>整类出局</b>：
       规则抽取给这一类的置信度上限恰好等于低置信门槛（≤0.8），
       所以「${gated[0]}」在本图里恒为 0 —— 不是没抽到，是抽到的全被门槛挡住了。
       <b>取消勾选该类即回到不勾的口径</b>（默认是<b>勾上</b>的：默认图与报告都用
-      「措施放行」这套口径，1759 节点 / 4154 边；取消勾选后回到 1633 / 3921）。`;
+      「措施放行」这套口径${defTxt?`，${defTxt}`:''}${curTxt?`；当前为 ${curTxt}`:''}）。`;
     s += `<br>连带后果：<code>adopt</code>（机构采取措施）这类关系在默认图里一条都画不出来。
       上方关系类型筛选器里的条数走的是<b>全库口径</b>、不受本规则影响，
       所以「采取 489」与默认图为空并不矛盾，但**确实会让人以为筛选坏了**。`;
