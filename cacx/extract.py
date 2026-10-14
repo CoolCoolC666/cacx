@@ -540,7 +540,7 @@ def _build_relations(full: str, title: str, orgs, ents, add_rel):
     joint_pairs = _joint_pairs(full, title, org_names)
     for a, b, pos in joint_pairs:
         w = 3.0 if _JOINT_TITLE.search(title) else 2.0
-        add_rel(a, b, "co_issue", pos, w)
+        add_rel(a, b, "joint_issue", pos, w)
 
     def _link(rx, objs, rtype, w, obj_n=5, org_n=3):
         """

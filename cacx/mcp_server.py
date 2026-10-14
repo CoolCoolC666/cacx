@@ -826,7 +826,7 @@ def cacx_put_relations(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     rows 每项：
         src_name:   起点实体名
         dst_name:   终点实体名
-        rel_type:   co_issue（联合发文）/ regulate（监管）/ cite（引用）
+        rel_type:   joint_issue（联合发文）/ regulate（监管）/ cite（引用）
                     / belong（隶属）/ implement（落实）……
         article_id: **出处文章 id** —— 必填
         evidence:   支撑这句话的原文片段

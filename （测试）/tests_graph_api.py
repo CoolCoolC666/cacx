@@ -197,7 +197,7 @@ class TestGraphEndpoints(BaseGraph):
     def test_边证据正反向都能查到(self):
         rows = self.conn.execute(
             "SELECT src_name,dst_name,rel_type FROM relations "
-            "WHERE rel_type='co_issue' LIMIT 1").fetchone()
+            "WHERE rel_type='joint_issue' LIMIT 1").fetchone()
         if not rows:
             self.skipTest("本次抽取没出联合发文边")
         s, d, t = rows

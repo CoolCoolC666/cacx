@@ -403,7 +403,7 @@ def run(args):
         book.mark("备选一证据", n1 > 0, f"{n1} 条")
         say(f"    备选① 证据 {n1} 条")
 
-        call1 = ("showEdgeEvidence('中央网信办','农业农村部','co_issue')")
+        call1 = ("showEdgeEvidence('中央网信办','农业农村部','joint_issue')")
         pg.evaluate(call1)
         pg.wait_for_function(
             """() => /条原文证据/.test(
@@ -461,7 +461,7 @@ def run(args):
                 timeout=25000)
         except Exception:
             call2b = ("showEdgeEvidence('中央网信办',"
-                      "'工业和信息化部','co_issue')")
+                      "'工业和信息化部','joint_issue')")
             pg.evaluate(call2b)
             pg.wait_for_function(
                 """() => /条原文证据/.test(

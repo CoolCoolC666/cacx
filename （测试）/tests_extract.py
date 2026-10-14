@@ -128,7 +128,7 @@ class TestEvidence(unittest.TestCase):
         self.assertEqual(extract.sentence_at(txt, nl), "第一句话。")
 
     def test_所有关系的证据句都含主体名(self):
-        """端到端：断言**每一条** co_issue 的证据里都出现两个机构名。
+        """端到端：断言**每一条** joint_issue 的证据里都出现两个机构名。
 
         这条比单点测边界更有价值 —— 它直接钉住「点边看证据」这个
         老师点名要求的功能，而且是全量断言，不是抽样。
@@ -142,13 +142,13 @@ class TestEvidence(unittest.TestCase):
         a = art(title=title, content_text=body)
         self.assertGreater(len(body), extract.MIN_CHARS)
         r = extract.extract_article(a)
-        co = [x for x in r["relations"] if x["rel_type"] == "co_issue"]
-        self.assertTrue(co, f"真语料里应该抽得出 co_issue，实际 {len(co)} 条")
+        co = [x for x in r["relations"] if x["rel_type"] == "joint_issue"]
+        self.assertTrue(co, f"真语料里应该抽得出 joint_issue，实际 {len(co)} 条")
         bad = [(x["src_name"], x["dst_name"], x["evidence"][:40])
                for x in co
                if x["src_name"] not in x["evidence"]
                or x["dst_name"] not in x["evidence"]]
-        self.assertEqual(bad, [], f"证据句缺主体的 co_issue：{bad}")
+        self.assertEqual(bad, [], f"证据句缺主体的 joint_issue：{bad}")
 
     def test_边界修复对真语料生效(self):
         """同一篇真语料：正文首句起点处的关系，证据必须是正文句不是标题。"""
@@ -247,7 +247,7 @@ class TestRelations(unittest.TestCase):
         """8 个机构全文互连会产出 56 条噪声边；正确做法是
         只在含联合触发词的那一句里配对。"""
         r = extract.extract_article(art(content_text=LONG_BODY))
-        joint = [x for x in r["relations"] if x["rel_type"] == "co_issue"]
+        joint = [x for x in r["relations"] if x["rel_type"] == "joint_issue"]
         self.assertTrue(joint)
         n_org = len({x["src_name"] for x in joint} |
                     {x["dst_name"] for x in joint})
@@ -258,7 +258,7 @@ class TestRelations(unittest.TestCase):
     def test_四类关系都出现(self):
         r = extract.extract_article(art(content_text=LONG_BODY))
         got = {x["rel_type"] for x in r["relations"]}
-        self.assertIn("co_issue", got)
+        self.assertIn("joint_issue", got)
         self.assertIn("target", got)
 
     def test_关系都带证据与文章id(self):
@@ -270,9 +270,9 @@ class TestRelations(unittest.TestCase):
 
 class TestGraphAnalysis(unittest.TestCase):
     RELS = [
-        {"src_name": "中央网信办", "dst_name": "公安部", "rel_type": "co_issue", "weight": 5},
-        {"src_name": "中央网信办", "dst_name": "市场监管总局", "rel_type": "co_issue", "weight": 3},
-        {"src_name": "公安部", "dst_name": "市场监管总局", "rel_type": "co_issue", "weight": 2},
+        {"src_name": "中央网信办", "dst_name": "公安部", "rel_type": "joint_issue", "weight": 5},
+        {"src_name": "中央网信办", "dst_name": "市场监管总局", "rel_type": "joint_issue", "weight": 3},
+        {"src_name": "公安部", "dst_name": "市场监管总局", "rel_type": "joint_issue", "weight": 2},
         {"src_name": "中央网信办", "dst_name": "网络谣言", "rel_type": "target", "weight": 4},
         {"src_name": "公安部", "dst_name": "网络谣言", "rel_type": "target", "weight": 2},
         {"src_name": "市场监管总局", "dst_name": "网络谣言", "rel_type": "target", "weight": 1},
@@ -313,7 +313,7 @@ class TestGraphAnalysis(unittest.TestCase):
         G, t = GA.build_graph(self.RELS)
         r = GA.analyze(G, t)
         by = {x["rel_type"]: x for x in r["by_type"]}
-        self.assertIn("co_issue", by)
+        self.assertIn("joint_issue", by)
         self.assertIn("target", by)
         self.assertAlmostEqual(sum(x["pct"] for x in r["by_type"]), 100.0,
                                places=0)

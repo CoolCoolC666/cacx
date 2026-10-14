@@ -40,8 +40,8 @@ def rel(src, dst, rt, w=1.0):
 # 真实库里的形态：关系全是 org → X 单向，X 与 X 之间没有边。
 # 机构 A/B 联合发文；A 发布政策；A 针对治理问题；A 采取措施。
 SAMPLE = [
-    rel("甲部门", "乙部门", "co_issue", 3.0),
-    rel("甲部门", "丙部门", "co_issue", 2.0),
+    rel("甲部门", "乙部门", "joint_issue", 3.0),
+    rel("甲部门", "丙部门", "joint_issue", 2.0),
     rel("甲部门", "某条例", "issue", 5.0),
     rel("乙部门", "某办法", "issue", 4.0),
     rel("甲部门", "网络诈骗", "target", 2.0),

@@ -74,7 +74,7 @@ check("证据 24 条", len(i1) == 24, f"实测 {len(i1)}")
 check("全部两端点名都在句里",
       all(A in (x.get("evidence") or "") and B in (x.get("evidence") or "")
           for x in i1))
-check("全部是 co_issue", all(x.get("rel_type") == "co_issue" for x in i1))
+check("全部是 joint_issue", all(x.get("rel_type") == "joint_issue" for x in i1))
 S1 = ("中央网信办、农业农村部、工业和信息化部联合印发"
       "《数字乡村高质量发展行动计划（2026—2030年）》")
 h1 = [x for x in i1 if norm(x.get("evidence")) == S1]
@@ -96,7 +96,7 @@ print("\n③ 备选② 国家网信办 ↔ 网络数据安全风险评估办法"
 C, D = "国家网信办", "网络数据安全风险评估办法"
 i2 = get(f"/api/graph/evidence?src={Q(C)}&dst={Q(D)}&limit=50")["items"]
 check("证据 3 条", len(i2) == 3, f"实测 {len(i2)}")
-check("全部是 issue（与①的 co_issue 不同类，演示才能讲出两种口径）",
+check("全部是 issue（与①的 joint_issue 不同类，演示才能讲出两种口径）",
       all(x.get("rel_type") == "issue" for x in i2),
       f"实测 {sorted({x.get('rel_type') for x in i2})}")
 check("全部两端点名都在句里",

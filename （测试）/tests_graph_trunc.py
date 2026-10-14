@@ -99,11 +99,11 @@ class Test截断确定性(unittest.TestCase):
         out = to_pyvis_nodes_edges({}, G, min_degree=1, limit=10,
                                    types={("机构甲", "问题乙"): {"target"},
                                           ("机构丙", "问题乙"): {"target"},
-                                          ("机构甲", "机构丙"): {"co_issue"}})
+                                          ("机构甲", "机构丙"): {"joint_issue"}})
         got = {(e["from"], e["to"]): e["types"] for e in out["edges"]}
         self.assertEqual(got[("机构甲", "问题乙")], ["target"])
         self.assertEqual(got[("机构丙", "问题乙")], ["target"])
-        self.assertEqual(got[("机构甲", "机构丙")], ["co_issue"])
+        self.assertEqual(got[("机构甲", "机构丙")], ["joint_issue"])
 
     def test_并行加入时也要一致(self):
         """现实里同一批关系是 SELECT 出来的，行序由查询计划决定；

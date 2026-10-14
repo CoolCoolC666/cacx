@@ -46,9 +46,9 @@ def build_graph(relations: Iterable[Dict[str, Any]],
 
     ⚠ rel_types：只保留指定的关系类型。**在建图阶段就滤掉**，而不是
       建完图再挑边 —— 因为边的权重是共现强度，一对节点可能同时有
-      co_issue 与 issue 两种关系，混进图里的权重是两条之和。
+      joint_issue 与 issue 两种关系，混进图里的权重是两条之和。
       先筛后建才能让「只看 issue」时权重也是 issue 的强度。
-      这一维以前界面上明明**显示着**各类型占比（co_issue 71%）却**筛不了**。
+      这一维以前界面上明明**显示着**各类型占比（joint_issue 71%）却**筛不了**。
     """
     nx = _nx()
     G = nx.Graph() if undirected else nx.DiGraph()

@@ -1700,7 +1700,7 @@ async function runExtract(write){
       `<div style="color:var(--err);font-size:12.5px">✗ ${esc(r.error)}</div>`; return; }
     const t = r.types||{}, rt = r.rel_types||{};
     const TN = {org:'机构',policy:'政策',problem:'治理问题',measure:'措施'};
-    const RN = {issue:'发布',target:'针对',adopt:'采取',co_issue:'联合发文'};
+    const RN = GP_REL_CN;   // 中文名统一取 GP_REL_CN，别再在这里抄一份
     const sum = (obj,map)=>Object.keys(obj).map(k=>
       `<span>${esc(map[k]||k)} <b style="color:var(--acc2)">${obj[k]}</b></span>`).join('　');
     box.innerHTML = `
@@ -1744,6 +1744,11 @@ const GP_STYLE = {
 // 检索高亮色。与后端 _GRAPH_HIT_COLOR、CSS 变量 --hl 三处必须同值 ——
 // 导出件、屏幕、图例是同一个功能的三张脸，颜色不一样就会被当成三个功能。
 const GP_HIT_COLOR = '#ffd479';
+// 四类关系的中文名。**唯一来源** —— 指标面板、边列表、类型筛选器都从这里取。
+// ⚠ 以前指标面板和边列表各写了一份字面量，改名/改词必然漏一处；
+//   而漏掉的那处会**静默**退回显示英文原名，不报任何错。
+const GP_REL_CN = {issue:'发布', target:'针对', adopt:'采取',
+                   joint_issue:'联合发文'};
 // 图例勾选了哪几类（实体类型筛选器）。⚠ 默认全选，与后端"空 = 不筛"一致。
 //   必须存成模块级变量而不是每次读 DOM：loadGraph 会重建图例的 innerHTML，
 //   只看 DOM 的话重绘后勾选状态就没了，表现为"点了一下没反应"。
@@ -1883,11 +1888,15 @@ async function gpLoadFacets(){
   }catch(e){ GP_FACETS = null; return null; }
   const box = $('gp_types');
   if(box){
+    // 显示中文，value 仍传 rel_type 原值。
+    // ⚠ 别直接显示 `t.key`：界面上摆一串 joint_issue / issue / target / adopt，
+    //   读的人（老师、组员）根本不知道它们分别指什么；而这三个字的中文
+    //   标签在下方 GP_REL_CN 里本来就有，只是这个筛选器从前没用上。
     box.innerHTML = (GP_FACETS.rel_types||[]).map(t=>
       `<label class="inline" style="font-size:12px;cursor:pointer"
-        title="全图共 ${t.n} 条该类型关系">
+        title="全图共 ${t.n} 条该类型关系（内部名 ${esc(t.key)}）">
         <input type="checkbox" value="${esc(t.key)}" checked>
-        <span>${esc(t.key)} <span style="color:var(--dim)">${t.n}</span></span>
+        <span>${esc(GP_REL_CN[t.key]||t.key)} <span style="color:var(--dim)">${t.n}</span></span>
       </label>`).join('');
   }
   const dl = $('gp_focus_opts');
@@ -2309,7 +2318,7 @@ function renderEdges(){
     $('gp_cnt2').textContent = '';
     return;
   }
-  const label = {issue:'发布', target:'针对', adopt:'采取', co_issue:'联合发文'};
+  const label = GP_REL_CN;
   $('gp_cnt2').textContent = `（${GP_CACHE.length} 条）`;
   $('gp_edges').innerHTML = GP_CACHE.slice(0,300).map((e,i)=>{
     const nid = (e.article_ids||[]).length;
