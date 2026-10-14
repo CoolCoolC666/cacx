@@ -4099,6 +4099,25 @@ async function loadTrend(){
   drawBars($('bar_year'), y.items);
 }
 
+/* 面板当前的时间口径 → 查询串。pn_from/pn_to 优先；**两个都留空**才把
+   「近 N 个月」换算成 date_from —— 与 loadPanel 的拼接规则逐字相同
+   （monthsToFrom 定义在下方，函数声明会提升，这里直接可调）。
+   ⚠ 导出不带上它，屏幕上按「近 36 个月」筛、导出的还是全量数字，
+     「屏幕=导出」这条铁律就断了。 */
+function panelDateQs(qs){
+  const df = $('pn_from')?.value || '';
+  const dt = $('pn_to')?.value || '';
+  const mN = Math.max(6, Math.min(120, parseInt($('pn_months')?.value||'36',10)||36));
+  if(df || dt){
+    if(df) qs.set('date_from', df);
+    if(dt) qs.set('date_to', dt);
+  }else{
+    // 月份模式：date_to 不传，走后端默认 2099-12-31
+    qs.set('date_from', monthsToFrom(mN));
+  }
+  return qs;
+}
+
 /* 下载面板图表的原始数据（CSV）。
    走 /api/panel/export 而不是前端拼 —— 界面看到的数字与导出的数字
    必须来自同一次查询，否则「改了筛选忘了同步」这种错最难发现。 */
@@ -4109,6 +4128,9 @@ function dlPanel(which, granularity){
   if(site) qs.set('site',site);
   if(granularity) qs.set('granularity',granularity);
   if(which==='trend'&&granularity==='month') qs.set('limit',String(months));
+  // 时间口径跟着屏幕走。只有后端真的按日期筛的四张图才带 ——
+  // trend / events 两个分支不吃 date_from，硬拼上去是假口径，比不拼更坏。
+  if(['columns','problems','orgs','joint'].indexOf(which)>=0) panelDateQs(qs);
   const a=document.createElement('a');
   a.href='/api/panel/export?'+qs.toString();
   a.download='';
@@ -4124,6 +4146,9 @@ function dlSnapshot(){
   const months=Math.max(6, Math.min(120, parseInt($('pn_months')?.value||'36',10)||36));
   const qs=new URLSearchParams({months:String(months), days:'30', top:'12'});
   if(site) qs.set('site',site);
+  // 快照里的栏目榜/治理问题/高频机构/联合发文在屏幕上是按日期筛的，
+  // 导出必须同一段区间 —— 否则「屏幕=导出」只剩标题相同。
+  panelDateQs(qs);
   const a=document.createElement('a');
   a.href='/api/panel/snapshot?'+qs.toString();
   a.download='';
