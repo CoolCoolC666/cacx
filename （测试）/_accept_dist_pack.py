@@ -214,27 +214,32 @@ chk("服务起来了", health is not None,
 if health:
     chk("health.ok 且 articles=28900",
         health.get("ok") is True and health.get("articles") == 28900, str(health)[:120])
-    with urllib.request.urlopen(f"{BASE}/api/graph/analysis?min_degree=2",
+    # ⚠ 必须带 node_types（全勾），与前端 gpDefaultTypes() 同口径。
+    #   不带就是「不放行」，拿到组员在页面上看不到的 1633/3921。
+    with urllib.request.urlopen(f"{BASE}/api/graph/analysis?min_degree=2"
+                                f"&node_types=org,policy,problem,measure",
                                 timeout=60) as r:
         an = json.loads(r.read().decode("utf-8"))
-    chk("图谱口径 1633/3921/115",
-        (an["nodes"], an["edges"], an["components"]) == (1633, 3921, 115),
+    chk("图谱口径 1759/4154/126",
+        (an["nodes"], an["edges"], an["components"]) == (1759, 4154, 126),
         f"{an['nodes']}/{an['edges']}/{an['components']}")
-    # ⚠ 1410 不是「某个时刻碰巧画出来的数」，是**修好截断确定性之后**的稳定值。
+    # ⚠ 1449 不是「某个时刻碰巧画出来的数」，是**修好截断确定性之后**的稳定值。
     #   原先这里写的是 1407 —— 那是 core.sort 只按度数排序时的产物，
     #   度数并列节点谁入选取决于 SQL 行序，同一张图能画出 1407/1416 等多个值。
-    #   真实库实测（min_degree=1/limit=300、含低置信屏蔽、8419 条关系）：
-    #   原序/倒序/4 个随机种子共 6 种行序，现在恒为 1410。
+    #   真实库实测（min_degree=1/limit=300、8419 条关系）：
+    #   原序/倒序/4 个随机种子共 6 种行序，恒为同一个值。
+    #   2026-10-14 起口径变了：措施类**默认勾选放行**（原先被低置信门槛整类挡在图外），
+    #   子图 1633→1759、边 3921→4154、画布 1410→1449。
     #   改动这个数之前，先跑那条稳定性验证，别直接抄服务当前返回值 ——
     #   那正是当年把 1407 写进来的方式。
     g = an.get("graph") or {}
-    chk("画布默认 300/1410",
-        (len(g.get("nodes") or []), len(g.get("edges") or [])) == (300, 1410),
+    chk("画布默认 300/1449",
+        (len(g.get("nodes") or []), len(g.get("edges") or [])) == (300, 1449),
         f"{len(g.get('nodes') or [])}/{len(g.get('edges') or [])}")
     # README.txt 承诺的数必须与**服务真值**一致，这是"组员照着念不会被打脸"的唯一保证
     rt = (stage / "【组员请先看】README.txt").read_text(encoding="utf-8")
-    for want in ("4416", "4415", "8419", "16561", "1633", "3921",
-                 "300", "1410", "244", "1015", "0.194", "0.1173", "26 个工具"):
+    for want in ("4416", "4415", "8419", "16561", "1759", "4154",
+                 "300", "1449", "286", "1116", "0.2104", "0.1175", "26 个工具"):
         chk(f"README.txt 含 {want}", want in rt)
     for stale in ("4519", "4517", "8801", "28999"):
         chk(f"README.txt 无过期 {stale}", stale not in rt)

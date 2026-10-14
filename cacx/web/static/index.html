@@ -1760,13 +1760,14 @@ let GP_DS_NODES = null;   // 当前 vis DataSet —— 点击聚焦时**本地�
 let GP_DS_EDGES = null;
 let GP_BLOCKED_BY_TYPE = {};   // 各实体类型被「低置信门槛」挡掉多少（后端下发）
 
-// 默认勾选哪些实体类型：**排除被低置信门槛挡着的那几类**。
-// ⚠ measure 必须默认不勾 —— 默认图口径（1633 节点 / 300 节点画布 / 1410 边）
-//   与报告里引的数字都是「措施被挡在图外」这套口径算出来的，
-//   一旦默认勾上，默认基线就变了、报告也得跟着改。
-//   但它**必须可勾**：勾了后端才解除过滤（allow_types），否则「勾选」是假开关。
+// 默认勾选哪些实体类型。
+// ⚠ 2026-10-14 起是**全勾**（含 measure）：用户拍板「默认可以勾选」。
+//   之前是「排除被门槛挡的类」，因为默认口径与报告都按「措施被挡」算；
+//   如今报告、README、各闸的数字都已同步到新口径（1759/4154、介数 0.2104…），
+//   默认图就该把措施放进来 —— 默认口径与报告口径必须是**同一套**。
+//   门槛过滤依然在（用户取消勾选措施即回到 1633/3921 那套），只是不再默认生效。
 function gpDefaultTypes(){
-  return Object.keys(GP_STYLE).filter(k=>(GP_BLOCKED_BY_TYPE[k]||0) === 0);
+  return Object.keys(GP_STYLE);
 }
 
 // 四类实体：颜色 + 形状双编码。
@@ -1785,11 +1786,8 @@ const GP_HIT_COLOR = '#ffd479';
 //   而漏掉的那处会**静默**退回显示英文原名，不报任何错。
 const GP_REL_CN = {issue:'发布', target:'针对', adopt:'采取',
                    joint_issue:'联合发文'};
-// 图例勾选了哪几类（实体类型筛选器）。⚠ 初始是 **null**，不是全选也不是默认集：
-//   「哪些类被低置信门槛挡着」要等后端第一次响应才知道（GP_BLOCKED_BY_TYPE），
-//   在那之前瞎猜会把 measure 勾上、默认基线当场就变了。
-//   null 的含义 = 「还没初始化」：此时 gpQuery 不传 node_types（空=不筛），
-//   正好落在后端默认口径上；首次 renderLegend 再按 blocked 定下默认勾选。
+// 图例勾选了哪几类（实体类型筛选器）。⚠ 初始 null = 「还没从 DOM 读到」；
+//   首次 renderLegend 会按 gpDefaultTypes()（当前=全勾）铺好。
 //   必须存成模块级变量而不是每次读 DOM：loadGraph 会重建图例的 innerHTML，
 //   只看 DOM 的话重绘后勾选状态就没了，表现为"点了一下没反应"。
 let GP_LEGEND_ON = null;
@@ -1876,8 +1874,13 @@ function gpQuery(){
   //   于是用户**勾上措施** → 四类全勾 → 这里判定为「不需要传」→ 后端看到空
   //   → 措施照旧被门槛挡 → 图上一个措施节点都不出现，勾选成了假开关。
   //   判据：只要勾到了「被门槛挡过」的类，就一定要传。
+  // ⚠ 首屏那次请求更特殊：GP_BLOCKED_BY_TYPE 还没拿到（空对象），
+  //   算不出 needsGatedType，于是首次会走「全勾=不传」→ 后端按旧口径拦措施
+  //   → 首屏图与后续不一致。所以**没初始化时一律要传**：
+  //   宁可多发一次筛选参数，也不能让首屏口径漂。
+  const notInit = Object.keys(GP_BLOCKED_BY_TYPE).length === 0;
   const needsGatedType = lgOn.some(t => (GP_BLOCKED_BY_TYPE[t]||0) > 0);
-  if(lgOn.length && (lgOn.length < lgAll.length || needsGatedType))
+  if(lgOn.length && (lgOn.length < lgAll.length || needsGatedType || notInit))
     q.set('node_types', lgOn.join(','));
   // 点击聚焦（hl）：与 find 独立，**必须一起带进导出请求** ——
   // 「屏幕 = 导出」：导出的 HTML 也要能看到点击聚焦态。
