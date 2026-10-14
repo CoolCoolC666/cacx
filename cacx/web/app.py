@@ -1838,6 +1838,17 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
     r.pop("graph_fingerprint", None)
     r["graph"] = ne
     r["blocked_count"] = len(blocked)
+    # ⚠⚠ blocked_count 只给总数是不够的：用户看到「低置信节点 210 个未进图」
+    #   之后，**不会自动联想到「措施 210 个」**，于是图例上「措施 0」看起来
+    #   像"这一类根本没抽出来"，而库里其实有 1168 个措施实体、489 条 adopt 关系。
+    #   假口径比缺口径更伤：它让读者去找一个不存在的原因。
+    #   典型现场：措施只被抽成 confidence<=0.8，而踢出门槛就是「<=0.8」，
+    #   于是**整类 100% 出局** —— 图例恒为 0，且没有任何地方说明为什么。
+    blocked_by_type: Dict[str, int] = {}
+    for nm in blocked:
+        t = ntypes_map.get(nm) or "其他"
+        blocked_by_type[t] = blocked_by_type.get(t, 0) + 1
+    r["blocked_by_type"] = blocked_by_type
     # ---- 口径回显：界面必须能说清「这些数字是在什么范围里算的」----
     #  ⚠ 不回显的话，用户会把聚焦子图里的介数和全图介数直接比大小，
     #    那是两个不同口径的数字，没有可比性。
