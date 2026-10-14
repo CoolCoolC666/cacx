@@ -616,7 +616,7 @@
     <h3 style="font-size:13px;margin:16px 0 8px;color:var(--dim)">
       时间轴 —— 发文量与主题随时间的变化
       <span style="font-weight:400;font-size:11.5px">
-        （对应作业要求的「时间轴」；共用上方站点与月份筛选）</span>
+        （对应作业要求的「时间轴」；本图只受下方日期范围控制，不跟随面板顶部的月份数）</span>
     </h3>
     <div class="box" style="margin-bottom:12px">
       <div class="row" style="gap:12px;align-items:center">
@@ -653,7 +653,7 @@
           onclick="tlClearRange()"
           title="清空日期范围，恢复全部时间">恢复全部</button>
         <span style="font-size:11.5px;color:var(--dim)">
-          与「近 N 个月」叠加：日期范围选区间，近 N 个月取区间尾部的 N 个月</span>
+          本图只受这里的日期范围控制，不跟随面板顶部的「近 N 个月」；两个都留空 = 自 2024-01 起全区间</span>
       </div>
       <div id="tl_note" class="dim"
            style="font-size:11.5px;margin-top:6px;line-height:1.7"></div>
@@ -4166,12 +4166,12 @@ async function loadTimeline(){
   const box = $('tl_vol');
   if(!box) return;                    // 面板未渲染，别往下走
   const site=$('pn_site')?.value||'';
-  const months=Math.max(6, Math.min(120, parseInt($('pn_months')?.value||'36',10)||36));
   const mode=tlMode();
-  // ⚠ 只截**尾部** N 个月，且**由服务端截**（months 参数）。
-  //   前端自己 slice 的话，同一份数据会被切两次，网页与导出口径就对不上 ——
-  //   这正是「屏幕 = 导出」最容易漏的一处。
-  const q=new URLSearchParams({include_ai:'true', top:'6', months:String(months)});
+  // T2（方案 A）：时间轴独立，只受本卡片内 tl_from/tl_to 控制，**不再透传顶部「近 N 个月」**。
+  //   故这里不发 months —— 服务端 months_n 默认 0 = 不做尾部截断，区间由 date_from/date_to
+  //   （留空则用服务端 _PANEL_D0=2024-01-01 起的全区间）决定。
+  //   服务端 months 参数本身保留（快照/CSV 导出走 _timeline_impl 仍在用），只是不再由顶部控件驱动。
+  const q=new URLSearchParams({include_ai:'true', top:'6'});
   if(site) q.set('site', site);
   // 日期范围：**两个 id 必须叫 tl_from/tl_to** —— date_from/date_to
   // 已被关系图谱页占用（同文档 id 重复会让 $() 取错元素）。
