@@ -5,9 +5,9 @@
 而踢出规则是 `<= 0.8`，于是这一类在默认口径下**100% 出局** ——
 图例恒为 0、复选框还被判成 disabled，用户想看也点不开。
 
-本文件钉住用户拍板的语义：
-  **默认不勾**（默认图口径与报告都建立在「措施被挡」这套口径上）
-  **勾了放行**（不能是假开关）
+本文件钉住用户拍板的语义（2026-10-14 二次拍板，改为**默认勾选**）：
+  **默认勾上**（默认图含措施与 adopt 边；报告/README/演示脚本已同步该口径）
+  **仍可取消**（取消即回到旧口径 1633/3921，门槛过滤依然有效）
 """
 import importlib
 import sys
@@ -23,35 +23,81 @@ HTML = (Path(__file__).resolve().parent.parent
 
 
 class TestMeasureGatedDefault(unittest.TestCase):
-    """默认口径：措施被挡，图例为 0。**这些数字是报告引的，不能变**。"""
+    """默认口径：措施**默认勾选放行**（用户 2026-10-14 拍板）。
 
-    def test_默认不传node_types时措施被挡(self):
+    ⚠ 默认口径 2026-10-14 变了：原先是「措施被低置信门槛整类挡在图外」
+      （1633/3921/115、画布 300/1410、中央网信办度 243、全图介数 0.194、
+      一跳邻域 244/1015 介数 0.8282）。报告、README、演示脚本、各闸
+      已全部同步到新口径。下面这些数字就是报告引的那些，改一个得全改。
+    门槛过滤依然在：取消勾选措施即回到旧口径（见 TestGatedStillReachable）。
+    """
+
+    ALL = "org,policy,problem,measure"
+
+    def test_默认口径数字(self):
+        d = A._graph_payload(min_degree=2, limit=300, min_weight=1.0,
+                             topn=12, max_degree=0, rel_types="",
+                             keyword="", focus="", hop=1,
+                             node_types=self.ALL)
+        self.assertEqual(d["graph"]["scope_nodes"], 1759)
+        self.assertEqual(d["graph"]["scope_edges"], 4154)
+        self.assertEqual(d.get("components"), 126)
+        self.assertEqual(len(d["graph"]["nodes"]), 300)
+        self.assertEqual(len(d["graph"]["edges"]), 1449)
+
+    def test_默认图里措施可见且adopt边在(self):
+        d = A._graph_payload(min_degree=2, limit=300, min_weight=1.0,
+                             topn=12, max_degree=0, rel_types="",
+                             keyword="", focus="", hop=1,
+                             node_types=self.ALL)
+        avail = {x["group"]: x["n"] for x in d["graph"]["avail_by_group"]}
+        self.assertGreater(avail["measure"], 0)
+        n = sum(1 for e in d["graph"]["edges"]
+                if "adopt" in (e.get("types") or []))
+        self.assertGreater(n, 0, "默认就该看得到 adopt 边")
+
+    def test_报告里的机构度数与介数(self):
+        d = A._graph_payload(min_degree=2, limit=300, min_weight=1.0,
+                             topn=12, max_degree=0, rel_types="",
+                             keyword="", focus="", hop=1,
+                             node_types=self.ALL)
+        deg = {r["name"]: r["degree"] for r in (d.get("degree") or [])}
+        self.assertEqual(deg.get("中央网信办"), 285)
+        self.assertEqual(deg.get("工业和信息化部"), 141)
+        bt = [(r["name"], r["betweenness"]) for r in (d.get("betweenness") or [])]
+        self.assertAlmostEqual(bt[0][1], 0.2104, places=3)
+        self.assertAlmostEqual(bt[1][1], 0.1175, places=3)
+
+    def test_默认放行数等于门槛挡住的量(self):
+        d = A._graph_payload(min_degree=2, limit=300, min_weight=1.0,
+                             topn=12, max_degree=0, rel_types="",
+                             keyword="", focus="", hop=1,
+                             node_types=self.ALL)
+        self.assertEqual(d["blocked_kept_out"], d["blocked_count"])
+        self.assertGreater(d["blocked_kept_out"], 0)
+
+
+class TestGatedStillReachable(unittest.TestCase):
+    """取消勾选措施 = 回到旧口径（门槛仍然生效，只是不默认生效）。"""
+
+    def test_取消勾选措施回到旧口径(self):
+        d = A._graph_payload(min_degree=2, limit=300, min_weight=1.0,
+                             topn=12, max_degree=0, rel_types="",
+                             keyword="", focus="", hop=1,
+                             node_types="org,policy,problem")
+        avail = {x["group"]: x["n"] for x in d["graph"]["avail_by_group"]}
+        self.assertEqual(avail["measure"], 0)
+        self.assertEqual(d["blocked_kept_out"], 0)
+        self.assertEqual(d["graph"]["scope_nodes"], 1633)
+        self.assertEqual(d["graph"]["scope_edges"], 3921)
+
+    def test_不传node_types也回到旧口径(self):
+        """「没勾任何特殊类」= 门槛生效。后端按「空=不筛」读。"""
         d = A._graph_payload(min_degree=2, limit=300, min_weight=1.0,
                              topn=12, max_degree=0, rel_types="",
                              keyword="", focus="", hop=1)
         avail = {x["group"]: x["n"] for x in d["graph"]["avail_by_group"]}
-        self.assertEqual(avail["measure"], 0,
-                         "默认口径下措施必须为 0 —— 报告与基线都按这个口径")
-        self.assertGreater(d["blocked_count"], 0)
-        self.assertEqual(d["blocked_kept_out"], 0,
-                         "默认时不该有放行")
-        self.assertEqual(d["graph"]["scope_nodes"], 1633)
-        self.assertEqual(d["graph"]["scope_edges"], 3921)
-
-    def test_默认画布基线不变(self):
-        d = A._graph_payload(min_degree=2, limit=300, min_weight=1.0,
-                             topn=12, max_degree=0, rel_types="",
-                             keyword="", focus="", hop=1)
-        self.assertEqual(len(d["graph"]["nodes"]), 300)
-        self.assertEqual(len(d["graph"]["edges"]), 1410)
-
-    def test_blocked按类型报出(self):
-        """只给总数答不了用户的问题 —— 必须点名是措施被挡。"""
-        d = A._graph_payload(min_degree=2, limit=300, min_weight=1.0,
-                             topn=12, max_degree=0, rel_types="",
-                             keyword="", focus="", hop=1)
-        self.assertIn("measure", d["blocked_by_type"])
-        self.assertGreater(d["blocked_by_type"]["measure"], 0)
+        self.assertEqual(avail["measure"], 0)
 
 
 class TestMeasureGatedOptIn(unittest.TestCase):
@@ -134,9 +180,13 @@ class TestFrontendOptIn(unittest.TestCase):
 
     def test_全勾时也必须传node_types(self):
         """⚠ 这是踩过的坑：全勾时旧逻辑不传 node_types，
-        后端把空读成「什么都没勾」→ 措施照旧被挡 → 勾选成了假开关。"""
+        后端把空读成「什么都没勾」→ 措施照旧被挡 → 勾选成了假开关。
+        默认改为全勾之后，这个条件更关键 —— 少了它首屏就会是旧口径。"""
         self.assertIn("needsGatedType", HTML)
-        self.assertIn("(lgOn.length < lgAll.length || needsGatedType)", HTML)
+        self.assertIn("(lgOn.length < lgAll.length || needsGatedType || notInit)",
+                      HTML)
+        self.assertIn("const notInit = Object.keys(GP_BLOCKED_BY_TYPE).length === 0;",
+                      HTML)
 
     def test_说明不得给无效操作(self):
         """实测调小最小度数并不会让措施变多（画布 300 上限截断）——
