@@ -183,10 +183,51 @@ class TestFrontendOptIn(unittest.TestCase):
         后端把空读成「什么都没勾」→ 措施照旧被挡 → 勾选成了假开关。
         默认改为全勾之后，这个条件更关键 —— 少了它首屏就会是旧口径。"""
         self.assertIn("needsGatedType", HTML)
-        self.assertIn("(lgOn.length < lgAll.length || needsGatedType || notInit)",
+        self.assertIn("(lgSend.length < lgAll.length || needsGatedType || notInit)",
                       HTML)
-        self.assertIn("const notInit = Object.keys(GP_BLOCKED_BY_TYPE).length === 0;",
+
+    def test_首屏图例未渲染时也要兜底(self):
+        """⚠ 2026-10-14 实测踩的第二个坑：首屏那次请求里
+        **图例一个 checkbox 都还没渲染**（loadGraph 先跑、renderLegend 在它之后），
+        于是 lgOn.length === 0，`if(lgSend.length && ...)` 整个短路 ——
+        上一版加的 notInit 挂在第二个条件上，根本没机会被读到，
+        首屏照样按旧口径建图（实测 1633/3921）。
+
+        闸门是 lgSend，所以必须**先按默认类型兜底**，再谈传不传。"""
+        self.assertIn("const legendNotReady = lgAll.length === 0;", HTML)
+        self.assertIn("const lgSend = legendNotReady ? gpDefaultTypes() : lgOn;", HTML)
+        self.assertIn("|| legendNotReady", HTML)
+
+    def test_图例未渲染与用户全取消必须分开(self):
+        """两者在 lgOn 上都是空的，但不分开的话用户「四类全取消」
+        会被兜底成全勾 —— 那就是个假开关（用户取消勾选，图却没变）。"""
+        self.assertIn("const notInit = Object.keys(GP_BLOCKED_BY_TYPE).length === 0 || legendNotReady;",
                       HTML)
+
+    def test_实体类型变量不得叫types(self):
+        """⚠ 上面「关系类型」那节已经 const 过一次 types，
+        同名再声明一次是 SyntaxError → **整个 script 不执行** →
+        页面永远停在「加载中…」，图谱请求一个都不发。
+        这类错要往下滑控制台才看得到，现场极难定位。"""
+        src = HTML
+        self.assertIn("const lgSend =", src)
+        # gpQuery 函数体内不得再出现第二个 types 声明
+        body = src[src.index("function gpQuery("):src.index("function gpReset(")]
+        self.assertNotIn("const types =", body.replace("const types = [...document", "OK"))
+
+    def test_加载完要自动铺满(self):
+        """⚠ vis 默认 scale=1 且从不 fit：300 节点物理布局只占画布
+        左下角一小块（实测 scale≈0.27，中央网信办与农业农村部两节点
+        相距仅 19px），投屏时那团图缩成一坨、标签全糊，
+        「点边」在几何上就点不中。fit 必须在**物理收敛之后**做。"""
+        self.assertIn("stabilizationIterationsDone", HTML)
+        self.assertIn("GP_NET.fit(", HTML)
+        src = HTML
+        i_net = src.index("GP_NET = new vis.Network")
+        i_fit = src.index("GP_NET.fit(")
+        self.assertGreater(i_fit, i_net, "fit 要在建图之后")
+        self.assertNotIn("GP_NET.fit();", HTML.split("stabilizationIterationsDone")[0],
+                         "不能在物理收敛前就 fit（对着一张还在动的图取景）")
 
     def test_说明不得给无效操作(self):
         """实测调小最小度数并不会让措施变多（画布 300 上限截断）——
