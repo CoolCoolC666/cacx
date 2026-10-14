@@ -1380,6 +1380,9 @@ _GRAPH_STYLE = {
 }
 _GRAPH_STYLE_DEFAULT = {"background": "#9aa3b2", "border": "#c2c8d4",
                         "shape": "dot"}
+# 检索高亮色。与页面 CSS 变量 --hl 同值 —— 导出件必须和屏幕上是同一个黄，
+# 否则「导出后高亮去哪了」会变成一个查不出原因的问题。
+_GRAPH_HIT_COLOR = "#ffd479"
 _TYPE_CN = {"org": "机构", "policy": "政策", "problem": "治理问题",
             "measure": "措施"}
 
@@ -1478,18 +1481,30 @@ def pyvis_html(nodes: List[dict], edges: List[dict],
     # 因为 vis-network 的图例与配色都按 group 取
     g.options_groups = {k: dict(v) for k, v in _GRAPH_STYLE.items()}
 
+    # 检索高亮：颜色走**单节点 color 参数**，不走 groups ——
+    # groups 是全局一套，命中是逐节点的，两者混不到一起。
+    # 高亮色沿用页面上的 --hl，导出件必须和屏幕上是同一个黄。
     for n in nodes:
         gid = n.get("group") or ""
         if gid not in _GRAPH_STYLE:
             gid = "org"          # 未知类型先归机构，形状颜色统一
+        extra = {}
+        if n.get("hit"):
+            extra["color"] = {
+                "background": _GRAPH_HIT_COLOR, "border": "#fff",
+                "highlight": {"background": _GRAPH_HIT_COLOR, "border": "#fff"},
+            }
+            extra["borderWidth"] = 3
         g.add_node(n["id"], label=n.get("label") or n["id"], group=gid,
-                   size=n.get("size", 16), title=n.get("title", ""))
+                   size=n.get("size", 16), title=n.get("title", ""), **extra)
 
     for e in edges:
         w = float(e.get("weight") or 1)
+        hit = bool(e.get("hit"))
         g.add_edge(e["from"], e["to"], value=max(w, 0.1),
                    title=e.get("title", ""),
-                   color="#3a4a63", width=max(w * 0.7, 0.6))
+                   color=(_GRAPH_HIT_COLOR if hit else "#3a4a63"),
+                   width=(3.0 if hit else max(w * 0.7, 0.6)))
 
     import tempfile
     with tempfile.TemporaryDirectory() as td:
@@ -1678,7 +1693,7 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
                    topn: int, max_degree: int = 0, rel_types: str = "",
                    keyword: str = "", focus: str = "", hop: int = 1,
                    site: str = "", date_from: str = "", date_to: str = "",
-                   node_types: str = ""
+                   node_types: str = "", find: str = ""
                    ) -> Dict[str, Any]:
     """
     关联分析的**内部实现**（路由和 pyvis 产物都调它）。
@@ -1778,7 +1793,8 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
                                  keyword=keyword, focus=focus, hop=hop,
                                  node_types=ntypes_map,
                                  want_types=want_nt or None,
-                                 avail_by_group=avail_by_group)
+                                 avail_by_group=avail_by_group,
+                                 find=find)
     # ⚠⚠ **一张边都没有的图，等价于空图**，排名必须一起清掉。
     #   这不是假想：「只看政策」会得到 448 个政策节点、但**零条边** ——
     #   因为本库关系全是 org→X 单向，政策之间没有边。
@@ -1859,7 +1875,7 @@ def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
                        site: str = "",
                        date_from: str = "",
                        date_to: str = "",
-                       node_types: str = ""):
+                       node_types: str = "", find: str = ""):
     """
     关联指标（networkx）：度/加权度/介数/PageRank/Louvain 社区。
 
@@ -1884,7 +1900,7 @@ def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
                           int(topn), int(max_degree), rel_types,
                           keyword, focus, int(hop),
                           site, date_from, date_to,
-                          node_types=node_types)
+                          node_types=node_types, find=find)
 
 
 @app.get("/api/graph/facets")
@@ -2003,7 +2019,7 @@ def api_graph_vis(min_degree: int = Query(1, ge=1, le=50),
                   rel_types: str = "", keyword: str = "",
                   focus: str = "", hop: int = Query(1, ge=1, le=4),
                   site: str = "", date_from: str = "", date_to: str = "",
-                  node_types: str = ""):
+                  node_types: str = "", find: str = ""):
     """
     产出 pyvis 用的单文件 HTML（vis.js **内联**，零 CDN）。
 
@@ -2017,7 +2033,7 @@ def api_graph_vis(min_degree: int = Query(1, ge=1, le=50),
     data = _graph_payload(int(min_degree), int(limit), 1.0, 20,
                           int(max_degree), rel_types, keyword, focus,
                           int(hop), site, date_from, date_to,
-                          node_types=node_types)
+                          node_types=node_types, find=find)
     g = data.get("graph") or {}
     if not g.get("nodes"):
         return {"error": "当前筛选下没有可显示的节点"}
