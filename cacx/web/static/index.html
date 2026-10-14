@@ -518,6 +518,12 @@
         <label style="font-size:12.5px">近
           <input type="number" id="pn_months" value="36" min="6" max="120"
                  style="width:64px" onchange="loadPanel()"> 个月</label>
+        <label style="font-size:12.5px">日期
+          <input type="date" id="pn_from" onchange="loadPanel()" style="width:138px">
+          ~ <input type="date" id="pn_to" onchange="loadPanel()" style="width:138px"></label>
+        <span style="font-size:11.5px;color:var(--dim)"
+          title="填了起止日期，治理问题/高频机构/联合发文三张图就按日期筛，优先于「近 N 个月」；日期留空时才回落到月份数默认口径">
+          日期优先于月份：填了起止日期就按日期筛，留空才用月份数</span>
         <div class="grow"></div>
         <button class="btn" style="padding:3px 10px;font-size:12px"
           onclick="dlSnapshot()"
@@ -4274,7 +4280,14 @@ async function loadPanel(){
     : `<div class="empty" style="padding:20px">${site?'该站点近 30 天没有行为记录':'还没有行为记录'}</div>`;
 
   // ---- 三张作业相关的图：直接服务「角色画像与权责边界」 ----
-  const s2 = site ? '?site='+site : '';
+  // 日期筛选：pn_from/pn_to 填了就按日期透传（优先级高于顶部月份数），留空则不传、走后端默认口径
+  const df = $('pn_from')?.value || '';
+  const dt = $('pn_to')?.value || '';
+  const sq = new URLSearchParams();
+  if(site) sq.set('site', site);
+  if(df)   sq.set('date_from', df);
+  if(dt)   sq.set('date_to', dt);
+  const s2 = sq.toString() ? '?' + sq : '';
   const prob = await (await fetch('/api/panel/problems'+s2)).json();
   const pit = prob.items||[];
   // 复用 drawBars：它会把数据存进 PN_CACHE，于是「⬇ 图」按钮直接可用
