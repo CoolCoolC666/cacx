@@ -7,7 +7,7 @@
 
 本文件钉住用户拍板的语义（2026-10-14 二次拍板，改为**默认勾选**）：
   **默认勾上**（默认图含措施与 adopt 边；报告/README/演示脚本已同步该口径）
-  **仍可取消**（取消即回到旧口径 1633/3921，门槛过滤依然有效）
+  **仍可取消**（取消即回到旧口径 1638/3967，门槛过滤依然有效）
 """
 import importlib
 import sys
@@ -39,11 +39,11 @@ class TestMeasureGatedDefault(unittest.TestCase):
                              topn=12, max_degree=0, rel_types="",
                              keyword="", focus="", hop=1,
                              node_types=self.ALL)
-        self.assertEqual(d["graph"]["scope_nodes"], 1759)
-        self.assertEqual(d["graph"]["scope_edges"], 4154)
-        self.assertEqual(d.get("components"), 126)
+        self.assertEqual(d["graph"]["scope_nodes"], 1764)
+        self.assertEqual(d["graph"]["scope_edges"], 4200)
+        self.assertEqual(d.get("components"), 127)
         self.assertEqual(len(d["graph"]["nodes"]), 300)
-        self.assertEqual(len(d["graph"]["edges"]), 1449)
+        self.assertEqual(len(d["graph"]["edges"]), 1466)
 
     def test_默认图里措施可见且adopt边在(self):
         d = A._graph_payload(min_degree=2, limit=300, min_weight=1.0,
@@ -63,10 +63,10 @@ class TestMeasureGatedDefault(unittest.TestCase):
                              node_types=self.ALL)
         deg = {r["name"]: r["degree"] for r in (d.get("degree") or [])}
         self.assertEqual(deg.get("中央网信办"), 285)
-        self.assertEqual(deg.get("工业和信息化部"), 141)
+        self.assertEqual(deg.get("工业和信息化部"), 142)
         bt = [(r["name"], r["betweenness"]) for r in (d.get("betweenness") or [])]
-        self.assertAlmostEqual(bt[0][1], 0.2104, places=3)
-        self.assertAlmostEqual(bt[1][1], 0.1175, places=3)
+        self.assertAlmostEqual(bt[0][1], 0.2092, places=3)
+        self.assertAlmostEqual(bt[1][1], 0.1187, places=3)
 
     def test_默认放行数等于门槛挡住的量(self):
         d = A._graph_payload(min_degree=2, limit=300, min_weight=1.0,
@@ -88,8 +88,8 @@ class TestGatedStillReachable(unittest.TestCase):
         avail = {x["group"]: x["n"] for x in d["graph"]["avail_by_group"]}
         self.assertEqual(avail["measure"], 0)
         self.assertEqual(d["blocked_kept_out"], 0)
-        self.assertEqual(d["graph"]["scope_nodes"], 1633)
-        self.assertEqual(d["graph"]["scope_edges"], 3921)
+        self.assertEqual(d["graph"]["scope_nodes"], 1638)
+        self.assertEqual(d["graph"]["scope_edges"], 3967)
 
     def test_不传node_types也回到旧口径(self):
         """「没勾任何特殊类」= 门槛生效。后端按「空=不筛」读。"""
