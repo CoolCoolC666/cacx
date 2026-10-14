@@ -53,17 +53,17 @@ print()
 print("=" * 70)
 print("② 抽取规模")
 print("=" * 70)
-check("去重实体 16561",
-      q("SELECT COUNT(DISTINCT name) FROM entities") == 16561,
+check("去重实体 16507",
+      q("SELECT COUNT(DISTINCT name) FROM entities") == 16507,
       str(q("SELECT COUNT(DISTINCT name) FROM entities")))
-check("关系 8419", q("SELECT COUNT(*) FROM relations") == 8419,
+check("关系 8499", q("SELECT COUNT(*) FROM relations") == 8499,
       str(q("SELECT COUNT(*) FROM relations")))
 
 print()
 print("=" * 70)
-print("③ 关系类型分布（报告：5313/2060/557/555）")
+print("③ 关系类型分布（报告：5367/2082/561/489）")
 print("=" * 70)
-for rt, want in [("joint_issue", 5313), ("issue", 2060), ("target", 557), ("adopt", 489)]:
+for rt, want in [("joint_issue", 5367), ("issue", 2082), ("target", 561), ("adopt", 489)]:
     got = q(f"SELECT COUNT(*) FROM relations WHERE rel_type='{rt}'")
     check(f"{rt} = {want}", got == want, str(got))
 ci = q("SELECT COUNT(*) FROM relations WHERE rel_type='joint_issue'")
@@ -77,48 +77,52 @@ print("=" * 70)
 print("④ 覆盖率 27.1%")
 print("=" * 70)
 cov = q("SELECT COUNT(DISTINCT article_id) FROM relations")
-check("关系覆盖 1196 篇 / 27.1%",
-      cov == 1196 and abs(100 * cov / 4415 - 27.1) < 0.15,
+check("关系覆盖 1195 篇 / 27.1%",
+      cov == 1195 and abs(100 * cov / 4415 - 27.1) < 0.15,
       f"{cov} 篇 = {100*cov/4415:.1f}%")
 
 print()
 print("=" * 70)
 print("⑤ 图谱口径与度数")
 print("=" * 70)
-an = get("/api/graph/analysis?min_degree=2")
+# ⚠ 必须显式带 node_types=全勾：不带时服务端按「措施被低置信门槛整类挡在图外」
+#   的旧口径返回（实测 1631/3958/115），而报告的「默认分析口径」是措施放行的那套。
+NT = "org,policy,problem,measure"
+an = get("/api/graph/analysis?min_degree=2&node_types=" + NT)
 nodes = {n["id"]: n for n in an["graph"]["nodes"]}
-check("1759 节点 / 4154 边 / 126 连通块",
-      (an["nodes"], an["edges"], an["components"]) == (1759, 4154, 126),
+check("1757 节点 / 4191 边 / 126 连通块",
+      (an["nodes"], an["edges"], an["components"]) == (1757, 4191, 126),
       f'{an["nodes"]}/{an["edges"]}/{an["components"]}')
 # ⚠ 下面的度数是**默认口径**（措施已默认勾选放行）下的值。
-#   旧值 243/126/102 属于「措施被低置信门槛整类挡在图外」那套口径。
-for nm, want in [("中央网信办", 285), ("工业和信息化部", 141), ("公安部", 114)]:
+#   旧值 243/127/103 属于「措施被低置信门槛整类挡在图外」那套口径。
+for nm, want in [("中央网信办", 285), ("工业和信息化部", 142), ("公安部", 115)]:
     got = nodes.get(nm, {}).get("degree")
     check(f"{nm} 度 {want}", got == want, f"实测 {got}")
 
 print()
 print("=" * 70)
-print("⑥ 介数（报告：全图 0.2104/0.1175，聚焦 0.85/0.0305）")
+print("⑥ 介数（报告：全图 0.2109/0.1196，聚焦 0.8487/0.0306）")
 print("=" * 70)
 bt = sorted(((n["id"], n.get("betweenness", 0)) for n in an["graph"]["nodes"]),
             key=lambda kv: -kv[1])
-check("全图第一 = 中央网信办 0.2104",
-      bt[0][0] == "中央网信办" and abs(bt[0][1] - 0.2104) < 0.001,
+check("全图第一 = 中央网信办 0.2109",
+      bt[0][0] == "中央网信办" and abs(bt[0][1] - 0.2109) < 0.001,
       f'{bt[0][0]} = {bt[0][1]}')
-check("全图第二 = 网信办 0.1175", bt[1][0] == "网信办" and abs(bt[1][1] - 0.1175) < 0.001,
+check("全图第二 = 网信办 0.1196", bt[1][0] == "网信办" and abs(bt[1][1] - 0.1196) < 0.001,
       f'{bt[1][0]} = {bt[1][1]}')
 r = bt[0][1] / bt[1][1]
-check("两者相差 1.79 倍", abs(r - 1.79) < 0.05, f"实测 {r:.2f}")
+check("两者相差 1.76 倍", abs(r - 1.76) < 0.05, f"实测 {r:.2f}")
 
-g1 = get("/api/graph/analysis?focus=" + urllib.parse.quote("中央网信办") + "&hops=1")
+g1 = get("/api/graph/analysis?focus=" + urllib.parse.quote("中央网信办")
+         + "&hops=1&node_types=" + NT)
 b1 = sorted(((n["id"], n.get("betweenness", 0)) for n in g1["graph"]["nodes"]),
             key=lambda kv: -kv[1])
-check("聚焦 286 节点 / 1116 边", (g1["nodes"], g1["edges"]) == (286, 1116),
+check("聚焦 286 节点 / 1115 边", (g1["nodes"], g1["edges"]) == (286, 1115),
       f'{g1["nodes"]}/{g1["edges"]}')
-check("聚焦第一 = 中央网信办 0.85",
-      b1[0][0] == "中央网信办" and abs(b1[0][1] - 0.85) < 0.001,
+check("聚焦第一 = 中央网信办 0.8487",
+      b1[0][0] == "中央网信办" and abs(b1[0][1] - 0.8487) < 0.001,
       f'{b1[0][0]} = {b1[0][1]}')
-check("聚焦第二 0.0305", abs(b1[1][1] - 0.0305) < 0.001, f'{b1[1][0]} = {b1[1][1]}')
+check("聚焦第二 0.0306", abs(b1[1][1] - 0.0306) < 0.001, f'{b1[1][0]} = {b1[1][1]}')
 check("聚焦两者相差 28 倍", 24 < b1[0][1] / b1[1][1] < 32, f"实测 {b1[0][1]/b1[1][1]:.0f} 倍")
 
 print()
@@ -292,10 +296,10 @@ else:
     check("docx 已生成", True, f"{docx_path.stat().st_size:,} 字节")
 
     # 关键数字一个都不能少 —— Word 版最常见的失真就是转档时漏句/漏行
-    MUST = ["4415", "4416", "650 万字", "16561", "8419", "1196", "27.1%",
-            "285", "141", "114", "0.2104", "0.1175", "0.85", "0.0305",
-            "1759", "4154", "126", "286", "1116",
-            "5313", "2060", "557", "489", "63.1%",
+    MUST = ["4415", "4416", "650 万字", "16507", "8499", "1195", "27.1%",
+            "285", "142", "115", "0.2109", "0.1196", "0.8487", "0.0306",
+            "1757", "4191", "126", "286", "1115",
+            "5367", "2082", "561", "489", "63.1%",
             "1495", "1541", "1380", "193",
             "2960", "1456", "24 条", "3 条", "21 条", "8 个端点",
             "11.2%", "15.1%", "17.5%", "18.7%", "30.6%", "27.0%"]
