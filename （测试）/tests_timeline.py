@@ -219,9 +219,26 @@ class TestTimelineApi(TimelineCase):
         self.assertEqual(d["scope"]["months"], 3)
 
     def test_末月标为未过完(self):
+        """末月「未过完」的标注必须跟着末月是不是当月走。
+
+        ⚠ 这里原本断言的是「last_month_partial 恒为 True」，那是**写死行为**
+          不是性质：日期筛选（R4）之前末月恒等于当月，写死恰好总对；
+          加上 date_from/date_to 后能选历史区间，写死就变成反向误导。
+        本测试库的末月是 2024-06 —— 在今天（2026-10）早已过完，
+        所以正确行为是**不标**。正反两个场景分别由本项与
+        TestLastMonthPartial.test_末月等于当月仍标未过完 覆盖。
+        """
+        import datetime
         d = A._timeline_impl()
-        self.assertTrue(d["scope"]["last_month_partial"])
-        self.assertIn("尚未过完", d["note"])
+        self.assertEqual(d["last_month"], "2024-06")
+        now = datetime.date.today().strftime("%Y-%m")
+        self.assertNotEqual(d["last_month"], now,
+                            "测试库末月已不再是当月，这条断言的前提要重写")
+        self.assertFalse(d["scope"]["last_month_partial"])
+        self.assertNotIn("尚未过完", d["note"])
+        self.assertNotIn("末月未过完", d["charts"]["volume"])
+        # 而「末月确实是当月」时标注必须回来 —— 修到一边倒也不对
+        self.assertIn("已过完", d["note"])
 
     def test_top参数被夹在合理范围(self):
         """Query(6) 是参数对象；越界值也必须被夹住而不是炸掉。"""
@@ -408,6 +425,70 @@ def _src_of_snapshot_call() -> str:
     import inspect
     src = inspect.getsource(A.api_panel_snapshot)
     return src
+
+
+class TestLastMonthPartial(unittest.TestCase):
+    """末月「未过完」标注必须**随区间开关**，不能写死。
+
+    ⚠ 为什么曾是写死的、且写死还总是对的：
+      日期筛选（R4）之前末月恒等于当月，所以 `partial_last=True`
+      恰好永远正确，bug 露不出来。
+      加了 date_from/date_to 之后能选到**历史区间**，末月是个完整的月 ——
+      这时还标「末月未过完」是**反向误导**：读者会以为末月偏低是
+      没采集完，其实它是完整的月，恰好把真实跌幅掩盖掉。
+    """
+
+    MONTHS = [f"2024-{m:02d}" for m in range(1, 7)]
+
+    def _r(self, date_from="", date_to="", months_n=0):
+        d = A._timeline_impl(site="", top=6, date_from=date_from,
+                             date_to=date_to, include_ai=False,
+                             months_n=months_n)
+        sc = d["scope"]
+        vol = d["charts"]["volume"]
+        kw = d["charts"]["theme_kw"]
+        return d, sc, vol, kw
+
+    def test_历史区间不标未过完(self):
+        """2024 全年：末月 2024-12 早已过完，图上不该有那条虚线。"""
+        d, sc, vol, kw = self._r("2024-01-01", "2024-12-31")
+        self.assertEqual(d["last_month"], "2024-12")
+        self.assertFalse(sc["last_month_partial"])
+        self.assertNotIn("末月未过完", vol)
+        self.assertNotIn("末月未过完", kw)
+        self.assertIn("已过完", d["note"])
+
+    def test_末月等于当月仍标未过完(self):
+        """末月就是当前自然月时，虚线与文案必须照旧存在（别修过头）。"""
+        import datetime
+        now = datetime.date.today()
+        y, m = now.year, now.month
+        d, sc, vol, kw = self._r(f"{y:04d}-{m:02d}-01",
+                                 f"{y:04d}-{m:02d}-28")
+        self.assertEqual(d["last_month"], f"{y:04d}-{m:02d}")
+        self.assertTrue(sc["last_month_partial"])
+        self.assertIn("末月未过完", vol)
+        self.assertIn("尚未过完", d["note"])
+
+    def test_三处必须一致(self):
+        """scope 标记 / 发文量图 / 主题图 —— 三处不能各说各话。"""
+        for f, t in [("2024-01-01", "2024-12-31"), ("", "")]:
+            d, sc, vol, kw = self._r(f, t)
+            want = sc["last_month_partial"]
+            self.assertEqual("末月未过完" in vol, want,
+                             f"发文量图与 scope 不一致：{f}~{t}")
+            self.assertEqual("末月未过完" in kw, want,
+                             f"主题图与 scope 不一致：{f}~{t}")
+            self.assertEqual("尚未过完" in d["note"], want)
+
+    def test_默认区间末月不早于当月(self):
+        """默认区间（不截断）下末月应是当月，虚线必须画 —— 回归护栏。"""
+        import datetime
+        now = datetime.date.today()
+        _, sc, vol, _ = self._r()
+        self.assertTrue(sc["last_month_partial"])
+        self.assertIn("末月未过完", vol)
+        self.assertGreaterEqual(sc["range"][-7:], f"{now.year:04d}")
 
 
 def _path_ys(svg):
