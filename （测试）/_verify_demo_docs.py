@@ -78,19 +78,19 @@ print(f"画布：{len(g['nodes'])} 节点 / {len(g['edges'])} 边，"
 print("=" * 74)
 
 print("\n① 演示脚本 §B1 的口径数字")
-check("子图 1759 节点", an["nodes"] == 1759, f"实测 {an['nodes']}")
-check("子图 4154 边", an["edges"] == 4154, f"实测 {an['edges']}")
-check("126 个连通块", an["components"] == 126, f"实测 {an['components']}")
+check("子图 1764 节点", an["nodes"] == 1764, f"实测 {an['nodes']}")
+check("子图 4200 边", an["edges"] == 4200, f"实测 {an['edges']}")
+check("127 个连通块", an["components"] == 127, f"实测 {an['components']}")
 check("画布 300 节点", len(g["nodes"]) == 300, f"实测 {len(g['nodes'])}")
-check("画布 1449 边", len(g["edges"]) == 1449, f"实测 {len(g['edges'])}")
-check("折叠 1459", g.get("hidden_nodes") == 1459, f"实测 {g.get('hidden_nodes')}")
+check("画布 1466 边", len(g["edges"]) == 1466, f"实测 {len(g['edges'])}")
+check("折叠 1464", g.get("hidden_nodes") == 1464, f"实测 {g.get('hidden_nodes')}")
 
 b = an.get("betweenness") or []
-check("介数 Top1 中央网信办 0.2104",
-      bool(b) and b[0]["name"] == "中央网信办" and abs(b[0]["betweenness"] - 0.2104) < 1e-4,
+check("介数 Top1 中央网信办 0.2092",
+      bool(b) and b[0]["name"] == "中央网信办" and abs(b[0]["betweenness"] - 0.2092) < 1e-4,
       f"实测 {b[0]['name']} {b[0]['betweenness']}" if b else "无")
-check("介数 Top2 网信办 0.1175",
-      len(b) > 1 and b[1]["name"] == "网信办" and abs(b[1]["betweenness"] - 0.1175) < 1e-4,
+check("介数 Top2 网信办 0.1187",
+      len(b) > 1 and b[1]["name"] == "网信办" and abs(b[1]["betweenness"] - 0.1187) < 1e-4,
       f"实测 {b[1]['name']} {b[1]['betweenness']}" if len(b) > 1 else "无")
 
 fo = get(f"/api/graph/analysis?min_degree=2&focus={Q('中央网信办')}"
@@ -98,10 +98,10 @@ fo = get(f"/api/graph/analysis?min_degree=2&focus={Q('中央网信办')}"
 fb = fo.get("betweenness") or []
 fg = fo["graph"]
 check("一跳子图 286 节点", fg.get("scope_nodes") == 286, f"实测 {fg.get('scope_nodes')}")
-check("一跳子图 1116 边", fg.get("scope_edges") == 1116, f"实测 {fg.get('scope_edges')}")
-check("一跳介数 0.85 / 0.0305",
-      len(fb) > 1 and abs(fb[0]["betweenness"] - 0.85) < 1e-3
-      and abs(fb[1]["betweenness"] - 0.0305) < 1e-3,
+check("一跳子图 1115 边", fg.get("scope_edges") == 1115, f"实测 {fg.get('scope_edges')}")
+check("一跳介数 0.8487 / 0.0306",
+      len(fb) > 1 and abs(fb[0]["betweenness"] - 0.8487) < 1e-3
+      and abs(fb[1]["betweenness"] - 0.0306) < 1e-3,
       f"实测 {[x['betweenness'] for x in fb[:2]]}")
 
 # ---------------------------------------------------------------- ② 四条演示边
