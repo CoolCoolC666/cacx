@@ -20,6 +20,7 @@
     措施    0.6~0.8 → 低置信，写库但标 needs_review，**不进默认图谱**
 """
 import re
+import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import textseg
@@ -27,6 +28,33 @@ from . import textseg
 MIN_CHARS = 200          # 正文太短抽不出东西
 MAX_BODY = 20000         # 超长正文只取前 N 字，控制单篇耗时
 NEEDS_REVIEW_BELOW = 0.8  # 低于此值的实体写库但不进图
+
+# ── 分词结果的小缓存（性能，不改口径） ─────────────────────────────
+# ⚠ 同一篇文章里，_org_mentions 与随后的 _tok_pos 会对**同一段文本**
+#   各调一次 jieba.cut；而 _tok_pos 是**每个机构提及调一次**。
+#   实测 1000 篇：jieba 占 74 秒里的 60 秒，其中 _tok_pos 的重复切词
+#   就占 58 秒 —— 典型的 N+1（同一篇最多重复切 8 次）。
+#   同一文本的切词结果是确定性的，复用它，结果逐字不变。
+#   只留「最近一篇」（按对象身份比对，不做字符串哈希），
+#   长正文不会常驻内存；用 threading.local 让并行抽取时各线程各有
+#   一份，互不驱逐。
+_TOK_CACHE = threading.local()
+
+
+def _cut_tokens(text: str) -> List[str]:
+    """jieba 切词 → 去空白后的 token 列表。
+
+    同一个 text 对象只真正切一次（每线程一份 1 槽缓存）；
+    重复命中直接返回同一份列表，因此调用方拿到的 token 顺序/内容
+    与重复切词完全一致。
+    """
+    cached = getattr(_TOK_CACHE, "entry", None)
+    if cached is not None and cached[0] is text:
+        return cached[1]
+    j = textseg._get()
+    toks = [t for t in j.cut(text) if t.strip()] if j is not None else []
+    _TOK_CACHE.entry = (text, toks)
+    return toks
 
 # ── 分句 ───────────────────────────────────────────────────────────────
 # 必须含分号：公文的并列机关常在分号两侧（「A部；B局联合印发」），
@@ -196,10 +224,9 @@ def _org_mentions(text: str) -> List[Tuple[str, int]]:
          textseg.org_like 只检查首尾是否命中 _BAD_HEAD/_BAD_TAIL，
          句号不在里面，所以拦不住 —— 必须在拼之前就跳过标点 token。
     """
-    j = textseg._get()
-    if j is None:
+    toks = _cut_tokens(text)
+    if not toks:
         return []
-    toks = [t for t in j.cut(text) if t.strip()]
     n = len(toks)
     hits: List[Tuple[str, int]] = []
     seen = set()
@@ -338,6 +365,13 @@ def _plausible_org(name: str) -> bool:
     # ⚠ 复用 textseg.ORG_WHITELIST 同一份，绝不整类放开会议/大会。
     if name in textseg.ORG_WHITELIST:
         return True
+    # T7：活动/会议名整串或活动尾巴命中即否，复用 textseg 同一份表。
+    #   本函数的 `_NOT_ORG_TAIL` 已挡掉多数（大会/峰会/全会/研讨会/发布会/招待会…），
+    #   但漏了「博览会 / 周年大会 / 分享会 / 各类理事会」——
+    #   实测「大数据产业博览会」「组织成员国元首理事会」两道闸门都过了、进了图。
+    # ⚠ 同样只加**精确例外**，不动 _NOT_ORG_TAIL / _ORG_VERB 的整体框架。
+    if name in textseg.ORG_BANNED_TERMS or name.endswith(textseg.ORG_BANNED_TAILS):
+        return False
     # ⚠ **长度上限 15 字**是性价比最高的一条硬约束。
     #   真正的机构名几乎都 ≤15（最长的「中央网络安全和信息化委员会」13 字），
     #   而 n-gram 拼串失控产生的垃圾（「为主要生活来源的未成年人作出例外规定」
@@ -514,11 +548,12 @@ def _tok_pos(full: str, tok_index: int) -> int:
     token 下标 → 原文偏移。
     靠 jieba 重新切一次对齐有偏移风险，所以这里退化为「找该 token
     在原文里第一次出现的位置」—— 只需要句子级精度，够用且不会越界。
+
+    ⚠ 切词走 _cut_tokens：同一篇文本 _org_mentions 已经切过，
+      这里直接复用那份 token 表，不再为每个机构提及重复切全文
+      （实测这是抽取链路的最大热点）。
     """
-    j = textseg._get()
-    if j is None:
-        return 0
-    toks = [t for t in j.cut(full) if t.strip()]
+    toks = _cut_tokens(full)
     if 0 <= tok_index < len(toks):
         p = full.find(toks[tok_index])
         if p >= 0:

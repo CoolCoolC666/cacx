@@ -7,7 +7,7 @@
 ⚠ 只读：全程 HTTP GET，绝不写库。
 ⚠ 真值只有一个来源：**运行中的服务**。直连 db 算出来的数会和网页对不上。
 ⚠ 口径：本文按**网页默认口径**校验，即 node_types 全勾（措施类放行）。
-   不带 node_types 会拿到旧口径 1633/3921 —— 那不是网页上看到的数。
+   不带 node_types 会拿到旧口径 1631/3958 —— 那不是网页上看到的数。
 
 跑法（服务要先起在 8770）：
     py -3 -X utf8 "（测试）/_verify_demo_docs.py"
@@ -78,19 +78,19 @@ print(f"画布：{len(g['nodes'])} 节点 / {len(g['edges'])} 边，"
 print("=" * 74)
 
 print("\n① 演示脚本 §B1 的口径数字")
-check("子图 1764 节点", an["nodes"] == 1764, f"实测 {an['nodes']}")
-check("子图 4200 边", an["edges"] == 4200, f"实测 {an['edges']}")
-check("127 个连通块", an["components"] == 127, f"实测 {an['components']}")
+check("子图 1757 节点", an["nodes"] == 1757, f"实测 {an['nodes']}")
+check("子图 4191 边", an["edges"] == 4191, f"实测 {an['edges']}")
+check("126 个连通块", an["components"] == 126, f"实测 {an['components']}")
 check("画布 300 节点", len(g["nodes"]) == 300, f"实测 {len(g['nodes'])}")
 check("画布 1466 边", len(g["edges"]) == 1466, f"实测 {len(g['edges'])}")
-check("折叠 1464", g.get("hidden_nodes") == 1464, f"实测 {g.get('hidden_nodes')}")
+check("折叠 1457", g.get("hidden_nodes") == 1457, f"实测 {g.get('hidden_nodes')}")
 
 b = an.get("betweenness") or []
-check("介数 Top1 中央网信办 0.2092",
-      bool(b) and b[0]["name"] == "中央网信办" and abs(b[0]["betweenness"] - 0.2092) < 1e-4,
+check("介数 Top1 中央网信办 0.2109",
+      bool(b) and b[0]["name"] == "中央网信办" and abs(b[0]["betweenness"] - 0.2109) < 1e-4,
       f"实测 {b[0]['name']} {b[0]['betweenness']}" if b else "无")
-check("介数 Top2 网信办 0.1187",
-      len(b) > 1 and b[1]["name"] == "网信办" and abs(b[1]["betweenness"] - 0.1187) < 1e-4,
+check("介数 Top2 网信办 0.1196",
+      len(b) > 1 and b[1]["name"] == "网信办" and abs(b[1]["betweenness"] - 0.1196) < 1e-4,
       f"实测 {b[1]['name']} {b[1]['betweenness']}" if len(b) > 1 else "无")
 
 fo = get(f"/api/graph/analysis?min_degree=2&focus={Q('中央网信办')}"
