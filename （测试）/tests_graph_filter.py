@@ -2,7 +2,7 @@
 """
 关系图谱的筛选
 ================================================================
-背景：界面上明明**显示着**各关系类型占比（co_issue 71%）却**筛不了**，
+背景：界面上明明**显示着**各关系类型占比（joint_issue 71%）却**筛不了**，
 筛选器只有一个「最小度数」。加上筛选之后最容易犯的错有三个，
 本文件把它们都钉住：
   ① 关系类型必须**在建图阶段**过滤 —— 事后挑边的话权重是两种关系
@@ -27,13 +27,13 @@ def rel(src, dst, rt, w=1.0):
     return {"src_name": src, "dst_name": dst, "rel_type": rt, "weight": w}
 
 
-# A-B 既有 co_issue(权重 1) 又有 issue(权重 9)。
+# A-B 既有 joint_issue(权重 1) 又有 issue(权重 9)。
 # 若先建全图再挑边，A-B 的权重会变成 10 —— 那是两种关系混在一起的值，
 # 「只看 issue」时就不该是 10。这组数据专门用来抓这个错误。
 SAMPLE = [
-    rel("A", "B", "co_issue", 1.0),
+    rel("A", "B", "joint_issue", 1.0),
     rel("A", "B", "issue", 9.0),
-    rel("B", "C", "co_issue", 2.0),
+    rel("B", "C", "joint_issue", 2.0),
     rel("C", "D", "issue", 3.0),
     rel("D", "A", "target", 1.0),
     rel("E", "F", "issue", 5.0),      # 独立连通块
@@ -45,7 +45,7 @@ class TestRelTypeFilter(unittest.TestCase):
         G, types = GA.build_graph(SAMPLE, rel_types={"issue"})
         self.assertIn(("A", "B"), G.edges(), "A-B 有 issue 关系，不该被滤掉")
         self.assertAlmostEqual(G["A"]["B"]["weight"], 9.0, places=6,
-            msg="A-B 的权重被 co_issue 的 1.0 累加了 —— "
+            msg="A-B 的权重被 joint_issue 的 1.0 累加了 —— "
                 "说明类型过滤发生得太晚（建完图才挑边）")
 
     def test_不指定类型时权重照常累加(self):
@@ -108,7 +108,7 @@ class TestDegreeAndScope(unittest.TestCase):
           （孤立点度数 0，被 min_degree 顺带筛掉，测出来是「一个都不剩」，
           看着像 bug 其实不是）。"""
         rows = [rel("中央网信办", "国家网信办", "issue", 2.0),
-                rel("中央网信办", "公安部", "co_issue", 1.0),
+                rel("中央网信办", "公安部", "joint_issue", 1.0),
                 rel("国家网信办", "公安部", "issue", 1.0),
                 rel("工业和信息化部", "公安部", "issue", 3.0)]
         G, ty = GA.build_graph(rows)

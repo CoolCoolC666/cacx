@@ -150,13 +150,13 @@ class TestWriteRelations(unittest.TestCase):
     def test_正常写入(self):
         r = self.db.upsert_relations([
             {"src_name": "中央网信办", "dst_name": "公安部",
-             "rel_type": "co_issue", "article_id": 1}])
+             "rel_type": "joint_issue", "article_id": 1}])
         self.assertEqual(r["written"], 1)
 
     def test_自环被拒(self):
         r = self.db.upsert_relations([
             {"src_name": "网信办", "dst_name": "网信办",
-             "rel_type": "co_issue", "article_id": 1}])
+             "rel_type": "joint_issue", "article_id": 1}])
         self.assertEqual(r["written"], 0)
         self.assertIn("自环", r["errors"][0])
 
@@ -164,7 +164,7 @@ class TestWriteRelations(unittest.TestCase):
         for i in (1, 2, 3):
             self.db.upsert_relations([
                 {"src_name": "中央网信办", "dst_name": "公安部",
-                 "rel_type": "co_issue", "article_id": i}])
+                 "rel_type": "joint_issue", "article_id": i}])
         g = self.db.graph()
         self.assertEqual(len(g["edges"]), 1, "应聚合成一条边")
         self.assertEqual(g["edges"][0]["n"], 3)
@@ -172,7 +172,7 @@ class TestWriteRelations(unittest.TestCase):
 
     def test_同一篇重复提交权重累加但行数不增(self):
         rel = {"src_name": "中央网信办", "dst_name": "公安部",
-               "rel_type": "co_issue", "article_id": 1}
+               "rel_type": "joint_issue", "article_id": 1}
         self.db.upsert_relations([rel])
         self.db.upsert_relations([rel])
         self.assertEqual(len(self.db.list_relations()), 1)
@@ -184,14 +184,14 @@ class TestWriteRelations(unittest.TestCase):
         for i in (1, 2, 3):
             self.db.upsert_relations([
                 {"src_name": "甲", "dst_name": "乙",
-                 "rel_type": "co_issue", "article_id": i,
+                 "rel_type": "joint_issue", "article_id": i,
                  "evidence": f"证据{i}"}])
         self.assertEqual(len(self.db.list_relations()), 3)
         self.assertEqual(len(self.db.graph()["edges"][0]["article_ids"]), 3)
 
     def test_不同关系类型互不覆盖(self):
         self.db.upsert_relations([
-            {"src_name": "甲", "dst_name": "乙", "rel_type": "co_issue",
+            {"src_name": "甲", "dst_name": "乙", "rel_type": "joint_issue",
              "article_id": 1}])
         self.db.upsert_relations([
             {"src_name": "甲", "dst_name": "乙", "rel_type": "regulate",
@@ -205,9 +205,9 @@ class TestWriteRelations(unittest.TestCase):
 
     def test_按实体查关系包含入边出边(self):
         self.db.upsert_relations([
-            {"src_name": "甲", "dst_name": "乙", "rel_type": "co_issue",
+            {"src_name": "甲", "dst_name": "乙", "rel_type": "joint_issue",
              "article_id": 1},
-            {"src_name": "丙", "dst_name": "甲", "rel_type": "co_issue",
+            {"src_name": "丙", "dst_name": "甲", "rel_type": "joint_issue",
              "article_id": 1}])
         got = self.db.list_relations(name="甲")
         self.assertEqual(len(got), 2, got)
@@ -224,7 +224,7 @@ class TestGraph(unittest.TestCase):
         for i in (1, 2):
             self.db.upsert_relations([
                 {"src_name": "中央网信办", "dst_name": "公安部",
-                 "rel_type": "co_issue", "article_id": i,
+                 "rel_type": "joint_issue", "article_id": i,
                  "evidence": "联合发文"}])
 
     def tearDown(self):
@@ -254,7 +254,7 @@ class TestGraph(unittest.TestCase):
     def test_无证据关系可被统计出来(self):
         """答辩时无证据的关系是硬伤，必须能一眼看出有多少"""
         self.db.upsert_relations([
-            {"src_name": "甲", "dst_name": "乙", "rel_type": "co_issue",
+            {"src_name": "甲", "dst_name": "乙", "rel_type": "joint_issue",
              "article_id": 1}])
         self.assertEqual(self.db.graph_stats()["no_evidence"], 1)
 

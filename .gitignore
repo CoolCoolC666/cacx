@@ -35,6 +35,9 @@ _serve.err
 _tmp*.py
 _tmp*.js
 _probe.py
+# 临时试算产物（docx/json 等非脚本的中间件）；此前只有 .py/.js 两条，
+# 导致 _tmp_试算2.docx 被 git add -A 顺手带进版本库
+_tmp*.*
 
 # 更通用的一条：单下划线前缀 = 本地自用的一次性脚本/核对工具。
 # ⚠ 刻意写成 _[a-z0-9]* 而不是 _* —— 后者会把 cacx/__init__.py、

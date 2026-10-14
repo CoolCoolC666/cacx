@@ -60,7 +60,7 @@ def _make_db(path):
             d.conn.execute(
                 "INSERT INTO relations (src_name, dst_name, rel_type, "
                 "article_id, evidence, weight) VALUES (?,?,?,?,?,?)",
-                (src, dst, ["issue", "co_issue"][k % 2], aid,
+                (src, dst, ["issue", "joint_issue"][k % 2], aid,
                  "测试证据", 1.0))
             k += 1
     d.conn.commit()

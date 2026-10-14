@@ -63,12 +63,12 @@ print()
 print("=" * 70)
 print("③ 关系类型分布（报告：5313/2060/557/555）")
 print("=" * 70)
-for rt, want in [("co_issue", 5313), ("issue", 2060), ("target", 557), ("adopt", 489)]:
+for rt, want in [("joint_issue", 5313), ("issue", 2060), ("target", 557), ("adopt", 489)]:
     got = q(f"SELECT COUNT(*) FROM relations WHERE rel_type='{rt}'")
     check(f"{rt} = {want}", got == want, str(got))
-ci = q("SELECT COUNT(*) FROM relations WHERE rel_type='co_issue'")
+ci = q("SELECT COUNT(*) FROM relations WHERE rel_type='joint_issue'")
 tot = q("SELECT COUNT(*) FROM relations")
-check("co_issue 占 63.1%", abs(100 * ci / tot - 63.1) < 0.15,
+check("joint_issue 占 63.1%", abs(100 * ci / tot - 63.1) < 0.15,
       f"实测 {100*ci/tot:.1f}%")
 check("无证据关系为 0", q("SELECT COUNT(*) FROM relations WHERE evidence IS NULL OR evidence=''") == 0)
 
@@ -210,6 +210,35 @@ n111 = db.execute("""SELECT COALESCE(MAX(c), 0) FROM (
                         GROUP BY evidence)""").fetchone()[0]
 check("七部门长句支撑 21 条关系", n111 == 21, str(n111))
 
+# ⚠ 端点数原来**没人守**，报告里「12 个端点」就这么一直错着。
+#   现在补上，并且口径必须与上面那条一致：**只算这一句**。
+#   （按「含全部七个部门名的所有句子」去算是 10，
+#    按「提到该方案的任意句子」去算是 12 —— 都是别的口径，不是这一句。）
+_row = db.execute("""SELECT evidence FROM relations
+                     WHERE evidence LIKE '%国家发展改革委%'
+                       AND evidence LIKE '%生态环境部%'
+                       AND evidence LIKE '%住房城乡建设部%'
+                       AND evidence LIKE '%商务部%'
+                     GROUP BY evidence ORDER BY COUNT(*) DESC LIMIT 1""").fetchone()
+_seen, _n_ep = set(), 0
+if _row:
+    for _s, _d in db.execute("SELECT src_name, dst_name FROM relations WHERE evidence=?",
+                             (_row[0],)):
+        _seen.add(_s); _seen.add(_d)
+check("七部门长句涉及 8 个端点", len(_seen) == 8, str(len(_seen)))
+
+# 口径声明那段曾经把 co_issue 说成「同句共现」，与实测不符（证据句 100% 含联合词）
+_j = db.execute("""SELECT COUNT(*) FROM relations
+                    WHERE rel_type='joint_issue'
+                      AND evidence IS NOT NULL AND evidence<>''""").fetchone()[0]
+_t = db.execute("""SELECT COUNT(*) FROM relations
+                    WHERE rel_type='joint_issue'
+                      AND evidence NOT LIKE '%联合%'
+                      AND evidence NOT LIKE '%会同%'
+                      AND evidence NOT LIKE '%共同%'""").fetchone()[0]
+check("joint_issue 证据句均含联合类触发词", _t == 0,
+      f"{_j} 条中不含触发词 {_t} 条")
+
 print()
 print("=" * 70)
 print("⑪ AI 主题标注（报告说 0 篇）")
@@ -266,11 +295,16 @@ else:
             "1633", "3921", "115", "244", "1015",
             "5313", "2060", "557", "489", "63.1%",
             "1495", "1541", "1380", "193",
-            "2960", "1456", "24 条", "3 条", "21 条", "12 个端点",
+            "2960", "1456", "24 条", "3 条", "21 条", "8 个端点",
             "11.2%", "15.1%", "17.5%", "18.7%", "30.6%", "27.0%"]
     missing = [m for m in MUST if m not in full]
     check(f"关键数字 {len(MUST)} 个全部保留",
           not missing, f"缺 {missing}" if missing else "无缺失")
+    # 口径措辞守卫：joint_issue 的判定有触发词门槛，
+    # 报告若再写成「同句共现」就是与实测相反（证据句 100% 含联合类触发词）。
+    check("报告未把 joint_issue 误称为同句共现",
+          "同句共现" not in full.replace("不是任意同句共现", ""),
+          "出现了未经否定的「同句共现」")
 
     # markdown 残留：转换器失手时正文会露出星号或反引号
     residue = [tok for tok in ("**", "`") if tok in full]

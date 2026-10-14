@@ -154,13 +154,13 @@ run('runSample 分层多年份不误报', () => {
 
 // 6. 图谱：点关系要能列出证据
 run('gpDetail 列出原文证据', () => {
-  GP_CACHE = [{src_name:'中央网信办', dst_name:'公安部', rel_type:'co_issue',
+  GP_CACHE = [{src_name:'中央网信办', dst_name:'公安部', rel_type:'joint_issue',
                n:2, weight:2, article_ids:[11,12]}];
   globalThis.fetch = async () => ({ ok:true, json: async () => ({ items:[
-    {src_name:'中央网信办', dst_name:'公安部', rel_type:'co_issue',
+    {src_name:'中央网信办', dst_name:'公安部', rel_type:'joint_issue',
      article_id:11, article_title:'联合部署清朗', pub_day:'2024-05-01',
      evidence:'中央网信办 公安部 联合部署'},
-    {src_name:'中央网信办', dst_name:'公安部', rel_type:'co_issue',
+    {src_name:'中央网信办', dst_name:'公安部', rel_type:'joint_issue',
      article_id:12, article_title:'联合发布通报', pub_day:'2025-06-01',
      evidence:''}
   ]})});

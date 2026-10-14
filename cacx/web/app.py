@@ -1883,7 +1883,7 @@ def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
     **介数**才说明谁在协作网络里居中协调。
 
     筛选：
-      · rel_types   逗号分隔的关系类型（co_issue/issue/target/adopt）
+      · rel_types   逗号分隔的关系类型（joint_issue/issue/target/adopt）
       · node_types  逗号分隔的**实体类型**（org/policy/problem/measure），
                     就是图例那四个勾选项；空 = 全选
       · max_degree  度数上限（0 = 不限），用来压掉「一颗星把整张图盖住」

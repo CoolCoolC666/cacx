@@ -58,18 +58,18 @@ ARTICLES = [
 #   SQLite 动态类型不报错，于是 weight 列里存了一段中文。
 RELATIONS = [
     # ---- 高权重的一小撮：全挤在 3 个机构之间 ----
-    ("中央网信办", "国家网信办", "co_issue", 1, 30.0,
+    ("中央网信办", "国家网信办", "joint_issue", 1, 30.0,
      "中央网信办、国家网信办联合印发《关于加强网络数据安全治理的通知》"),
-    ("中央网信办", "公安部", "co_issue", 1, 24.0,
+    ("中央网信办", "公安部", "joint_issue", 1, 24.0,
      "中央网信办、公安部联合印发《关于加强网络数据安全治理的通知》"),
-    ("国家网信办", "公安部", "co_issue", 2, 18.0,
+    ("国家网信办", "公安部", "joint_issue", 2, 18.0,
      "国家网信办会同公安部依法约谈相关平台负责人"),
     # ---- 低权重的长尾：每个机构只出现一次 ----
-    ("工业和信息化部", "市场监管总局", "co_issue", 1, 2.0,
+    ("工业和信息化部", "市场监管总局", "joint_issue", 1, 2.0,
      "工业和信息化部、市场监管总局将联合开展监督检查"),
-    ("教育部", "人力资源社会保障部", "co_issue", 2, 2.0,
+    ("教育部", "人力资源社会保障部", "joint_issue", 2, 2.0,
      "教育部、人力资源社会保障部联合印发《工作要点》"),
-    ("浙江网信办", "浙江省通信管理局", "co_issue", 3, 2.0,
+    ("浙江网信办", "浙江省通信管理局", "joint_issue", 3, 2.0,
      "浙江网信办会同浙江省通信管理局开展专项检查"),
     ("中央网信办", "网络数据安全管理条例", "issue", 1, 2.0,
      "中央网信办印发《网络数据安全管理条例》"),
@@ -214,14 +214,14 @@ class TestTruncationReallyMatters(BaseGraphLimit):
     def test_低权重关系被丢会丢掉整个关系类型(self):
         """长尾才承载 issue/target/adopt —— 截断会把它们整类抹掉。
 
-        权重分布是刻意的：co_issue 占着 30/24/18 三个高权重，
+        权重分布是刻意的：joint_issue 占着 30/24/18 三个高权重，
         其余三类**只在 2.0 上出现**。所以截到 3 条时，
-        图上就只剩 co_issue 一种关系，另外三类一条不剩。
+        图上就只剩 joint_issue 一种关系，另外三类一条不剩。
         """
         full = {r["rel_type"] for r in self.store.list_relations(limit=None)}
         cut = {r["rel_type"] for r in self.store.list_relations(limit=3)}
-        self.assertEqual(full, {"co_issue", "issue", "target", "adopt"})
-        self.assertEqual(cut, {"co_issue"})
+        self.assertEqual(full, {"joint_issue", "issue", "target", "adopt"})
+        self.assertEqual(cut, {"joint_issue"})
         self.assertLess(cut, full)
 
 

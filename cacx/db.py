@@ -31,6 +31,17 @@ from . import textseg
 
 SCHEMA_VERSION = 1
 
+# 关系类型取值的改名表（旧 → 新）。
+#
+# ⚠ 为什么 co_issue 要改：
+#   名字有两重误导 —— ① `co_` 前缀读作「共现」，但规则要求证据句里
+#   **必须**命中「联合印发/联合发布/会同/联发/共同印发」才建边
+#   （实测 5313 条证据句 100% 含此类触发词），它记的是**联合发文**；
+#   ② `issue` 与已有的 rel_type「issue（机构发布文件）」字面撞车，
+#   也与实体类型「治理问题」撞车。三个含义挤在一个词里。
+#   joint_issue 与 issue / target / adopt 同为动词短语，语义自洽。
+REL_TYPE_RENAMES = {"co_issue": "joint_issue"}
+
 
 def _month_bound(s: str, side: str = "lo") -> str:
     """把用户填的日期**归一化**成 YYYY-MM-DD 的边界。
@@ -240,7 +251,7 @@ CREATE TABLE IF NOT EXISTS relations (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     src_name     TEXT NOT NULL,
     dst_name     TEXT NOT NULL,
-    rel_type     TEXT NOT NULL,         -- co_issue / regulate / cite / belong…
+    rel_type     TEXT NOT NULL,         -- joint_issue / regulate / cite / belong…
     article_id   INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
     evidence     TEXT,                  -- 支撑这句话的原文片段
     weight       REAL DEFAULT 1.0,      -- 共现强度（同一篇出现多次可加权）
@@ -352,9 +363,38 @@ class Database:
         # 老库的 articles 表还没有这一列时，建索引会直接报
         # "no such column: body_hash"，整段 schema 初始化连带失败。
         self._ensure_columns()
+        self._migrate_rel_types()
         self.conn.executescript(SCHEMA)
         self.set_meta("schema_version", str(SCHEMA_VERSION))
         self.conn.commit()
+
+    def _migrate_rel_types(self):
+        """把 relations.rel_type 里**已落库的旧取值**改成新名。
+
+        ⚠ 为什么必须在这里、而不是一次性脚本：
+          rel_type 是**数据取值**不是列名，改代码只让「新抽出来的」用新名，
+          已经躺在库里的几千条还是旧值 —— 于是同一个库里新旧两套名字并存，
+          按类型筛选时旧名那批直接查不出来，而且**不报任何错**。
+          组员那边拿到分发包、首次打开时就会撞上，所以迁移必须跟着
+          初始化流程走，谁开谁自动改名。
+
+        ⚠ 幂等：已经改过就一行不做。判据用「旧值还剩几行」，
+          不用「有没有执行过」—— 后者在换库/恢复备份后会骗人。
+        """
+        have = {r[0] for r in self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "relations" not in have:
+            return                      # 全新库，还没建表，没有数据可改
+        for old, new in REL_TYPE_RENAMES.items():
+            n = self.conn.execute(
+                "SELECT COUNT(*) FROM relations WHERE rel_type=?", (old,)
+            ).fetchone()[0]
+            if not n:
+                continue
+            self.conn.execute("UPDATE relations SET rel_type=? WHERE rel_type=?",
+                              (new, old))
+            self.conn.commit()
+            print(f"[迁移] relations.rel_type {old} → {new}：{n} 行")
 
     def _ensure_columns(self):
         """给**已存在**的库补上新加的列。
