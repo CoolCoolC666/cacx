@@ -617,7 +617,7 @@ def api_panel_timeline(site: str = "", top: int = Query(_TL_TOP, ge=1, le=10),
 
 
 @app.get("/api/panel/problems")
-def api_panel_problems(site: str = ""):
+def api_panel_problems(site: str = "", date_from: str = "", date_to: str = ""):
     """
     治理问题关键词分布 —— 直接对应老师要的「角色画像」。
 
@@ -625,14 +625,17 @@ def api_panel_problems(site: str = ""):
     一个议题可能同时命中两类（既是网络暴力又涉及未成年人），
     所以各行相加会超过总数。报告里必须写明这一点。
     """
-    return {"site": site, "items": _db().problem_distribution(
-        site=site, date_from=_PANEL_D0, date_to=_PANEL_D1),
+    kw = {}
+    if date_from: kw["date_from"] = date_from
+    if date_to:   kw["date_to"] = date_to
+    return {"site": site, "items": _db().problem_distribution(site=site, **kw),
         "note": "关键词粗筛，一篇可命中多类，各行相加会超过总数；"
                 "精确分类需按 R1 抽取结果人工复核"}
 
 
 @app.get("/api/panel/orgs")
-def api_panel_orgs(site: str = "", limit: int = Query(12, ge=1, le=50)):
+def api_panel_orgs(site: str = "", limit: int = Query(12, ge=1, le=50),
+                   date_from: str = "", date_to: str = ""):
     """
     高频机构 Top —— 直接对应「谁在发文中反复出现」。
 
@@ -640,15 +643,17 @@ def api_panel_orgs(site: str = "", limit: int = Query(12, ge=1, le=50)):
     会把部分无关机构吸进同一组（尤其「XX会 / XX大会 / XX峰会」这类会议名，
     它们以机构后缀结尾但不是发文机关）。**带 ⚠ 的必须人工复核后再引用。**
     """
-    items = _db().top_orgs(site=site, date_from=_PANEL_D0, date_to=_PANEL_D1,
-                           limit=limit)
+    kw = {}
+    if date_from: kw["date_from"] = date_from
+    if date_to:   kw["date_to"] = date_to
+    items = _db().top_orgs(site=site, limit=limit, **kw)
     return {"site": site, "items": items,
             "review_count": sum(1 for i in items if i.get("needs_review")),
             "note": "机器挖掘的候选，非定论；带 ⚠ 的组需人工复核"}
 
 
 @app.get("/api/panel/joint")
-def api_panel_joint(site: str = ""):
+def api_panel_joint(site: str = "", date_from: str = "", date_to: str = ""):
     """
     联合发文类文章月度趋势 —— 权责边界的直接证据。
 
@@ -656,8 +661,10 @@ def api_panel_joint(site: str = ""):
     会有误召（正文提到但标题没有的会漏，标题顺带提及的会误召）。
     精确数字要看 R1 抽出来的「联合发文」关系。
     """
-    return {"site": site, "items": _db().joint_issue_trend(
-        site=site, date_from=_PANEL_D0, date_to=_PANEL_D1),
+    kw = {}
+    if date_from: kw["date_from"] = date_from
+    if date_to:   kw["date_to"] = date_to
+    return {"site": site, "items": _db().joint_issue_trend(site=site, **kw),
         "note": "按标题关键词粗筛，非精确统计；精确值以 R1 的联合发文关系为准"}
 
 
