@@ -4285,16 +4285,34 @@ async function aiThemePreview(){
   await loadTimeline();
 }
 
+/* 「近 N 个月」→ date_from 的换算：取**距今 N 个月的月初**（YYYY-MM-01）。
+   与趋势图 loadTrend() 用的是**同一个 pn_months 控件、同一个值**，
+   保证面板四张图（栏目/治理问题/高频机构/联合发文）与按月趋势图同一时间口径。
+   df/dt 优先、都留空才走这里 —— 见 loadPanel 的 qs 拼接。 */
+function monthsToFrom(N){
+  const d = new Date();
+  d.setDate(1);                 // 先归到 1 号：否则 31 号往前推月份会溢出到下个月
+  d.setMonth(d.getMonth() - N); // setMonth 自动处理跨年与负数越界
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  return `${d.getFullYear()}-${mm}-01`;
+}
+
 async function loadPanel(){
   const site=$('pn_site')?.value||'';
-  // A1：栏目 Top12 与 problems/orgs/joint 共用同一对日期控件 pn_from/pn_to、同一优先级
-  //   （填了日期传日期，留空不传、走后端默认口径）。df/dt 在此提前，下方三张图直接复用。
+  // 日期优先于月份：pn_from/pn_to 填了 → 按日期筛；**都留空** → 用「近 N 个月」换算成 date_from。
+  //   换算后的 date_from 与趋势图同源（同一个 pn_months），四张图同一时间口径。
   const df = $('pn_from')?.value || '';
   const dt = $('pn_to')?.value || '';
+  const mN = Math.max(6, Math.min(120, parseInt($('pn_months')?.value||'36',10)||36));
   const q = new URLSearchParams();
   if(site) q.set('site', site);
-  if(df)   q.set('date_from', df);
-  if(dt)   q.set('date_to', dt);
+  if(df || dt){
+    if(df) q.set('date_from', df);
+    if(dt) q.set('date_to', dt);
+  }else{
+    // 月份模式：date_to 不传，走后端默认 2099-12-31
+    q.set('date_from', monthsToFrom(mN));
+  }
   const qs = q.toString() ? '?' + q : '';
   await loadTrend();
   const f=await (await fetch('/api/facets'+qs)).json();
@@ -4340,7 +4358,8 @@ async function loadPanel(){
     : `<div class="empty" style="padding:20px">${site?'该站点近 30 天没有行为记录':'还没有行为记录'}</div>`;
 
   // ---- 三张作业相关的图：直接服务「角色画像与权责边界」 ----
-  // 日期筛选：复用顶部 qs（已含 site + pn_from/pn_to，留空则不传），与栏目 Top12 同一对控件、同一优先级
+  // 日期筛选：复用顶部 qs（含 site + 日期口径：pn_from/pn_to 优先，都留空则由 pn_months 换算），
+  // 与栏目 Top12 同一对控件、同一优先级
   const s2 = qs;
   const prob = await (await fetch('/api/panel/problems'+s2)).json();
   const pit = prob.items||[];
