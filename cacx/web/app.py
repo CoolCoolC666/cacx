@@ -676,7 +676,8 @@ def api_panel_joint(site: str = "", date_from: str = "", date_to: str = ""):
 @app.get("/api/panel/export")
 def api_panel_export(which: str, site: str = "",
                      granularity: str = "month", days: int = 30,
-                     limit: int = Query(12, ge=1, le=200)):
+                     limit: int = Query(12, ge=1, le=200),
+                     date_from: str = "", date_to: str = ""):
     """
     把面板上的图表数据导成 CSV。
 
@@ -684,6 +685,11 @@ def api_panel_export(which: str, site: str = "",
     的数据**，不是截���图片。而「界面看到的数字」与「导出的数字」必须是
     同一份 —— 前端拼 CSV 就必然有「改了筛选条件忘了同步」的隐患。
     这里直接复用面板那几个接口的取数逻辑，口径天然一致。
+
+    ⚠ date_from/date_to 是**屏幕时间口径的复刻**：前端 pn_from/pn_to 优先，
+      都留空时由 pn_months 换算成 date_from（见 index.html 的 dlPanel）。
+      不带日期参数的话，屏幕按「近 N 个月」筛、导出的却是全量数字 ——
+      「屏幕=导出」这条铁律当场断掉。空则不传、走后端默认区间（T1 同款）。
     """
     which = (which or "").lower()
     d = _db()
@@ -697,7 +703,7 @@ def api_panel_export(which: str, site: str = "",
         cols = [(period_cn, "period"), ("文章数", "articles"), ("字数", "chars")]
         title = f"{granularity}_trend"
     elif which == "columns":
-        f = api_facets(site=site)
+        f = api_facets(site=site, date_from=date_from, date_to=date_to)
         # 筛选了站点就直接给满 limit —— 再除以站点数就成「单站只画 6 个」，
         # 那是「全部站点时两站平分名额」的逻辑，单站不该再分一次。
         per = limit if site else max(4, limit // max(1, len(f["sites"])))
@@ -721,14 +727,16 @@ def api_panel_export(which: str, site: str = "",
         cols = [("行为类型", "kind"), ("次数", "count")]
         title = f"events_{days}d"
     elif which == "problems":
-        src = api_panel_problems(site=site)
+        src = api_panel_problems(site=site, date_from=date_from,
+                                 date_to=date_to)
         rows = [{"problem": r["problem"], "articles": r["articles"],
                  "pct": r["pct"]} for r in src["items"]]
         cols = [("治理问题", "problem"), ("文章数", "articles"),
                 ("占比%", "pct")]
         title = "problem_distribution"
     elif which == "orgs":
-        src = api_panel_orgs(site=site, limit=limit)
+        src = api_panel_orgs(site=site, limit=limit,
+                             date_from=date_from, date_to=date_to)
         rows = [{"org": r["org"], "count": r["count"],
                  "needs_review": "是" if r.get("needs_review") else "",
                  "aliases": "|".join(r.get("aliases") or []),
@@ -738,7 +746,8 @@ def api_panel_export(which: str, site: str = "",
                 ("归并依据", "basis")]
         title = "top_orgs"
     elif which == "joint":
-        src = api_panel_joint(site=site)
+        src = api_panel_joint(site=site, date_from=date_from,
+                              date_to=date_to)
         rows = [{"month": r["month"], "joint": r["joint"],
                  "total": r["total"], "pct": r["pct"]} for r in src["items"]]
         cols = [("月份", "month"), ("联合发文类", "joint"),
@@ -1024,7 +1033,8 @@ td{font-family:Consolas,monospace}
 @app.get("/api/panel/snapshot")
 def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
                        days: int = Query(30, ge=1, le=365),
-                       top: int = Query(12, ge=1, le=50)):
+                       top: int = Query(12, ge=1, le=50),
+                       date_from: str = "", date_to: str = ""):
     """
     把整个数据面板导出成一个**独立的 HTML 文件**。
 
@@ -1034,11 +1044,15 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
 
     刻意不引任何图表库（同 _svg_bars 的理由），
     所以它不是一个「简化版」，而是一份**自包含的静态快照**。
+
+    ⚠ date_from/date_to 必须与屏幕同一套口径（前端 pn_from/pn_to 优先，
+      都留空时由 pn_months 换算）—— 快照里那几块要跟屏幕上的数字对得上，
+      否则「屏幕=导出」就只剩下标题相同。空则不传、走后端默认区间。
     """
     d = _db()
     trend_m = api_trend(site=site, granularity="month")["items"][-months:]
     trend_y = api_trend(site=site, granularity="year")["items"]
-    f = api_facets(site=site)
+    f = api_facets(site=site, date_from=date_from, date_to=date_to)
     e = d.event_stats(days, site=site)
 
     # 栏目榜：单站给满 top 名额，多站平分（与前端同一口径）
@@ -1057,6 +1071,14 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
     ev = [{"k": r["kind"], "n": r["n"]} for r in e["by_kind"]]
     name = {"cac": "中国网信办", "zjwx": "浙江网信网"}.get(site, "全部站点")
     now = time.strftime("%Y-%m-%d %H:%M")
+    # 副标题必须写**真正生效的那段区间**：给了日期就报到日，
+    # 没给才说「近 N 个月」。写了假区间比不写更糟 —— 交上去的数据
+    # 会被当成另一个口径去读。
+    if date_from or date_to:
+        period = ("日期 <b>" + _esc(date_from or "不限") + "</b> ~ <b>"
+                  + _esc(date_to or "不限") + "</b>")
+    else:
+        period = f"近 {months} 个月"
 
     def rank_html(items):
         if not items:
@@ -1078,9 +1100,10 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
         note = f'<div class="note">{_esc(e["note"])}</div>'
 
     # ---- 三张作业相关的图（与网页端同源，保证「看到的 = 交出去的」）----
-    prob = api_panel_problems(site=site)
-    orgg = api_panel_orgs(site=site, limit=top)
-    joint = api_panel_joint(site=site)
+    prob = api_panel_problems(site=site, date_from=date_from, date_to=date_to)
+    orgg = api_panel_orgs(site=site, limit=top,
+                          date_from=date_from, date_to=date_to)
+    joint = api_panel_joint(site=site, date_from=date_from, date_to=date_to)
 
     prob_rows = [{"k": r["problem"], "n": r["articles"]} for r in prob["items"]]
     pmx = max((x["n"] for x in prob_rows), default=0) or 1
@@ -1134,7 +1157,7 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
 <title>网信办公开语料 · 数据面板 · {_esc(name)}</title>
 <style>{_PANEL_CSS}</style></head><body><div class="wrap">
 <h1>网信办公开语料 · 数据面板</h1>
-<div class="sub">站点 <b>{_esc(name)}</b> · 近 {months} 个月 ·
+<div class="sub">站点 <b>{_esc(name)}</b> · {period} ·
 检索行为近 {days} 天 · 生成于 {now}</div>
 <div class="grid">
 
