@@ -387,6 +387,14 @@
         每条关系都带原文出处。<br>
         <b>演示动作</b>：点图中任一条<b>边</b> → 右侧列出支撑它的原文句子，点标题跳回原文页。
       </div>
+      <div style="font-size:12px;color:var(--dim);margin-top:8px;line-height:1.75;
+           border-left:3px solid var(--line);padding-left:10px">
+        <b>口径说明</b>：本图只统计<b>「已抽取到机构间关系」的文章</b>，不是文章全集 ——
+        上方数据面板是文章口径、这里只是其中抽出关系的那一小撮，两边分母不同，数字本来就不可能相等。
+        关系最早约 <b>2024-01</b> 才有；默认视图下开头一两个月可能没图，
+        若把日期筛到 <b>2024 年之前</b>（例如 2020 年）则必然空图 ——
+        <b>空图是口径，不是故障</b>，只是那段时间的文章还没做关系抽取，放宽日期即可。
+      </div>
     </div>
 
     <!-- 关联指标：权责边界的直接论据 -->
@@ -2241,7 +2249,10 @@ function renderNet(a){
       当前筛选下没有可显示的节点。<br>
       <span style="color:var(--warn);font-size:13px">${esc(why)}</span><br>
       <span style="font-size:11.5px">放宽筛选试试：把图例的实体类型多勾几类、
-      或把度数下限调低。</span></div>`;
+      或把度数下限调低。</span><br>
+      <span style="font-size:11.5px;color:var(--dim)">这是<b>口径</b>、不是故障：
+      本图只统计已抽取到机构间关系的文章（约 2024-01 起），
+      筛到更早或没抽过的区间就会是空图。</span></div>`;
     $('gp_cnt').textContent = gpFindNote(a);
     // 图例要照常渲染，否则用户连"去哪儿改筛选"都看不到 ——
     // 图例同时就是筛选器，藏起来等于把唯一的出路也藏了。
