@@ -361,6 +361,12 @@
         <label style="font-size:12.5px">名称含
           <input id="gp_kw" placeholder="关键词" style="width:96px"
                  onchange="loadGraph()"></label>
+        <label style="font-size:12.5px">高亮
+          <input id="gp_find" placeholder="找出并标黄" style="width:104px"
+                 oninput="gpFindDebounce()"
+                 title="不裁剪、不改变任何指标，只把命中的机构和它们之间的关系标黄。&#10;与「名称含」不同：那个是筛选，搜不到就是库里没有；这个永远是全图，只告诉你命中在哪。"></label>
+        <button class="btn" style="padding:5px 10px" onclick="gpFindClear()"
+                title="清除高亮关键词，恢复原色">清除高亮</button>
         <span style="font-size:12.5px;color:var(--dim)">站点</span>
         <span id="gp_sites" style="display:flex;gap:10px;flex-wrap:wrap"></span>
         <label style="font-size:12.5px">日期
@@ -1735,6 +1741,9 @@ const GP_STYLE = {
   problem: {c:'#ff6b6b', s:'triangle',  cn:'治理问题'},
   measure: {c:'#5ddc9a', s:'diamond',   cn:'措施'},
 };
+// 检索高亮色。与后端 _GRAPH_HIT_COLOR、CSS 变量 --hl 三处必须同值 ——
+// 导出件、屏幕、图例是同一个功能的三张脸，颜色不一样就会被当成三个功能。
+const GP_HIT_COLOR = '#ffd479';
 // 图例勾选了哪几类（实体类型筛选器）。⚠ 默认全选，与后端"空 = 不筛"一致。
 //   必须存成模块级变量而不是每次读 DOM：loadGraph 会重建图例的 innerHTML，
 //   只看 DOM 的话重绘后勾选状态就没了，表现为"点了一下没反应"。
@@ -1791,6 +1800,9 @@ function gpQuery(){
   if(f) q.set('hop', h);
   const k = ($('gp_kw')?.value||'').trim();
   if(k) q.set('keyword', k);
+  // 高亮词：与上面的 keyword 分开传，绝不能合并成一个参数
+  const fd = ($('gp_find')?.value||'').trim();
+  if(fd) q.set('find', fd);
   // 站点/日期：筛的是**关系所在文章**，所以口径要跟着走
   const sites = [...document.querySelectorAll('#gp_sites input:checked')]
       .map(x=>x.value);
@@ -1822,6 +1834,7 @@ function gpReset(){
   $('gp_maxdeg').value = 0;
   $('gp_focus').value = '';
   $('gp_kw').value = '';
+  $('gp_find').value = '';
   $('gp_hop').value = 1;
   $('gp_dfrom').value = '';
   $('gp_dto').value = '';
@@ -1834,6 +1847,33 @@ function gpReset(){
   GP_LEGEND_ON = new Set(Object.keys(GP_STYLE));
   document.querySelectorAll('#gp_legend input[value]').forEach(x=>x.checked = true);
   loadGraph();
+}
+
+// 高亮输入去抖：oninput 每敲一个字都会触发，这里不挡就变成
+// 「打两个字发 2 次请求」，而每次请求都要重算整张图。
+let _gpFindTimer = null;
+function gpFindDebounce(){
+  clearTimeout(_gpFindTimer);
+  _gpFindTimer = setTimeout(()=>{ loadGraph(); }, 320);
+}
+function gpFindClear(){
+  clearTimeout(_gpFindTimer);
+  const el = $('gp_find');
+  if(el) el.value = '';
+  loadGraph();
+}
+
+// 高亮结论的一句话回显（命中 / 没命中），两个出口共用：
+// 空图分支与非空图分支必须说同一套话，否则「筛空了图 + 高亮没命中」
+// 会被读成两个互不相干的结论。
+function gpFindNote(a){
+  const fd = ($('gp_find')?.value||'').trim();
+  if(!fd) return '';
+  const nh = ((a||{}).graph||{}).find_hits || 0;
+  const eh = ((a||{}).graph||{}).find_edge_hits || 0;
+  return nh
+    ? `　<span style="color:${GP_HIT_COLOR}">◆ 高亮「${esc(fd)}」：${nh} 个节点 / ${eh} 条关系</span>`
+    : `　<span style="color:var(--warn)">◆「${esc(fd)}」在本图中没有命中（节点数与关系数未变）</span>`;
 }
 
 async function gpLoadFacets(){
@@ -2049,7 +2089,7 @@ function renderNet(a){
       <span style="color:var(--warn);font-size:13px">${esc(why)}</span><br>
       <span style="font-size:11.5px">放宽筛选试试：把图例的实体类型多勾几类、
       或把度数下限调低。</span></div>`;
-    $('gp_cnt').textContent = '';
+    $('gp_cnt').textContent = gpFindNote(a);
     // 图例要照常渲染，否则用户连"去哪儿改筛选"都看不到 ——
     // 图例同时就是筛选器，藏起来等于把唯一的出路也藏了。
     // ⚠ 必须传真实的 a.graph：avail_by_group 在里面，
@@ -2060,6 +2100,10 @@ function renderNet(a){
   const hidden = a.graph.hidden_nodes || 0;
   $('gp_cnt').textContent = `（${nodes.length} 节点 / ${edges.length} 边`+
     (hidden?`，已折叠 ${hidden} 个低度数节点`:'')+'）';
+  // 高亮结果必须**明说命中几个**。只靠图上变色是不够的：
+  // 用户搜「宣传部」命中 0 个时，图和没搜时长得一模一样，
+  // 分不清是"确实没有"还是"高亮根本没生效" —— 而这两件事要做的动作完全相反。
+  $('gp_cnt').insertAdjacentHTML('beforeend', gpFindNote(a));
   host.innerHTML = '';
 
   // vis-network 由后端内联进来了（零 CDN）。若没加载成功给出明确提示，
@@ -2074,18 +2118,24 @@ function renderNet(a){
   const ds = new vis.DataSet(nodes.map(n=>{
     const g = n.group || 'org';
     const st = GP_STYLE[g] || GP_STYLE.org;
+    // 命中节点盖掉类型配色。**高亮优先于类型** —— 否则命中项还是原来的蓝，
+    // 用户根本看不出哪儿被标了，等于高亮没生效。
+    const bg = n.hit ? GP_HIT_COLOR : st.c;
+    const bd = n.hit ? '#fff' : '#e6e8ee';
     return {id:n.id, label:n.label||n.id, group:g,
             size:n.size||16, title:n.title||'',
-            color:{background:st.c, border:'#e6e8ee', highlight:{background:st.c, border:'#fff'}},
+            color:{background:bg, border:bd,
+                   highlight:{background:bg, border:'#fff'}},
             shape:st.s, font:{color:'#e6e8ee', size:13},
-            borderWidth: n.degree>=20 ? 2 : 1,
+            borderWidth: n.hit ? 3 : (n.degree>=20 ? 2 : 1),
             value: n.degree||1};
   }));
   const de = new vis.DataSet(edges.map((e,i)=>({
     id:'e'+i, from:e.from, to:e.to,
-    width: Math.min(6, Math.max(1, (e.weight||1)*0.6)),
-    color:{color:'#3a4a63', highlight:'#7ab8ff', hover:'#7ab8ff',
-           opacity:0.85},
+    width: e.hit ? 3 : Math.min(6, Math.max(1, (e.weight||1)*0.6)),
+    color:{color:e.hit ? GP_HIT_COLOR : '#3a4a63',
+           highlight:'#7ab8ff', hover:'#7ab8ff',
+           opacity: e.hit ? 1 : 0.85},
     title:e.title||'', weight:e.weight||1, types:e.types||[],
     _from:e.from, _to:e.to,
   })));

@@ -231,10 +231,22 @@ print()
 print("=" * 70)
 print("⑬ Word 版（.docx）与 md 版是否同源、没漂移")
 print("=" * 70)
-docx_path = ROOT / "docs" / "报告-网信办角色与权责边界.docx"
+# ⚠ 这里**不能写死文件名**。报告 docx 已经被用户改名成「…(10.13).docx」，
+#   写死的闸当场就红 —— 而且报错说的是「缺文件」，
+#   看起来像生成步骤漏了，其实是我这里过期了。
+#   改成按模式取：多个匹配时按修改时间取最新的那个，
+#   这样用户加日期后缀、改版本名都不会再把闸弄坏。
+_docx_cands = sorted((ROOT / "docs").glob("报告-网信办角色与权责边界*.docx"),
+                     key=lambda p: p.stat().st_mtime, reverse=True)
+docx_path = _docx_cands[0] if _docx_cands else (
+    ROOT / "docs" / "报告-网信办角色与权责边界.docx")
 if not docx_path.exists():
-    check("docx 已生成", False, f"缺 {docx_path.name}，跑 py -3 md2docx.py")
+    check("docx 已生成", False, "docs/ 下找不到 报告-网信办角色与权责边界*.docx，"
+                                 "跑 py -3 md2docx.py")
 else:
+    if len(_docx_cands) > 1:
+        print(f"  NOTE  docs/ 下有 {_docx_cands} 份报告 docx，"
+              f"本闸只验最新的：{docx_path.name}")
     import docx as _docx
     d = _docx.Document(str(docx_path))
 

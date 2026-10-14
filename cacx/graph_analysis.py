@@ -361,7 +361,8 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
                          hop: int = 1,
                          node_types: Optional[Dict[str, str]] = None,
                          want_types: Optional[set] = None,
-                         avail_by_group: Optional[Dict[str, int]] = None
+                         avail_by_group: Optional[Dict[str, int]] = None,
+                         find: str = ""
                          ) -> Dict[str, Any]:
     """
     networkx 结果 → pyvis 前端要的 {nodes, edges}。
@@ -474,6 +475,26 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
     edges.sort(key=lambda e: (min(e["from"], e["to"]),
                               max(e["from"], e["to"])))
 
+    # ---- 检索高亮 ----
+    # ⚠ 与 `keyword` 的区别是**只标不改图**：
+    #   keyword 是裁剪（不匹配的节点直接消失，指标也跟着变），
+    #   find 是高亮（节点照旧全在，只有命中项换个颜色）。
+    #   两者混用会让用户以为「搜不到 = 库里没有」，而实际上它只是在裁。
+    # ⚠ 匹配口径与 keyword 保持一致（子串、大小写敏感），否则
+    #   「搜得到但不高亮」和「高亮了但搜不到」会同时出现。
+    find = (find or "").strip()
+    hits = set()
+    for x in nodes:
+        x["hit"] = bool(find) and find in str(x["id"])
+        if x["hit"]:
+            hits.add(x["id"])
+    # 边命中 = **两端都命中**。只点亮命中一端的边的话，搜一个泛词
+    # （比如「网信」）几乎等于把整张图点亮，等于没筛。
+    for e in edges:
+        e["hit"] = e["from"] in hits and e["to"] in hits
+    hit_nodes = len(hits)
+    hit_edges = sum(1 for e in edges if e["hit"])
+
     # 图例要显示「每类各多少个」，所以把**画出来的**这批节点按类型点一次数。
     # ⚠ 必须数 nodes 而不是全图：图例写在图下面，标的是屏幕上看得见的那些，
     #   标成全图 1633 节点里的 856 个机构，图上只有 300 个，数字对不上。
@@ -482,6 +503,9 @@ def to_pyvis_nodes_edges(result: Dict[str, Any],
         by_group[x["group"]] = by_group.get(x["group"], 0) + 1
     return {"nodes": nodes, "edges": edges,
             "scope_note": scope_note,
+            "find": find,
+            "find_hits": hit_nodes,
+            "find_edge_hits": hit_edges,
             "scope_nodes": sub.number_of_nodes(),
             "scope_edges": sub.number_of_edges(),
             "hidden_nodes": max(0, sub.number_of_nodes() - len(nodes)),
