@@ -1362,52 +1362,51 @@ class Database:
                     f"ORDER BY pub_day DESC, id DESC LIMIT ?", args + [limit])]
                 picked_by_year: Dict[str, int] = {}
             else:
-                # 按年份分层：每年先取 floor(limit/年数)，
-                # 余额再按年份轮流补 —— 用 OFFSET 翻页，每一年各自推进，
-                # 天然保证「每年都被覆盖到」，不会出现某年被跳过的坑。
+                # 按年份分层：每年先取 floor(limit/年数)，余额再按年份轮流补。
+                #
+                # ⚠ 分配规则与旧版**逐行等价**（每年按 pub_day DESC,id DESC
+                #   取前缀；余额从年份表头开始一轮一轮各 +1，加满 limit 或
+                #   所有年份见底即停），改的只是「怎么算、怎么取」：
+                #   旧版每补一篇就发一条 `LIMIT 1 OFFSET n`，全量口径
+                #   （28900 篇）实测要发 ~6900 条 SQL —— 7.30s 里 7.1s 花在这。
+                #   现在先把「每年最终取几篇」用纯整数算出来，再每年只发
+                #   **一条** SELECT 取该年前缀。实测 7.30s → 0.20s。
+                #   两边取回的 id 序列逐位相同（tests_extract_incremental.py 钉住）。
                 ny = max(1, len(years))
                 per = max(1, limit // ny)
-                rows, picked_by_year = [], {}
                 COLS = ("id,site,column_name,title,pub_day,url,chars,"
                         "COALESCE(content_empty,0) ce")
-                for y in years:
-                    yr = str(y["y"])
-                    offset = 0
-                    want = min(per, y["n"])
-                    while offset < want:
-                        batch = self.conn.execute(
-                            f"SELECT {COLS} FROM articles{w} "
-                            f"AND substr(pub_day,1,4)=? "
-                            f"ORDER BY pub_day DESC, id DESC LIMIT ? OFFSET ?",
-                            args + [yr, want - offset, offset]).fetchall()
-                        rows += [dict(r) for r in batch]
-                        offset += len(batch)
-                        if not batch:
-                            break
-                    picked_by_year[yr] = offset
-                # 配额用不完就继续补，逐年轮流
-                left = limit - len(rows)
+                picked_by_year = {str(y["y"]): min(per, y["n"]) for y in years}
+
+                # 余额分配（与旧版同一个轮转顺序：年份表头起、逐年 +1）
+                left = limit - sum(picked_by_year.values())
+                room = {str(y["y"]): y["n"] - picked_by_year[str(y["y"])]
+                        for y in years}
                 while left > 0:
                     grew = 0
                     for y in years:
                         if left <= 0:
                             break
                         yr = str(y["y"])
-                        if picked_by_year.get(yr, 0) >= y["n"]:
+                        if room[yr] <= 0:
                             continue
-                        batch = self.conn.execute(
-                            f"SELECT {COLS} FROM articles{w} "
-                            f"AND substr(pub_day,1,4)=? "
-                            f"ORDER BY pub_day DESC, id DESC LIMIT 1 OFFSET ?",
-                            args + [yr, picked_by_year.get(yr, 0)]).fetchall()
-                        if not batch:
-                            continue
-                        rows += [dict(r) for r in batch]
-                        picked_by_year[yr] = picked_by_year.get(yr, 0) + 1
-                        left -= len(batch)
-                        grew += len(batch)
+                        room[yr] -= 1
+                        picked_by_year[yr] += 1
+                        left -= 1
+                        grew += 1
                     if not grew:
                         break
+
+                rows = []
+                for y in years:
+                    yr = str(y["y"])
+                    if picked_by_year[yr] <= 0:
+                        continue
+                    rows += [dict(r) for r in self.conn.execute(
+                        f"SELECT {COLS} FROM articles{w} "
+                        f"AND substr(pub_day,1,4)=? "
+                        f"ORDER BY pub_day DESC, id DESC LIMIT ?",
+                        args + [yr, picked_by_year[yr]])]
 
         rows.sort(key=lambda r: (r["pub_day"], r["id"]))
         usable = [r for r in rows if not r["ce"]]
@@ -2273,29 +2272,118 @@ class Database:
                 f"ORDER BY r.weight DESC, r.article_id LIMIT ?",
                 args + [int(limit)])]
 
+    #: 单条 SQL 里 `id IN (…)` 最多绑几个参数。
+    #:  SQLite 的变量上限是 SQLITE_MAX_VARIABLE_NUMBER：3.32 之前 999，
+    #:  之后 32766。实测本机 3.49.1：32766 条能过，32767 条当场报
+    #:  `too many SQL variables`。而界面上的篇数上限是 39999 ——
+    #:  也就是说**配额一开到上限就会炸**（抽 28900 篇时已经只差一步）。
+    #:  取 900 是为了兼容老 SQLite（999）并把单条 SQL 的长度压下来。
+    _IN_BATCH = 900
+
+    def _id_batches(self, ids: List[Any]) -> List[List[Any]]:
+        """把 id 列表切成流水（每片 ≤ _IN_BATCH），供各处 IN 查询复用。"""
+        n = self._IN_BATCH
+        return [ids[i:i + n] for i in range(0, len(ids), n)]
+
+    def _fetch_sources(self, ids: List[Any]) -> List[Dict[str, Any]]:
+        """
+        按 id 取回原文（id/title/url/content_text），分批查。
+
+        ⚠ 必须分批：一条 `id IN (?,?,…)` 的变量数就是篇数 —— 28900 篇时
+          已经逼近 SQLite 的 32766 上限，配额开到 39999 直接报
+          `too many SQL variables`（实测过）。分批后每次最多 900 个变量，
+          走主键索引，逐批开销与单条大 SQL 同量级（实测合计 0.40s）。
+
+        返回顺序按 id 升序：旧版单条 IN 查询也是这个顺序（靠 SQLite 对
+          rowid IN 的索引扫描顺序），这里显式排序，不再依赖实现细节。
+        """
+        if not ids:
+            return []
+        out: List[Dict[str, Any]] = []
+        with self._lock:
+            for chunk in self._id_batches(sorted(ids)):
+                q = ",".join("?" * len(chunk))
+                out += [{"id": r[0], "title": r[1] or "", "url": r[2] or "",
+                         "content_text": r[3] or ""}
+                        for r in self.conn.execute(
+                            f"SELECT id, title, url, COALESCE(content_text,'') "
+                            f"FROM articles WHERE id IN ({q})", chunk)]
+        return out
+
+    def _drop_extracted(self, ids: List[Any]) -> List[Any]:
+        """
+        挑掉「已经有抽取结果」的文章 —— 增量档的差集过滤。
+
+        判据：该 article_id 在 entities 或 relations 里出现过（任一即可）。
+        两张表都有 article_id 索引，所以按 id 分批查比全表 DISTINCT 更划算，
+          也不会随语料规模线性变慢（28900 篇 = 33 批 × 2 条 SQL）。
+
+        ⚠ 两条固有边界（存量设计导致，本次不改口径）：
+          · articles 表没有「抽过没有」的标记列，只能反查这两张结果表；
+          · 抽过但**一个实体一个关系都没抽出来**的文章，两边都没记录，
+            增量下会被反复重跑 —— 所以增量省掉的是「已抽过且有结果」
+            的那些篇，不是「跑过一次就永不再跑」。
+        """
+        have = set()
+        with self._lock:
+            for chunk in self._id_batches(list(ids)):
+                q = ",".join("?" * len(chunk))
+                for t in ("entities", "relations"):
+                    have.update(r[0] for r in self.conn.execute(
+                        f"SELECT DISTINCT article_id FROM {t} "
+                        f"WHERE article_id IN ({q})", chunk))
+        return [i for i in ids if i not in have]
+
     def extract_sources(self, site: str = "", column: str = "",
                         date_from: str = "2024-01-01",
                         date_to: str = "2099-12-31",
                         limit: int = 500,
-                        strategy: str = "stratified") -> List[Dict[str, Any]]:
+                        strategy: str = "stratified",
+                        only_unextracted: bool = False) -> List[Dict[str, Any]]:
         """
         给抽取引擎用的原文清单（id/title/url/content_text）。
 
         与 sample_articles 同口径，保证「抽取的分母 == 报告的分母」。
+
+        only_unextracted=True：只留「尚无抽取结果」的文章（增量档）。
+          ⚠ 它**不改抽样口径** —— 命中范围、抽样策略、配额分配与全量档
+            完全一样，只是把已经有实体/关系的那些篇挑掉（见 _drop_extracted）。
+        """
+        return self.extract_scope(
+            site=site, column=column, date_from=date_from, date_to=date_to,
+            limit=limit, strategy=strategy,
+            only_unextracted=only_unextracted)["articles"]
+
+    def extract_scope(self, site: str = "", column: str = "",
+                      date_from: str = "2024-01-01",
+                      date_to: str = "2099-12-31",
+                      limit: int = 500,
+                      strategy: str = "stratified",
+                      only_unextracted: bool = False) -> Dict[str, Any]:
+        """
+        同 extract_sources，但把两个计数一并带出来，给 /api/extract/run 报账：
+
+          pool_hit          口径命中篇数（抽样抽到几篇，与该档位无关）
+          skipped_existing  其中因「已有抽取结果」被增量档跳过的篇数
+          articles          实际要抽的清单
+
+        ⚠ 另开一个方法而不是改 extract_sources 的返回类型：
+          后者在对接文档里是「返回原文清单」的公开签名，改成 dict 会
+          连带影响别的调用方；而且增量过滤是**在清单上再挑一遍**，
+          不是抽样阶段的参数，所以 sample_articles 的语义一行不动。
         """
         s = self.sample_articles(site=site, column=column,
                                  date_from=date_from, date_to=date_to,
                                  limit=limit, strategy=strategy)
         ids = [a["id"] for a in (s.get("items") or s.get("items_sample") or [])]
-        if not ids:
-            return []
-        q = ",".join("?" * len(ids))
-        with self._lock:
-            rows = self.conn.execute(
-                f"SELECT id, title, url, COALESCE(content_text,'') FROM articles "
-                f"WHERE id IN ({q})", ids).fetchall()
-        return [{"id": r[0], "title": r[1] or "", "url": r[2] or "",
-                 "content_text": r[3] or ""} for r in rows]
+        pool_hit = len(ids)
+        skipped = 0
+        if ids and only_unextracted:
+            kept = self._drop_extracted(ids)
+            skipped = len(ids) - len(kept)
+            ids = kept
+        return {"articles": self._fetch_sources(ids), "pool_hit": pool_hit,
+                "skipped_existing": skipped}
 
     def clear_graph(self, only: str = "all") -> Dict[str, Any]:
         """
