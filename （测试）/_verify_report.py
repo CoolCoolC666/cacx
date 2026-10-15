@@ -489,9 +489,22 @@ else:
           not missing, f"缺 {missing}" if missing else "无缺失")
     # 口径措辞守卫：joint_issue 的判定有触发词门槛，
     # 报告若再写成「同句共现」就是与实测相反（证据句 100% 含联合类触发词）。
+    #
+    # ⚠ 说明文字必须**跟着结论变**，不能红绿都印同一句失败措辞 ——
+    #   那样一行 PASS 会读成「出了这个问题」，看的人很快就学会忽略 detail，
+    #   闸门也就跟着失效了（失败措辞印在 PASS 上 = 误报，误报会杀死闸门）。
+    #
+    # ⚠ 同时把「豁免了几处」显式报出来：本断言靠一句精确短语做豁免，
+    #   豁免数为 0 时它会「什么都没检查就通过」，那种 PASS 不构成证据。
+    _EX = "不是任意同句共现"
+    _n_ex = full.count(_EX)
+    _left = full.replace(_EX, "")
+    _bad_joint = "同句共现" in _left
     check("报告未把 joint_issue 误称为同句共现",
-          "同句共现" not in full.replace("不是任意同句共现", ""),
-          "出现了未经否定的「同句共现」")
+          not _bad_joint,
+          (f"出现了未经否定的「同句共现」" if _bad_joint
+           else f"已豁免 {_n_ex} 处否定式用法，无残留误称"
+                if _n_ex else "⚠ 报告里根本没有这句，断言空跑 —— 检查豁免短语是否被改写"))
 
     # markdown 残留：转换器失手时正文会露出星号或反引号
     residue = [tok for tok in ("**", "`") if tok in full]
