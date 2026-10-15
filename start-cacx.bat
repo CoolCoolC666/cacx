@@ -20,9 +20,12 @@ if errorlevel 1 (
 )
 
 rem ---- install deps on first run ----
-python -c "import fastapi, uvicorn, requests, bs4" >nul 2>nul
+rem 关系图谱依赖 pyvis(内联 vis-network)/networkx(关联分析)/jieba(分词与机构挖掘)，
+rem 首启自检必须一并检查，否则这 4 个装了而 pyvis 等缺失时，脚本会跳过安装、
+rem 图谱页因缺少 vis 资源无法加载。
+python -c "import fastapi, uvicorn, requests, bs4, pyvis, jieba, networkx" >nul 2>nul
 if errorlevel 1 (
-    echo [1/2] First run - installing dependencies, one time only.
+    echo [1/2] First run - installing dependencies (incl. graph libs pyvis/networkx/jieba), one time only.
     echo.
     python -m pip install -r requirements.txt
     if errorlevel 1 (
