@@ -49,12 +49,12 @@ c = sqlite3.connect(f"file:{p.as_posix()}?mode=ro&immutable=1", uri=True)
 cols = [r[1] for r in c.execute("PRAGMA table_info(articles)")]
 chk("articles 有 body_hash 列（字段说明已写）", "body_hash" in cols, str(cols[-2:]))
 n = c.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-chk("articles = 4416（与说明一致）", n == 4416, f"实际 {n}")
+chk("articles = 4433（与说明一致）", n == 4433, f"实际 {n}")
 n24 = c.execute("SELECT COUNT(*) FROM articles WHERE year>=2024").fetchone()[0]
 chk("库内全部是 2024+", n == n24, f"2024+ {n24}/{n}")
 body = c.execute("SELECT COUNT(*) FROM articles WHERE content_text IS NOT NULL "
                  "AND LENGTH(content_text)>0").fetchone()[0]
-chk("有正文 = 4415", body == 4415, f"实际 {body}，空正文 {n-body}")
+chk("有正文 = 4432", body == 4432, f"实际 {body}，空正文 {n-body}")
 chk("content_empty=1 与「无正文」数一致",
     c.execute("SELECT COUNT(*) FROM articles WHERE COALESCE(content_empty,0)=1"
               ).fetchone()[0] == n - body)
@@ -149,7 +149,7 @@ chk("线索表条数 > 清单联合列合计（宽窄两级设计成立）",
 
 # ---- 字段说明.md 的承诺数字 ----
 d = (PACK / "字段说明.md").read_text(encoding="utf-8")
-for want in ("4416", "4415", "221", "39", "30", "28900", "body_hash"):
+for want in ("4433", "4432", "221", "39", "30", "28917", "body_hash"):
     chk(f"字段说明.md 含 {want}", want in d)
 for stale in ("222 条", "28999", "46 MB", "47 篇", "34 篇", "4519 篇", "4517"):
     chk(f"字段说明.md 无过期数字 {stale}", stale not in d)
