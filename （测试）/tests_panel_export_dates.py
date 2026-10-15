@@ -238,8 +238,13 @@ const src = m[1];
 
 // 按名字抠出函数体（数括号，不靠正则 —— 正则配不平嵌套）
 function grab(name) {
-  const i = src.indexOf('function ' + name + '(');
+  let i = src.indexOf('function ' + name + '(');
   if (i < 0) return '';
+  // ⚠ async 不能丢：抠出来的是字符串，`function f(){ await g() }` 是**语法错误**，
+  //   一个 async 函数就能让整个沙箱脚本解析失败。症状是 bootErr（不是 ReferenceError），
+  //   很难联想到「少抄了 6 个字符」。
+  const am = src.slice(Math.max(0, i - 8), i).match(/async\s+$/);
+  if (am) i -= am[0].length;
   let k = src.indexOf('{', i), depth = 0;
   for (; k < src.length; k++) {
     const c = src[k];
@@ -248,13 +253,28 @@ function grab(name) {
   }
   return src.slice(i, k + 1);
 }
-const need = ['monthsToFrom', 'panelDateQs', 'dlPanel', 'dlSnapshot'];
+// 抠哪些函数进沙箱 —— 这是**闭包**，不是一份清单：
+//   dlPanel / dlSnapshot 本轮新增了对 pnOrgMode() 的调用，只抠原来那 4 个
+//   就是「沙箱里少一个函数」→ ReferenceError（本类里那两条红的根因）。
+//   凡入口函数直接/间接会调到的，一个都不能漏。
+//   后半段是本轮图谱侧同批新增的函数：本测试台暂时不调它们，
+//   一起抠进来是为了下次补图谱导出断言时不再踩同一个坑。
+const need = ['monthsToFrom', 'panelDateQs', 'pnOrgMode', 'dlPanel', 'dlSnapshot',
+              'panelScopeQs', 'panelOrgsQs', 'pnRefineNote', 'renderPanelOrgs',
+              'loadPanelOrgs', 'gpMode', 'gpFacetsQs', 'gpRebuildChecks',
+              'gpRenderFacets', 'gpModeChange'];
 const body = need.map(grab);
 const missing = need.filter((n, i) => !body[i]);
 
 const DL = [];
 const REG = {};
-function el(id) { return REG[id] || (REG[id] = {id: id, value: '', innerHTML: ''}); }
+// 本轮新增的两个「档位」下拉框：真实页面上默认就是粗选。
+// 桩里必须同值 —— 否则沙箱里的默认档位和屏幕不是一个状态，测了等于没测
+// （value 留空串时 pnOrgMode() 虽然也返回 'coarse'，但那是「恰好」，不是「同状态」）。
+const DEF = { pn_orgmode: 'coarse', gp_mode: 'coarse' };
+function el(id) {
+  return REG[id] || (REG[id] = {id: id, value: DEF[id] || '', innerHTML: ''});
+}
 const SB = {
   console, Math, Date, URLSearchParams, parseInt, String, Object, Array, JSON,
   $: el,
@@ -340,7 +360,9 @@ class TestFrontendSendsDates(unittest.TestCase):
         from urllib.parse import urlparse, parse_qs
         return parse_qs(urlparse(c[0]["urls"][0]).query)
 
-    def test_四个函数都抠出来了(self):
+    def test_入口函数及其依赖都抠出来了(self):
+        # 名字不再叫「四个函数」：本轮 entry 的闭包从 4 个长到 15 个，
+        # 留着旧名会让下一个人以为这里只盯那 4 个。
         self.assertEqual(self.R["missing"], [],
                          "index.html 里少了函数：%s" % self.R["missing"])
         self.assertIsNone(self.R["bootErr"], "脚本报错：%s" % self.R["bootErr"])
