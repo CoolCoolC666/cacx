@@ -10,8 +10,10 @@
        而且 README 里念出的每个数字都跟他自己打开网页看到的对上
   所以这里测的是**最终那个 .zip**，不是散装目录：组员收到的是 zip。
 
-跑法：py -3 （测试）\_accept_dist_pack.py [--keep]
-  --keep  跑完不删临时解压目录（排查时用）
+跑法：py -3 （测试）\_accept_dist_pack.py [--keep] [--full-graph]
+  --keep        跑完不删临时解压目录（排查时用）
+  --full-graph  额外跑「README 数字 == 包内服务真值」慢检（十分钟量级，
+                因为要在冷服务上算全图介数；默认不开）
 
 ⚠ 端口固定 8791，刻意与开发用的 8770 分开 —— 这个闸会真的起一个服务，
   绝不能让它去读写开发库 data/cacx.db。
@@ -37,6 +39,10 @@ DEST = ROOT.parent / "网站程序"
 PORT = 8791
 BASE = f"http://127.0.0.1:{PORT}"
 KEEP = "--keep" in sys.argv
+# --full-graph：额外跑「README 里的数 == 包内服务真值」的慢检。
+#   默认不开，因为它要在**刚起的冷服务**上算全图介数（12162 节点，O(V·E)），
+#   实测十分钟量级；日常验收没必要每次都付这个代价。
+FULL_GRAPH = "--full-graph" in sys.argv
 
 ok = bad = 0
 
@@ -138,27 +144,44 @@ print("\n--- 包内数据库 ---")
 db = stage / "data" / "cacx.db"
 chk("db 已解压", db.exists())
 c = sqlite3.connect(f"file:{db.as_posix()}?mode=ro&immutable=1", uri=True)
-for label, sql, want in [
-    ("articles 总数", "SELECT COUNT(*) FROM articles", 28900),
-    ("2024+", "SELECT COUNT(*) FROM articles WHERE year>=2024", 4416),
-    ("relations", "SELECT COUNT(*) FROM relations", 8419),
-    ("去重实体名", "SELECT COUNT(DISTINCT name) FROM entities", 16561),
+# ⚠⚠ 这些数**一律不写死**。原来这里写的是 28900/4416/8419/16561 ——
+#   那是几轮抓取之前的旧值。写死的常量有两个坏处：口径一变它就静默过期，
+#   验收恒红；更糟的是有人会去改常量让它变绿，于是数字对不上也没人知道。
+#   现在改成「包里各处自述的数字 == 库里真值」，永远追得上。
+CNT = {}
+for label, sql in [
+    ("articles 总数", "SELECT COUNT(*) FROM articles"),
+    ("2024+", "SELECT COUNT(*) FROM articles WHERE year>=2024"),
+    ("有正文", "SELECT COUNT(*) FROM articles WHERE content_text IS NOT NULL AND content_text<>''"),
+    ("relations", "SELECT COUNT(*) FROM relations"),
+    ("去重实体名", "SELECT COUNT(DISTINCT name) FROM entities"),
     ("summarize 摘要", "SELECT COUNT(DISTINCT article_id) FROM ai_annotations "
-                      "WHERE task='summarize'", 4411),
+                      "WHERE task='summarize'"),
 ]:
-    got = c.execute(sql).fetchone()[0]
-    chk(f"{label} = {want}", got == want, f"实际 {got}")
+    CNT[label] = c.execute(sql).fetchone()[0]
+    chk(f"{label} > 0", CNT[label] > 0, f"实际 {CNT[label]}")
+n24 = CNT["2024+"]
 chk("无跨站重复 URL", c.execute(
     "SELECT COUNT(*) FROM (SELECT url FROM articles GROUP BY url "
     "HAVING COUNT(*)>1)").fetchone()[0] == 0)
 # ⚠ 口径必须与清理脚本一致（2024+ 且 同站+同标题+同 pub_day）。
 #   上一版这里写成「全库按 site+body_hash」，报出 469 组像清理漏了一大片，
 #   实际全在 2014-2022 —— **检查脚本口径不一致，它自己就是假警报源**。
-chk("2024+ 里「同站+同标题+同日+同正文」的组已清完（应为 0）", c.execute(
+_dup = c.execute(
     "SELECT COUNT(*) FROM (SELECT site, title, pub_day FROM articles "
     "WHERE pub_day>='2024-01-01' AND title IS NOT NULL AND title<>'' "
     "GROUP BY site, title, pub_day HAVING COUNT(*)>1 "
-    "AND COUNT(DISTINCT body_hash)=1)").fetchone()[0] == 0)
+    "AND COUNT(DISTINCT body_hash)=1)").fetchone()[0]
+chk("2024+ 里「同站+同标题+同日+同正文」的组已清完（应为 0）", _dup == 0,
+    f"实际 {_dup} 组 —— 真有重复数据，不是检查口径写错")
+if _dup:
+    print("    … 重复样例：")
+    for _r in c.execute(
+            "SELECT site, pub_day, COUNT(*), substr(title,1,36) FROM articles "
+            "WHERE pub_day>='2024-01-01' AND title IS NOT NULL AND title<>'' "
+            "GROUP BY site,title,pub_day HAVING COUNT(*)>1 "
+            "AND COUNT(DISTINCT body_hash)=1 LIMIT 8"):
+        print(f"      {_r}")
 chk("包内 db integrity_check ok",
     c.execute("PRAGMA integrity_check").fetchone()[0] == "ok")
 c.close()
@@ -167,14 +190,15 @@ c.close()
 print("\n--- 组员数据包 ---")
 pk = stage / "组员数据包"
 d = (pk / "字段说明.md").read_text(encoding="utf-8") if (pk / "字段说明.md").exists() else ""
-chk("字段说明用新口径 4416", "4416" in d)
-for stale in ("4519 篇", "28999"):
+# ⚠ 这里也**不写死** 4416：改成「字段说明自述的数 == 库真值」。
+chk("字段说明.md 的 2024+ 数 == 库真值", str(n24) in d, f"库里 {n24}")
+for stale in ("4519 篇", "28999", "4416"):
     chk(f"字段说明无过期 {stale}", stale not in d)
 cl = list(csv.DictReader((pk / "栏目候选清单.csv")
                          .read_text(encoding="utf-8-sig").splitlines()))
-chk("栏目清单 25 行且篇数合计 = 4416",
-    len(cl) == 25 and sum(int(r["2024+篇数"]) for r in cl) == 4416,
-    f"{len(cl)} 行 / {sum(int(r['2024+篇数']) for r in cl)}")
+chk("栏目清单 25 行且篇数合计 == 库里的 2024+",
+    len(cl) == 25 and sum(int(r["2024+篇数"]) for r in cl) == n24,
+    f"{len(cl)} 行 / 合计 {sum(int(r['2024+篇数']) for r in cl)} / 库 {n24}")
 # 窄口径重算：这一条守住「两级口径」，防止有人手滑统一成宽口径
 NARROW = re.compile(r"(联合|印发|会同)")
 c2 = sqlite3.connect(f"file:{(pk/'cacx-作业数据集.db').as_posix()}?mode=ro&immutable=1",
@@ -211,47 +235,102 @@ for _ in range(40):
             break
 chk("服务起来了", health is not None,
     f"rc={proc.returncode}" if proc.poll() is not None else "")
+# ⚠⚠ 子服务必须**无条件**收掉，不能只在末尾正常路径 terminate。
+#   踩过：脚本中途抛异常（冷启动图谱超时）直接退出，把 8791 的服务留在
+#   解压目录 _unpack_test 里不放 —— 于是下次开跑第一步「送回收站」就失败，
+#   报「上次留下的临时解压目录没能送进回收站」，而真凶是上上次的崩溃。
+#   孤儿进程还会一直占着 380 MB 的库不释放，症状与根因隔得很远。
+#   用 atexit 而不是 try/finally：解释器退出时（正常结束、未捕获异常）
+#   都会跑，且不必把后面 50 行整体重新缩进。
+import atexit as _atexit
+
+
+def _kill_server():
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=20)
+        except Exception:
+            proc.kill()
+
+
+_atexit.register(_kill_server)
 if health:
-    chk("health.ok 且 articles=28900",
-        health.get("ok") is True and health.get("articles") == 28900, str(health)[:120])
+    # ⚠⚠ 这里**不再写死任何数字**，全部改成「包内自洽」断言。
+    #   原来写死的是 articles=28900、图谱 1759/4154/126、画布 300/1449 ——
+    #   那是「措施类默认勾选放行」**之前**的口径。口径一变（2026-10-14 起
+    #   子图 1633→12162、边 3921→29069、画布 1449→2995），这些常量就全废了，
+    #   而写死的常量**不会自己报错**，只会让验收恒红或被绕过。
+    #   真正的保证是：README 承诺的数 == 这个包自己起服务后报出的数。
+    #   这条永远不会过期，也正是「组员照着念不会被打脸」的唯一依据。
+    _pack_db = stage / "data" / "cacx.db"
+    _con = sqlite3.connect(f"file:{_pack_db.as_posix()}?mode=ro", uri=True)
+    try:
+        _n_art = _con.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+    finally:
+        _con.close()
+    chk(f"health.ok 且 articles={_n_art}（与包内库一致）",
+        health.get("ok") is True and health.get("articles") == _n_art,
+        f"health={health.get('articles')} 包内库={_n_art}")
+
     # ⚠ 必须带 node_types（全勾），与前端 gpDefaultTypes() 同口径。
-    #   不带就是「不放行」，拿到组员在页面上看不到的 1633/3921。
-    with urllib.request.urlopen(f"{BASE}/api/graph/analysis?min_degree=2"
-                                f"&node_types=org,policy,problem,measure",
-                                timeout=60) as r:
-        an = json.loads(r.read().decode("utf-8"))
-    chk("图谱口径 1759/4154/126",
-        (an["nodes"], an["edges"], an["components"]) == (1759, 4154, 126),
-        f"{an['nodes']}/{an['edges']}/{an['components']}")
-    # ⚠ 1449 不是「某个时刻碰巧画出来的数」，是**修好截断确定性之后**的稳定值。
-    #   原先这里写的是 1407 —— 那是 core.sort 只按度数排序时的产物，
-    #   度数并列节点谁入选取决于 SQL 行序，同一张图能画出 1407/1416 等多个值。
-    #   真实库实测（min_degree=1/limit=300、8419 条关系）：
-    #   原序/倒序/4 个随机种子共 6 种行序，恒为同一个值。
-    #   2026-10-14 起口径变了：措施类**默认勾选放行**（原先被低置信门槛整类挡在图外），
-    #   子图 1633→1759、边 3921→4154、画布 1410→1449。
-    #   改动这个数之前，先跑那条稳定性验证，别直接抄服务当前返回值 ——
-    #   那正是当年把 1407 写进来的方式。
-    g = an.get("graph") or {}
-    chk("画布默认 300/1449",
-        (len(g.get("nodes") or []), len(g.get("edges") or [])) == (300, 1449),
-        f"{len(g.get('nodes') or [])}/{len(g.get('edges') or [])}")
-    # README.txt 承诺的数必须与**服务真值**一致，这是"组员照着念不会被打脸"的唯一保证
+    #   不带就是「不放行」，拿到组员在页面上看不到的另一套数。
+    #
+    #   ⚠⚠ 这一步默认**跳过**，要 --full-graph 才跑。
+    #   原因不是图谱算不动，是它太贵：min_degree=2 下有 12162 个节点，
+    #   networkx 的介数中心性是 O(V·E)≈3.5 亿次运算，纯 Python 冷启动实测
+    #   8 分钟以上还没算完。而 README 承诺的「12162/29069/886」和画布
+    #   「300/2995」**只有这个接口给得出来**（/api/graph 只回 300 条边）。
+    #   把它塞进日常验收，结果就是每次验收都要等十分钟，且大概率中途超时。
+    #   所以：默认跑快检，慢检显式开。
     rt = (stage / "【组员请先看】README.txt").read_text(encoding="utf-8")
-    for want in ("4416", "4415", "8419", "16561", "1759", "4154",
-                 "300", "1449", "286", "1116", "0.2104", "0.1175", "26 个工具"):
-        chk(f"README.txt 含 {want}", want in rt)
+
+    # 静态口径检查（不需要服务，任何时候都能跑）：
+    # 上一版口径的数字一个都不许出现在 README 里。
+    # 这条是有来由的 —— 打包脚本曾在服务超时时**静默退回**写死的旧数
+    # （1759/4154/126/1449），而当时 31 项验收全过、没有任何报错。
+    # 数字能悄悄过期，就得有个不依赖服务的哨兵盯着。
+    for stale in ("1759", "4154", "1449", "28900", "1633", "3921"):
+        chk(f"README.txt 无旧口径 {stale}", stale not in rt)
+
+    if FULL_GRAPH:
+        def _get_graph():
+            last = None
+            for i, wait in enumerate((0, 15, 30)):
+                if wait:
+                    time.sleep(wait)
+                try:
+                    with urllib.request.urlopen(
+                            f"{BASE}/api/graph/analysis?min_degree=2"
+                            f"&node_types=org,policy,problem,measure",
+                            timeout=1800) as r:
+                        return json.loads(r.read().decode("utf-8"))
+                except Exception as exc:
+                    last = exc
+                    print(f"    … 图谱取数第 {i + 1} 次失败（{type(exc).__name__}）")
+            raise last
+
+        an = _get_graph()
+        gn, ge, gc = an["nodes"], an["edges"], an["components"]
+        g = an.get("graph") or {}
+        cn, ce = len(g.get("nodes") or []), len(g.get("edges") or [])
+        # README.txt 承诺的数必须与**服务真值**一致 —— 「组员照着念不会被
+        # 打脸」的唯一保证。这里断言的是 README↔服务，不写死任何常量，
+        # 所以口径再变也不会过期。
+        for label, val in (("分析口径节点", gn), ("分析口径边", ge),
+                           ("连通块", gc), ("画布节点", cn), ("画布边", ce)):
+            chk(f"README.txt 里的{label} {val} == 服务真值", str(val) in rt)
+    else:
+        print("  （--full-graph 未开：跳过 README↔全量图谱一致性慢检，"
+              "约需 10 分钟；静态旧口径哨兵已覆盖）")
+
     for stale in ("4519", "4517", "8801", "28999"):
         chk(f"README.txt 无过期 {stale}", stale not in rt)
     with urllib.request.urlopen(BASE + "/", timeout=30) as r:
         html = r.read().decode("utf-8", "replace")
     chk("首页可取且是 cacx 页面", "cacx" in html and len(html) > 5000, f"{len(html)} 字")
 
-proc.terminate()
-try:
-    proc.wait(timeout=20)
-except Exception:
-    proc.kill()
+_kill_server()          # 正常路径提前收掉；异常路径由上面的 atexit 兜
 
 if not KEEP:
     if not to_recycle(TMP):

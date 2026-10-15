@@ -56,6 +56,9 @@ _[a-z0-9]*.txt
 !_temppool.py
 !_regress.py
 !_mutcheck_temppool.py
+#   _repack.py：发布打包入口，docs/对接说明/05-R4 把它和 _accept_dist_pack.py
+#   并列写成发版命令；漏掉 = 组员/同伴照文档做，第二步就找不到文件。
+!_repack.py
 
 # ---- 测试临时库落点（不该入库，且泄漏时要一眼看得见）----
 # 临时库统一落这里而不是 %TEMP%：C 盘不涨，且泄漏能直接 dir 出来。
