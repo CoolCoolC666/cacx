@@ -467,6 +467,85 @@ else:
 
     check("docx 已生成", True, f"{docx_path.stat().st_size:,} 字节")
 
+    # ---------------------------------------------------------- ⑬-b 漂移
+    # ⚠⚠ 本文件此前的 103 项**全部只读 docx**，没有任何一项读 md。
+    #   也就是说：改完 md 忘了重新生成 docx，交付的 Word 版会静默停在
+    #   旧内容，而这 103 项照样全绿。实测就是这样：改 md 注入错误，
+    #   闸门毫无反应 —— 因为它压根没看 md。
+    #   报告以 md 为主稿、docx 由 md2docx.py 生成，这个漂移方向是常态。
+    #
+    # 做法：拿 md 现场重新生成一份到临时文件，与现有 docx **比文本**。
+    # 不用时间戳（转档器重跑一次 mtime 就变了，比不出内容差异），
+    # 不用手工维护的哈希（忘了更新就恒真）。比对内容是唯一诚实的判据。
+    _md_path = ROOT / "docs" / "报告-网信办角色与权责边界.md"
+    _md_cands = sorted(ROOT.glob("docs/报告-网信办角色与权责边界*.md"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+    if _md_cands:
+        _md_path = _md_cands[0]
+    _drift = None
+    if not _md_path.exists():
+        check("md↔docx 同源（无漂移）", False,
+              f"找不到 {_md_path.name}，无法比对")
+    else:
+        import subprocess as _sp
+        import tempfile as _tf
+        # ⚠⚠ **必须显式给 -o**。md2docx.py 不给 -o 时走
+        #   `out = src.with_suffix(".docx")` —— 也就是**就地覆盖 docs/ 下
+        #   那份真 docx**。校验脚本为了「看一眼」把原件改掉，
+        #   等于把要比对的两边一起污染，比出来永远一致。
+        #   这个错一旦犯，闸门不但没用，还会主动销毁证据。
+        _tmpdir = Path(_tf.mkdtemp(prefix="cacx_md2docx_"))
+        _fresh = _tmpdir / "fresh.docx"
+        _r = _sp.run([sys.executable, "-X", "utf8",
+                      str(ROOT / "md2docx.py"),
+                      str(_md_path), "-o", str(_fresh)],
+                     cwd=str(ROOT), capture_output=True, timeout=300)
+        # ⚠ **不要用 text=True**。子进程按 Windows 默认编码（GBK/cp936）
+        #   写 stdout，而 text=True 走 UTF-8 解码 —— 转档一旦真失败，
+        #   拿到的不是真实报错，而是一个 UnicodeDecodeError：
+        #   故障原因被解码错误顶替，等于在最需要诊断的时候瞎了。
+        #   这里收字节自己按 utf-8 解，解不了就替换，绝不抛。
+        _out = (_r.stdout or b"").decode("utf-8", "replace")
+        _err = (_r.stderr or b"").decode("utf-8", "replace")
+        if _r.returncode != 0 or not _fresh.exists():
+            _drift = (f"重新生成失败 rc={_r.returncode} "
+                      f"{( _err.strip() or _out.strip())[-200:]}")
+        else:
+            _d2 = _docx.Document(str(_fresh))
+            # ⚠ 别把列表名和单元格循环变量取成同一个 —— 这里踩过：
+            #   _c2 既是 chunks 列表又是 cell，一 append 就变成
+            #   「_Cell.append」，整段炸掉，⑬ 之后所有检查全都不跑，
+            #   报错还指向一个跟真实原因无关的行。
+            _chunks2 = [p.text for p in _d2.paragraphs]
+            for _t2 in _d2.tables:
+                for _row2 in _t2.rows:
+                    for _cell2 in _row2.cells:
+                        _chunks2.append(_cell2.text)
+            _fresh_text = "\n".join(_chunks2)
+            if _fresh_text.strip() == full.strip():
+                _drift = "同源"
+            else:
+                import difflib as _dl
+                _a, _b = full.splitlines(), _fresh_text.splitlines()
+                _sm = _dl.SequenceMatcher(None, _a, _b)
+                _ops = [o for o in _sm.get_opcodes() if o[0] != "equal"]
+                _drift = (f"有 {len(_ops)} 处不一致 "
+                          f"(md 重新生成 vs 现有 docx)，例如：")
+                for o in _ops[:3]:
+                    _tag = {"replace": "内容不同", "delete": "仅 docx 有",
+                            "insert": "仅 md 有"}.get(o[0], o[0])
+                    _ex_b = _b[o[3]] if o[3] < o[4] else (
+                        _b[o[4] - 1] if o[4] else "")
+                    _drift += f"\n         - {_tag}：{( _ex_b or '')[:50]}"
+        # 临时目录走项目内临时池，便于统一回收
+        try:
+            import shutil as _sh
+            _sh.rmtree(_tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+    check("md↔docx 同源（无漂移）", _drift == "同源",
+          _drift if _drift != "同源" else "重新生成后逐段一致")
+
     # 关键数字一个都不能少 —— Word 版最常见的失真就是转档时漏句/漏行
     # （2026-10-15 补：真库全区间重跑 + 补抽 10-12~10-14 新采的 19 篇后，
     #   窗口/全库两套数都动了，这些数同样必须转进 docx；

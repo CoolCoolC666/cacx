@@ -2,7 +2,8 @@
 r"""清理「一文多栏目发」造成的重复行（保守口径）。
 
 只删**确定**是同一篇的：同站 + 同标题 + 同发布日期 + 规范化正文完全相同。
-每组保留 id 最小的那篇（先入库的那篇），删其余。
+每组**优先保留有正文的那篇**（2026-10-15 起；此前是「保留 id 最小」），
+id 最小退化为同优先级下的次序；整组都无正文时才退回 id 最小。
 
 ⚠ 为什么口径这么窄：同正文还可能来自别的情形（图集 vs 正文、错别字版），
   那些不一定该合并。用 body_hash 单独分组能认出 597 组，但其中相当一部分
@@ -61,13 +62,40 @@ groups = d.conn.execute("""
     HAVING COUNT(*) > 1
     ORDER BY site, pub_day""").fetchall()
 
+
+def _pick_keep(conn, ids):
+    """同组里保留哪一条。
+
+    原规则是「保留 id 最小的」（先入库的那篇），2026-10-15 改为
+    **优先留有正文的**，id 最小退化为同优先级下的次序。
+
+    为什么改：id 最小 ≠ 更好。有正文那篇才是组员真正用得上的；
+    留一个空正文占位，等于把「有正文 N 篇」这个口径永远钉死成 N-1，
+    还制造出一道需要额外解释的例外。实测就踩中了：浙江站 2024-04-03
+    「打『国家』旗号的涉诈App」那组，id 最小的 #3691 恰好 content_empty=1，
+    等于删掉了有正文的、留下了没正文的。
+
+    ⚠ 正文的判据用 content_empty 标记而不是 length(content_text)>0：
+      后者会把「抓到 1 个空白字符」也当成有正文，而 content_empty
+      是入库时定的标记，口径唯一。
+    """
+    ph = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT id, content_empty FROM articles WHERE id IN ({ph}) ORDER BY id",
+        ids).fetchall()
+    with_body = [r["id"] for r in rows if not r["content_empty"]]
+    pool = with_body or [r["id"] for r in rows]
+    return pool[0]
+
+
 keep_ids, drop_ids = [], []
 for g in groups:
     ids = sorted(int(x) for x in g["ids"].split(","))
     if g["bh_n"] != 1:
         continue                       # 正文不止一种指纹 -> 存疑，不动
-    keep_ids.append(ids[0])
-    drop_ids.extend(ids[1:])
+    k = _pick_keep(d.conn, ids)
+    keep_ids.append(k)
+    drop_ids.extend(i for i in ids if i != k)
 
 print("=" * 68)
 print("一文多栏目发 · 重复行清理")
@@ -108,11 +136,13 @@ for g in groups:
         continue
     ids = sorted(int(x) for x in g["ids"].split(","))
     rows = d.conn.execute(
-        f"SELECT id, column_name FROM articles WHERE id IN ({','.join('?' * len(ids))})",
+        f"SELECT id, column_name, content_empty FROM articles "
+        f"WHERE id IN ({','.join('?' * len(ids))}) ORDER BY id",
         ids).fetchall()
-    cols = " / ".join(r["column_name"] or "?" for r in rows)
+    cols = " / ".join(f"{r['column_name'] or '?'}{'' if not r['content_empty'] else '(空)'}"
+                      for r in rows)
     print(f"  [{g['site']}] {g['title'][:30]}")
-    print(f"      栏目 {cols}  ->  保留 #{ids[0]}")
+    print(f"      栏目 {cols}  ->  保留 #{_pick_keep(d.conn, ids)}")
     shown += 1
     if shown >= 8:
         break
