@@ -16,6 +16,8 @@ FastAPI 检索服务
     GET  /api/trend            按月/按年分布（柱状图用）
     GET  /api/events           行为埋点统计（检索/跳转/导出）
     GET  /api/ai/status        AI 配置状态
+    GET  /api/cache/stats      结果缓存现状（条数/命中/占用）
+    POST /api/cache/clear      清空结果缓存（写路径也会自动清）
 
     POST /api/purge/preview    批量删除：影响面预览（只读，返 confirm_token）
     POST /api/purge/execute    批量删除：真删（需 yes=true + 正确的 token）
@@ -30,6 +32,7 @@ FastAPI 检索服务
     · 原文跳转走本服务中转，方便记录「哪篇被检索后跳走了」
 """
 
+import copy
 import csv
 import io
 import json
@@ -39,6 +42,7 @@ import threading
 import time
 import uuid
 import webbrowser
+from collections import OrderedDict
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -93,6 +97,184 @@ def _db() -> D.Database:
     if DB is None:
         DB = D.open_db(_cfg())
     return DB
+
+
+# ---------------------------------------------------------------- 结果缓存
+# 慢接口（图谱 analysis 实测几分钟、orgs 一两分钟）把「先前**成功**的一次
+# 结果」记在进程内存里，同参数再问就直接给。下面几条是设计约束，别改散：
+#
+#   · 只缓存成功：正常走到 return 的 dict，且不带 error 字段。异常往上抛、
+#     错误响应（{"error": ...}）一律不入缓存 —— 否则一次失败会被钉成
+#     「永久失败」，用户点多少次都还是错的。
+#   · 键 = 该接口**全部**影响结果的参数（含默认值，取归一化后的值）+ 版本号。
+#     漏一个参数 = 两个不同口径撞同一个键，这是本缓存唯一能算错的方式，
+#     所以每个接入点都必须把签名里的参数逐个列全（tests_cache.py 有守门的）。
+#   · 容量 64 条，LRU：命中与写入都 move_to_end，超了淘汰最久没用过的。
+#   · 交给调用方的是**深拷贝**：导出/快照/前端改响应不能改到缓存里那份，
+#     否则第二次请求会拿到被改过的数。
+#   · 计算在锁外（见 _cached）：图谱 analysis 一次几分钟，持锁计算会把
+#     整个服务卡住（连 /api/health 都进不来）。代价是同参数并发会各算一遍，
+#     拿一点重复计算换可用性。
+#   · 缓存只属于「当时那个库」（_db_token）：库对象一换，旧条目全部作废，
+#     免得把上一个库的数字端给这一个库。
+#   · 失效只挂在**本进程的写路径**上。绕过接口直接改库的（命令行 / 另一个
+#     进程 / 测试里直接写 SQL），本进程无从知晓 —— 那种情形请
+#     `POST /api/cache/clear`（界面上就是「清除缓存」）或重启服务。
+_RESP_CACHE: "OrderedDict[Any, Any]" = OrderedDict()
+_CACHE_LOCK = threading.Lock()
+_CACHE_CAP = 64
+_CACHE_VER = 1
+_CACHE_STATS: Dict[str, Any] = {"hit": 0, "miss": 0, "put": 0, "skip": 0,
+                                "evict": 0, "clear": 0}
+_MISS = object()
+
+
+def _norm_param(v: Any) -> Any:
+    """把参数归一化成可比较、可打标签的值。
+
+    FastAPI 只在**走 HTTP** 时把默认值换成真值；直接调函数时（导出/快照
+    内部复用、测试直接调路由）拿到的是 `Query(...)` 实例。这里统一读成
+    default —— 于是「HTTP 上没传 mode」与「代码里没传 mode」是同一个键，
+    而不是一个键里塞着 Query 对象。
+
+    值按类型打标签（("i",3) 与 ("s","3") 不同），不做字符串拼接：
+    `3` 与 `"3"` 糊成一个键就会串口径。
+    """
+    d = getattr(v, "default", _MISS)
+    if d is not _MISS and getattr(type(v), "__module__", "").startswith("fastapi"):
+        v = d
+    if isinstance(v, bool):          # ⚠ bool 在 int 前面：True 也是 int
+        return ("b", v)
+    if isinstance(v, int):
+        return ("i", v)
+    if isinstance(v, float):
+        return ("f", v)
+    if isinstance(v, str):
+        return ("s", v)
+    if v is None:
+        return ("n", "")
+    return ("o", repr(v))
+
+
+def _cache_key(name: str, params: Dict[str, Any], ver: int) -> tuple:
+    return (ver, name,
+            tuple(sorted((str(k), _norm_param(v)) for k, v in params.items())))
+
+
+def _key_text(key: tuple) -> str:
+    """把键渲染成人能读的一行（/api/cache/stats 里给验收看）"""
+    return "%s  %s" % (key[1],
+                       " ".join("%s=%s" % (k, v[1]) for k, v in key[2]))
+
+
+def _db_token() -> tuple:
+    """标记「这份缓存属于当时那个库」。
+
+    ⚠ 换了库就必须重算，哪怕参数一字不差：重开库、切 db.path、把 WA.DB
+      换成另一个库 —— 都是「同一个参数、另一份数据」，命中就是把旧库的
+      数字端给新库看。只比对象 id 不够（对象被回收后 id 会被复用），
+      所以把库路径一起比进去。
+    """
+    try:
+        db = _db()
+    except Exception:
+        return ("-", "-")
+    return (id(db), str(getattr(db, "path", "") or ""))
+
+
+def _cached(name: str, params: Dict[str, Any], calc):
+    """慢接口的缓存外壳：
+
+        return _cached("panel.orgs", {"site": site, ...}, lambda: 真算())
+
+    params 必须把签名里的参数**逐个列全**（含默认值）—— 见顶部约束。
+
+    ⚠ 失效只挂在**本进程的写路径**上（见 `_CACHE_CLEAR`）：绕过接口直接改库
+      的（脚本 / 另一个进程 / 测试里直接写 SQL），本进程不知道 —— 那种情形
+      要么 `POST /api/cache/clear`，要么重启服务。
+    """
+    tok = _db_token()
+    with _CACHE_LOCK:
+        key = _cache_key(name, params, _CACHE_VER)
+        ent = _RESP_CACHE.get(key)
+        # ⚠ 连**哪个库**一起比：同一个参数、另一份数据 = 必须重算
+        if ent is not None and ent[0] == tok:
+            _RESP_CACHE.move_to_end(key)
+            _CACHE_STATS["hit"] += 1
+            return copy.deepcopy(ent[1])
+        _CACHE_STATS["miss"] += 1
+    val = calc()                     # ⚠ 锁外算：见顶部最后一条约束
+    if isinstance(val, dict) and "error" not in val:
+        with _CACHE_LOCK:
+            _RESP_CACHE[key] = (tok, copy.deepcopy(val))
+            _RESP_CACHE.move_to_end(key)
+            _CACHE_STATS["put"] += 1
+            while len(_RESP_CACHE) > _CACHE_CAP:
+                _RESP_CACHE.popitem(last=False)
+                _CACHE_STATS["evict"] += 1
+    else:
+        with _CACHE_LOCK:
+            _CACHE_STATS["skip"] += 1
+    return val
+
+
+def _CACHE_CLEAR(reason: str = "") -> int:
+    """清空结果缓存，返回清掉的条数。**所有写路径都要调它**。
+
+    64 条的成本极低，于是不做精细的键依赖，一律全清：精确失效要维护
+    「哪个接口读哪张表」，维护不好就是脏数据，而脏数据比慢糟得多。
+
+    版本号同时自增并进键，就算「清空」与「写入」交错也不会串键。
+    """
+    global _CACHE_VER
+    with _CACHE_LOCK:
+        n = len(_RESP_CACHE)
+        _RESP_CACHE.clear()
+        _CACHE_VER += 1
+        _CACHE_STATS["clear"] += 1
+        if reason:
+            _CACHE_STATS["clear_reason"] = reason
+    return n
+
+
+@app.get("/api/cache/stats")
+def api_cache_stats():
+    """缓存现状：条数 / 命中 / 占用。给「清除缓存」按钮与验收用。"""
+    with _CACHE_LOCK:
+        items = []
+        total = 0
+        for k, v in _RESP_CACHE.items():
+            try:
+                size = len(json.dumps(v[1], ensure_ascii=False))
+            except Exception:
+                size = -1
+            total += max(size, 0)
+            items.append({"name": k[1], "params": _key_text(k)[len(k[1]):].strip(),
+                          "bytes": size})
+        hits = _CACHE_STATS["hit"]
+        looks = hits + _CACHE_STATS["miss"]
+        return {
+            "entries": len(_RESP_CACHE), "cap": _CACHE_CAP,
+            "version": _CACHE_VER,
+            "bytes": total, "bytes_mb": round(total / 1048576, 3),
+            "hit": hits, "miss": _CACHE_STATS["miss"],
+            "hit_rate": round(hits / looks, 4) if looks else 0.0,
+            "put": _CACHE_STATS["put"], "skip": _CACHE_STATS["skip"],
+            "evict": _CACHE_STATS["evict"], "clear": _CACHE_STATS["clear"],
+            "clear_reason": _CACHE_STATS.get("clear_reason", ""),
+            "items": items,
+            "note": "只缓存成功的响应；任一写路径（抽取落库/清库/同步/"
+                    "补抓/批量删除/导入配置/AI 落库）都会整表清空",
+        }
+
+
+@app.post("/api/cache/clear")
+def api_cache_clear():
+    """手动清空结果缓存（界面的「清除缓存」按钮）。"""
+    n = _CACHE_CLEAR("manual")
+    with _CACHE_LOCK:
+        return {"ok": True, "cleared": n, "version": _CACHE_VER,
+                "entries": len(_RESP_CACHE)}
 
 
 # ---------------------------------------------------------------- 检索
@@ -256,11 +438,18 @@ def api_facets(site: str = "", date_from: str = "", date_to: str = ""):
     分面。site 非空时只返回该站栏目 —— 栏目下拉靠它跟随站点联动。
     date_from/date_to 非空时只过滤 columns（栏目 Top12 随日期变），
     sites/total 等字段保持全量。空则不传，走全区间。
+
+    ⚠ 走结果缓存：屏幕、导出、快照三处的分面是同一个请求，命中后它们
+      拿到的是同一份数（同一个键），也就不用各自再算几分钟。
     """
-    kw = {}
-    if date_from: kw["date_from"] = date_from
-    if date_to:   kw["date_to"] = date_to
-    return _db().facets_by_site(site, **kw)
+    def _calc():
+        kw = {}
+        if date_from: kw["date_from"] = date_from
+        if date_to:   kw["date_to"] = date_to
+        return _db().facets_by_site(site, **kw)
+
+    return _cached("facets", {"site": site, "date_from": date_from,
+                              "date_to": date_to}, _calc)
 
 
 @app.get("/api/stats")
@@ -615,9 +804,17 @@ def api_panel_timeline(site: str = "", top: int = Query(_TL_TOP, ge=1, le=10),
     """时间轴 —— 对应老师要求的「发文量/主题随时间的变化」。
 
     months=0 表示不截断（给 CSV 导出用）；网页传面板的月份下拉值。
+
+    ⚠ 走结果缓存：include_ai 与 months 都进键 —— 后者只影响截断长度，
+      是同一个口径的两种视图，但也必须分开，否则 36 个月的画面会被
+      0（不截断）的那份顶掉。
     """
-    return _timeline_impl(site, int(top), date_from, date_to,
-                          include_ai, int(months))
+    return _cached("panel.timeline",
+                   {"site": site, "top": top, "date_from": date_from,
+                    "date_to": date_to, "include_ai": include_ai,
+                    "months": months},
+                   lambda: _timeline_impl(site, int(top), date_from, date_to,
+                                          include_ai, int(months)))
 
 
 @app.get("/api/panel/problems")
@@ -628,13 +825,19 @@ def api_panel_problems(site: str = "", date_from: str = "", date_to: str = ""):
     ⚠ 这是**关键词粗筛口径**，不是人工标注的分类。
     一个议题可能同时命中两类（既是网络暴力又涉及未成年人），
     所以各行相加会超过总数。报告里必须写明这一点。
+
+    ⚠ 走结果缓存（屏幕/导出/快照同一个键）。
     """
-    kw = {}
-    if date_from: kw["date_from"] = date_from
-    if date_to:   kw["date_to"] = date_to
-    return {"site": site, "items": _db().problem_distribution(site=site, **kw),
-        "note": "关键词粗筛，一篇可命中多类，各行相加会超过总数；"
-                "精确分类需按 R1 抽取结果人工复核"}
+    def _calc():
+        kw = {}
+        if date_from: kw["date_from"] = date_from
+        if date_to:   kw["date_to"] = date_to
+        return {"site": site, "items": _db().problem_distribution(site=site, **kw),
+            "note": "关键词粗筛，一篇可命中多类，各行相加会超过总数；"
+                    "精确分类需按 R1 抽取结果人工复核"}
+
+    return _cached("panel.problems", {"site": site, "date_from": date_from,
+                                      "date_to": date_to}, _calc)
 
 
 @app.get("/api/panel/orgs")
@@ -655,29 +858,37 @@ def api_panel_orgs(site: str = "", limit: int = Query(12, ge=1, le=50),
         哪些组因此缺省」。
     ⚠ coarse 响应**不加** refine 字段（前端用 `resp.refine` 是否存在判档），
       其余字段（items / review_count / note）两档同形，导出与快照零改动。
+
+    ⚠ 走结果缓存：**mode 进键的**（同一份数据两档口径不同，混用就是把
+      精选的数字说成粗选的）。limit 也进键 —— 它决定取几条，不是渲染参数。
     """
-    kw = {}
-    if date_from: kw["date_from"] = date_from
-    if date_to:   kw["date_to"] = date_to
-    d = _db()
-    if _refine_mode_on(mode):
-        r = d.top_orgs_refine(site=site, limit=limit, **kw)
-        items, rf = r["items"], r["refine"]
-        miss = "、".join(f"{g['org']}（{g['count']}）"
-                        for g in rf["filtered_groups"]) or "无"
-        note = (f"精选模式：通用形态闸门已滤掉 {rf['filtered_total']} 个"
-                f"活动/会议名候选（{rf['filtered_n']} 个候选串，"
-                f"{len(rf['filtered_groups'])} 组因此缺省：{miss}）；"
-                f"其余为机器挖掘的候选，非定论，带 ⚠ 的组需人工复核")
-        rf = dict(rf)
-        rf["note"] = note
+    def _calc():
+        kw = {}
+        if date_from: kw["date_from"] = date_from
+        if date_to:   kw["date_to"] = date_to
+        d = _db()
+        if _refine_mode_on(mode):
+            r = d.top_orgs_refine(site=site, limit=limit, **kw)
+            items, rf = r["items"], r["refine"]
+            miss = "、".join(f"{g['org']}（{g['count']}）"
+                            for g in rf["filtered_groups"]) or "无"
+            note = (f"精选模式：通用形态闸门已滤掉 {rf['filtered_total']} 个"
+                    f"活动/会议名候选（{rf['filtered_n']} 个候选串，"
+                    f"{len(rf['filtered_groups'])} 组因此缺省：{miss}）；"
+                    f"其余为机器挖掘的候选，非定论，带 ⚠ 的组需人工复核")
+            rf = dict(rf)
+            rf["note"] = note
+            return {"site": site, "items": items,
+                    "review_count": sum(1 for i in items if i.get("needs_review")),
+                    "refine": rf, "note": note}
+        items = d.top_orgs(site=site, limit=limit, **kw)
         return {"site": site, "items": items,
                 "review_count": sum(1 for i in items if i.get("needs_review")),
-                "refine": rf, "note": note}
-    items = d.top_orgs(site=site, limit=limit, **kw)
-    return {"site": site, "items": items,
-            "review_count": sum(1 for i in items if i.get("needs_review")),
-            "note": "机器挖掘的候选，非定论；带 ⚠ 的组需人工复核"}
+                "note": "机器挖掘的候选，非定论；带 ⚠ 的组需人工复核"}
+
+    return _cached("panel.orgs", {"site": site, "limit": limit,
+                                  "date_from": date_from, "date_to": date_to,
+                                  "mode": mode}, _calc)
 
 
 @app.get("/api/panel/joint")
@@ -688,12 +899,18 @@ def api_panel_joint(site: str = "", date_from: str = "", date_to: str = ""):
     ⚠ 粗筛口径：只按标题出现「联合/印发/会同/联发/共同」判定，
     会有误召（正文提到但标题没有的会漏，标题顺带提及的会误召）。
     精确数字要看 R1 抽出来的「联合发文」关系。
+
+    ⚠ 走结果缓存（屏幕/导出/快照同一个键）。
     """
-    kw = {}
-    if date_from: kw["date_from"] = date_from
-    if date_to:   kw["date_to"] = date_to
-    return {"site": site, "items": _db().joint_issue_trend(site=site, **kw),
-        "note": "按标题关键词粗筛，非精确统计；精确值以 R1 的联合发文关系为准"}
+    def _calc():
+        kw = {}
+        if date_from: kw["date_from"] = date_from
+        if date_to:   kw["date_to"] = date_to
+        return {"site": site, "items": _db().joint_issue_trend(site=site, **kw),
+            "note": "按标题关键词粗筛，非精确统计；精确值以 R1 的联合发文关系为准"}
+
+    return _cached("panel.joint", {"site": site, "date_from": date_from,
+                                   "date_to": date_to}, _calc)
 
 
 # ---------------------------------------------------------------- 图表数据导出
@@ -1294,9 +1511,11 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
 def api_sample_options(date_from: str = "2024-01-01",
                        date_to: str = "2099-12-31"):
     """可配样本的栏目清单（站点/栏目/总量/覆盖年份）"""
-    return {"date_from": date_from, "date_to": date_to,
-            "columns": _db().sample_options(date_from, date_to),
-            "strategies": list(D.Database.SAMPLE_STRATEGIES)}
+    return _cached("sample.options",
+                   {"date_from": date_from, "date_to": date_to},
+                   lambda: {"date_from": date_from, "date_to": date_to,
+                            "columns": _db().sample_options(date_from, date_to),
+                            "strategies": list(D.Database.SAMPLE_STRATEGIES)})
 
 
 @app.get("/api/sample")
@@ -1315,20 +1534,29 @@ def api_sample(site: str = "", column: str = "",
     ⚠ 默认 stratified 而不是「取最近 N 篇」：
       后者只覆盖末段（实测 cac·网信要闻 取最近 500 篇，2024 年整年丢失），
       而老师明确要求「发文量与主题随时间的变化」，时间轴不能只剩一年。
+
+    ⚠ 走结果缓存：with_items 进键 —— 它决定 items 给全量还是只给 20 条
+      预览，两个响应不一样大，混用会让「样本明细」和「样本预览」串位。
     """
-    d = _db()
-    try:
-        r = d.sample_articles(site, column, date_from, date_to,
-                              limit, strategy)
-    except ValueError as e:
-        raise HTTPException(400, {"message": str(e), "refused": True})
-    items = r.pop("items")
-    if with_items:
-        r["items"] = items
-    else:
-        r["items_sample"] = items[:20]
-        r["items_total"] = len(items)
-    return r
+    def _calc():
+        d = _db()
+        try:
+            r = d.sample_articles(site, column, date_from, date_to,
+                                  limit, strategy)
+        except ValueError as e:
+            raise HTTPException(400, {"message": str(e), "refused": True})
+        items = r.pop("items")
+        if with_items:
+            r["items"] = items
+        else:
+            r["items_sample"] = items[:20]
+            r["items_total"] = len(items)
+        return r
+
+    return _cached("sample", {"site": site, "column": column,
+                              "date_from": date_from, "date_to": date_to,
+                              "limit": limit, "strategy": strategy,
+                              "with_items": with_items}, _calc)
 
 
 @app.get("/api/sample/years")
@@ -1336,8 +1564,12 @@ def api_sample_years(site: str = "", column: str = "",
                      date_from: str = "2024-01-01",
                      date_to: str = "2099-12-31"):
     """某栏目逐年篇数 —— 抽样依据 + 时间轴底稿"""
-    return {"site": site, "column": column,
-            "years": _db().column_years(site, column, date_from, date_to)}
+    return _cached("sample.years",
+                   {"site": site, "column": column,
+                    "date_from": date_from, "date_to": date_to},
+                   lambda: {"site": site, "column": column,
+                            "years": _db().column_years(site, column,
+                                                        date_from, date_to)})
 
 
 @app.get("/api/sample/export")
@@ -1426,23 +1658,30 @@ def api_graph(site: str = "", date_from: str = "", date_to: str = "",
       0 也带**，便于前端统一按 mode 渲染说明；coarse 档不加该字段。
       计数 = 本次响应里实际被剔的节点条数（与 refined_count 同源同口径，
       不是全库同名数），所以能直接和「少了几条」对上。
+
+    ⚠ 走结果缓存：mode 决定剔不剔活动名，必须进键。
     """
-    kw = {"site": site, "limit": limit}
-    if date_from: kw["date_from"] = date_from
-    if date_to:   kw["date_to"] = date_to
-    data = _db().graph(**kw)
-    if not _refine_mode_on(mode):
-        return data
-    ev = _eventish_org_names(_db())
-    drop = {n.get("name") for n in data.get("nodes") or []
-            if n.get("type") == "org" and (n.get("name") or "") in ev}
-    nodes = [n for n in (data.get("nodes") or [])
-             if not (n.get("type") == "org" and (n.get("name") or "") in ev)]
-    edges = [e for e in (data.get("edges") or [])
-             if (e.get("src_name") not in drop
-                 and e.get("dst_name") not in drop)]
-    return {"nodes": nodes, "edges": edges,
-            "refined_count": len(data.get("nodes") or []) - len(nodes)}
+    def _calc():
+        kw = {"site": site, "limit": limit}
+        if date_from: kw["date_from"] = date_from
+        if date_to:   kw["date_to"] = date_to
+        data = _db().graph(**kw)
+        if not _refine_mode_on(mode):
+            return data
+        ev = _eventish_org_names(_db())
+        drop = {n.get("name") for n in data.get("nodes") or []
+                if n.get("type") == "org" and (n.get("name") or "") in ev}
+        nodes = [n for n in (data.get("nodes") or [])
+                 if not (n.get("type") == "org" and (n.get("name") or "") in ev)]
+        edges = [e for e in (data.get("edges") or [])
+                 if (e.get("src_name") not in drop
+                     and e.get("dst_name") not in drop)]
+        return {"nodes": nodes, "edges": edges,
+                "refined_count": len(data.get("nodes") or []) - len(nodes)}
+
+    return _cached("graph", {"site": site, "date_from": date_from,
+                             "date_to": date_to, "limit": limit,
+                             "mode": mode}, _calc)
 
 
 @app.get("/api/graph/stats")
@@ -1471,13 +1710,17 @@ def api_relations(name: str = "", rel_type: str = "",
 @app.post("/api/entities")
 def api_put_entities(rows: List[EntityIn]):
     """人工补录/纠错实体（AI 走 MCP 的 cacx_put_entities）"""
-    return _db().upsert_entities([r.model_dump() for r in rows])
+    n = _db().upsert_entities([r.model_dump() for r in rows])
+    _CACHE_CLEAR("entities")          # 写路径：图谱与分面都该重算
+    return n
 
 
 @app.post("/api/relations")
 def api_put_relations(rows: List[RelationIn]):
     """人工补录/纠错关系"""
-    return _db().upsert_relations([r.model_dump() for r in rows])
+    n = _db().upsert_relations([r.model_dump() for r in rows])
+    _CACHE_CLEAR("relations")
+    return n
 
 
 # ------------------------------------------------------- 内置抽取（规则）
@@ -1699,6 +1942,7 @@ def api_extract_run(req: ExtractReq):
         if not req.confirm_clear:
             return {"error": "clear_first 不可逆，必须同时传 confirm_clear=true"}
         d.clear_graph(only="auto")
+        _CACHE_CLEAR("extract.clear_graph")   # 清库了，缓存里那批图全作废
 
     inc = mode == "incremental"
     sc = d.extract_scope(site=req.site, column=req.column,
@@ -1735,6 +1979,7 @@ def api_extract_run(req: ExtractReq):
         e = d.upsert_entities(res["entities"])
         r = d.upsert_relations(res["relations"])
         res["written"] = {"entities": e, "relations": r}
+        _CACHE_CLEAR("extract.write")     # 落了库，图谱/分面/机构榜都要重算
     else:
         res["written"] = None
         res["hint"] = "这是预览结果，未写入数据库。确认无误后把 write 改成 true 再跑一次。"
@@ -2150,13 +2395,24 @@ def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
     ⚠ node_types 与 focus/keyword 的**先后顺序固定为 类型 → 聚焦 → 关键词**
       （见 graph_analysis.crop_scope）。所以「只看政策 + 聚焦某机构」=
       先砍到政策类、再在政策里找那个机构的邻域；换个顺序含义就变了。
+
+    ⚠ 走结果缓存：这是最贵的一个（全区间单次实测几分钟），**十五个筛选
+      参数全部进键**。find/hl 看着像「只标不改图」，但它们改了响应内容，
+      所以照样进键 —— 少一个就是两个画面共用一份数据。
     """
-    return _graph_payload(int(min_degree), int(limit), float(min_weight),
-                          int(topn), int(max_degree), rel_types,
-                          keyword, focus, int(hop),
-                          site, date_from, date_to,
-                          node_types=node_types, find=find, hl=hl,
-                          mode=mode)
+    return _cached(
+        "graph.analysis",
+        {"min_degree": min_degree, "limit": limit, "min_weight": min_weight,
+         "topn": topn, "max_degree": max_degree, "rel_types": rel_types,
+         "keyword": keyword, "focus": focus, "hop": hop, "site": site,
+         "date_from": date_from, "date_to": date_to,
+         "node_types": node_types, "find": find, "hl": hl, "mode": mode},
+        lambda: _graph_payload(int(min_degree), int(limit), float(min_weight),
+                               int(topn), int(max_degree), rel_types,
+                               keyword, focus, int(hop),
+                               site, date_from, date_to,
+                               node_types=node_types, find=find, hl=hl,
+                               mode=mode))
 
 
 @app.get("/api/graph/facets")
@@ -2172,67 +2428,77 @@ def api_graph_facets(limit: int = Query(20, ge=1, le=60),
       否则会出现「焦点下拉框里能选『协会召开第二届理事会』，选了却查出空图」
       （它已不在精选画布上）。其余计数（rel_types / graph_nodes / sites /
       years）是**筛子的候选说明**，保持全量口径不动。
-    """
-    d = _db()
-    # ⚠ 这些计数是筛子的**候选说明**，必须是全量口径：截断了就会把
-    #   「全库 8801 条关系」显示成「5000 条」，还按 weight 只留下高权重的
-    #   那批，by_type / by_site / by_year 三个分布一起偏。
-    rows = d.list_relations(limit=None)
-    by_type: Dict[str, int] = {}
-    for x in rows:
-        t = x.get("rel_type") or ""
-        by_type[t] = by_type.get(t, 0) + 1
-    blocked = _blocked_for_graph(d)
-    G, _ = GA.build_graph(rows, blocked_nodes=blocked)
-    deg = dict(G.degree())
-    # ⚠ 焦点候选必须按 name **去重**：同一个机构在多篇文章里会被反复抽成
-    #   多条实体记录（每条一个 id），不去重时下拉框里会出现五个
-    #   「中央网信办」，用户点哪个都一样。
-    #   同名节点的度相同（无向图里度由邻接决定），取 max 即可。
-    # 焦点候选只给机构类里度最高的那些 —— 随便点一个长尾节点
-    # 邻域里可能只有 1 个点，图就空了。
-    # ⚠ 机构名要用**全量去重名**：早先走 list_entities(limit=5000)，
-    #   那按 name 排序截断，等于「只有笔画靠前的机构能当焦点」——
-    #   下拉框里机构缺了一大半，却完全看不出来。
-    refine_on = _refine_mode_on(mode)
-    best: Dict[str, int] = {}
-    for n in d.distinct_entity_names("org"):
-        n = (n or "").strip()
-        if not n or n in blocked:
-            continue
-        # ⚠ 精选档：活动名不进候选，否则「选了它 → 空图」。
-        #   滤在 **[:limit] 截断之前** —— 截断后再滤会白占名额，
-        #   下拉框凭空少几项却看不出来。
-        if refine_on and textseg.eventish_org(n):
-            continue
-        best[n] = max(best.get(n, 0), deg.get(n, 0))
-    cands = [{"name": n, "degree": dv} for n, dv in best.items()
-             if dv >= 2]
-    cands.sort(key=lambda x: -x["degree"])
-    # 站点与年份：让「网站 / 日期范围」两个筛选器的候选项有据可查，
-    # 而不是在前端硬编码。硬编码过一次，站点改名就静默筛空了。
-    by_site: Dict[str, int] = {}
-    by_year: Dict[str, int] = {}
-    for x in rows:
-        s = (x.get("site") or "") or ""
-        if s:
-            by_site[s] = by_site.get(s, 0) + 1
-        y = str(x.get("pub_day") or "")[:4]
-        if y:
-            by_year[y] = by_year.get(y, 0) + 1
-    return {
-        "rel_types": [{"key": k, "n": v} for k, v in
-                      sorted(by_type.items(), key=lambda kv: -kv[1])],
-        "focus_candidates": cands[:limit],
-        "graph_nodes": G.number_of_nodes(),
-        "graph_edges": G.number_of_edges(),
-        "degree_max": max(deg.values()) if deg else 0,
-        "sites": [{"key": k, "n": v} for k, v in
-                  sorted(by_site.items(), key=lambda kv: -kv[1])],
-        "years": [{"key": k, "n": v} for k, v in
-                  sorted(by_year.items())],
-    }
 
+    ⚠ 走结果缓存：limit 决定候选给几条、mode 决定精选档滤不滤活动名，
+      两个都进键。全库区间下它同样要跑几十秒（要建一遍全图）。
+      说明与函数体都留在本函数里（只包一层 `_calc`）：有测试用
+      inspect.getsource 检查上面这几行说明与 sites / years 字段。
+    """
+    def _calc():
+        d = _db()
+        # ⚠ 这些计数是筛子的**候选说明**，必须是全量口径：截断了就会把
+        #   「全库 8801 条关系」显示成「5000 条」，还按 weight 只留下高权重的
+        #   那批，by_type / by_site / by_year 三个分布一起偏。
+        rows = d.list_relations(limit=None)
+        by_type: Dict[str, int] = {}
+        for x in rows:
+            t = x.get("rel_type") or ""
+            by_type[t] = by_type.get(t, 0) + 1
+        blocked = _blocked_for_graph(d)
+        G, _ = GA.build_graph(rows, blocked_nodes=blocked)
+        deg = dict(G.degree())
+        # ⚠ 焦点候选必须按 name **去重**：同一个机构在多篇文章里会被反复抽成
+        #   多条实体记录（每条一个 id），不去重时下拉框里会出现五个
+        #   「中央网信办」，用户点哪个都一样。
+        #   同名节点的度相同（无向图里度由邻接决定），取 max 即可。
+        # 焦点候选只给机构类里度最高的那些 —— 随便点一个长尾节点
+        # 邻域里可能只有 1 个点，图就空了。
+        # ⚠ 机构名要用**全量去重名**：早先走 list_entities(limit=5000)，
+        #   那按 name 排序截断，等于「只有笔画靠前的机构能当焦点」——
+        #   下拉框里机构缺了一大半，却完全看不出来。
+        refine_on = _refine_mode_on(mode)
+        best: Dict[str, int] = {}
+        for n in d.distinct_entity_names("org"):
+            n = (n or "").strip()
+            if not n or n in blocked:
+                continue
+            # ⚠ 精选档：活动名不进候选，否则「选了它 → 空图」。
+            #   滤在 **[:limit] 截断之前** —— 截断后再滤会白占名额，
+            #   下拉框凭空少几项却看不出来。
+            if refine_on and textseg.eventish_org(n):
+                continue
+            best[n] = max(best.get(n, 0), deg.get(n, 0))
+        cands = [{"name": n, "degree": dv} for n, dv in best.items()
+                 if dv >= 2]
+        cands.sort(key=lambda x: -x["degree"])
+        # 站点与年份：让「网站 / 日期范围」两个筛选器的候选项有据可查，
+        # 而不是在前端硬编码。硬编码过一次，站点改名就静默筛空了。
+        by_site: Dict[str, int] = {}
+        by_year: Dict[str, int] = {}
+        for x in rows:
+            s = (x.get("site") or "") or ""
+            if s:
+                by_site[s] = by_site.get(s, 0) + 1
+            y = str(x.get("pub_day") or "")[:4]
+            if y:
+                by_year[y] = by_year.get(y, 0) + 1
+        return {
+            "rel_types": [{"key": k, "n": v} for k, v in
+                          sorted(by_type.items(), key=lambda kv: -kv[1])],
+            "focus_candidates": cands[:limit],
+            "graph_nodes": G.number_of_nodes(),
+            "graph_edges": G.number_of_edges(),
+            "degree_max": max(deg.values()) if deg else 0,
+            "sites": [{"key": k, "n": v} for k, v in
+                      sorted(by_site.items(), key=lambda kv: -kv[1])],
+            "years": [{"key": k, "n": v} for k, v in
+                      sorted(by_year.items())],
+        }
+
+
+
+    return _cached("graph.facets", {"limit": limit, "mode": mode},
+                   _calc)
 
 @app.get("/api/graph/evidence")
 def api_graph_evidence(src: str, dst: str, rel_type: str = "",
@@ -2336,6 +2602,7 @@ def api_ai_summarize(req: SummarizeReq):
     if req.commit:
         d.save_annotation(req.id, "summarize", result,
                           provider=cfg["ai"]["provider"], model=cfg["ai"]["model"])
+        _CACHE_CLEAR("ai.summarize")   # 时间轴 include_ai 一档读摘要
     return {"committed": req.commit, "result": result}
 
 
@@ -2823,6 +3090,9 @@ def _batch_worker(job_id: str, cfg_snapshot: Dict[str, Any], req: BatchReq):
         with BATCH_LOCK:
             job["running"] = False
             job["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        # 摘要落库了（dry_run 时没写，但清一次的成本是 0，不必分叉）——
+        # 时间轴的 include_ai 一档读的正是摘要，不清就会拿旧图。
+        _CACHE_CLEAR("ai.batch")
 
 
 @app.get("/api/ai/failures")
@@ -2926,6 +3196,7 @@ def api_ai_annotation_manual(req: ManualAnnIn):
          "entities": req.entities or [],
          "manual_note": req.note},
         provider="manual", model="human")
+    _CACHE_CLEAR("ai.manual")      # 补录的摘要同样进时间轴
     return {"saved": True, "article_id": req.article_id,
             "title": art.get("title", ""),
             "cleared_failure": True,
@@ -3079,6 +3350,9 @@ def _sync_worker(cfg, site_list, mode, date_start, date_end, limit):
         with SYNC_LOCK:
             SYNC_STATE["running"] = False
             SYNC_STATE["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        # ⚠ 缓存要等同步**真结束**才清：同步是后台线程，在 /api/sync 那边清
+        #   等于写还没落就把缓存清了，清完又被这条线程写脏。
+        _CACHE_CLEAR("sync")
         _sync_log("同步结束。")
 
 
@@ -3465,10 +3739,13 @@ def api_backfill(req: BackfillIn):
         raise HTTPException(400, "一次最多补抓 50 篇")
     events: List[Dict[str, Any]] = []
     try:
-        return backfill(CFG, DB, req.article_ids, dry_run=req.dry_run,
-                        on_event=lambda k, kw: events.append({"kind": k, **kw}))
+        res = backfill(CFG, DB, req.article_ids, dry_run=req.dry_run,
+                       on_event=lambda k, kw: events.append({"kind": k, **kw}))
     except Exception as e:
         raise HTTPException(502, f"补抓失败：{type(e).__name__}: {e}")
+    if not req.dry_run:
+        _CACHE_CLEAR("backfill")      # 真补了正文，篇数/字数分布都会变
+    return res
 
 
 # ---------------------------------------------------------------- 批量删除
@@ -3537,10 +3814,12 @@ def api_purge_execute(req: PurgeIn):
             "缺少 confirm_token，请先调用 /api/purge/preview 看清影响面",
             "refused": True})
     try:
-        return execute_purge(DB, req.target, req.confirm_token,
-                             **req.filters())
+        res = execute_purge(DB, req.target, req.confirm_token,
+                            **req.filters())
     except PurgeRefused as e:
         raise HTTPException(400, {"message": str(e), "refused": True})
+    _CACHE_CLEAR("purge")          # 删了行，所有统计口径都得重算
+    return res
 
 
 # ---------------------------------------------------------------- 配置
@@ -3663,6 +3942,7 @@ def api_config_set(req: ConfigIn):
         return {"saved": False, "changed": [], "message": "没有变化"}
     C.save(cfg)
     CFG = cfg          # 让服务立即用新配置
+    _CACHE_CLEAR("config.save")   # 配置变了（含站点区间），缓存别再留着
     # 只报改了哪些字段名，不回显值 —— 值里可能含密钥
     return {"saved": True, "changed": changed, "message": "已保存"}
 
@@ -3739,6 +4019,7 @@ def api_import(req: ImportIn):
             cfg = C._deep_merge(cfg, src)
             C.save(cfg)
             CFG = cfg
+            _CACHE_CLEAR("config.import")
         ai = src.get("ai", {})
         return {"kind": "cacx", "applied": req.apply,
                 "will_import": sorted(k for k, v in ai.items()
@@ -3756,6 +4037,7 @@ def api_import(req: ImportIn):
     if err:
         raise HTTPException(500, err)
     CFG = C.load()
+    _CACHE_CLEAR("config.import")
     # 只报字段名，不报值 —— 值里含密钥
     return {"kind": "scan", "applied": True, "changed": changed,
             "message": ("已导入：" + ", ".join(changed)) if changed
