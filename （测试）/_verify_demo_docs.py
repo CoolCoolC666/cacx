@@ -7,17 +7,19 @@
 ⚠ 只读：全程 HTTP GET，绝不写库。
 ⚠ 真值只有一个来源：**运行中的服务**。直连 db 算出来的数会和网页对不上。
 ⚠ 口径：本文按**网页默认口径**校验，即 node_types 全勾（措施类放行）+ 日期框默认
-   `2024-01`（= 分析窗）。不带 node_types 会拿到旧口径 1631/3958 —— 那不是网页上看到的数；
-   不带 date_from 会拿到**全库** 12160 节点那档（单次要 ~4 分钟），也不是首屏的数。
-⚠ 2026-10-15 真库按全区间（2000-09-30 ~ 2026-10-14，28919 篇）重抽落库后，
-   **分析窗（2024 年以来）的抽取结果逐条未变**；变的是两处**全库口径**的数：
+   `2024-01`（= 分析窗）。不带 node_types 会拿到**门槛口径** 1634/3977 —— 那不是网页上
+   看到的数；不带 date_from 会拿到**全库** 12162 节点那档（单次 ~5 分钟），也不是首屏的数。
+⚠ 2026-10-15 真库按全区间（2000-09-30 ~ 2026-10-14，28919 篇）抽出结果，并补抽了
+   10-12 ~ 10-14 新采的 19 篇之后，**分析窗与全库两档的抽取数都动了**（19 篇里 15 篇
+   有正文、产出了实体/关系）：窗口 1757/4191 → 1761/4211，全库 12160/29049 → 12162/29069。
+   除此之外，口径差异照旧分两处：
      · `/api/graph/evidence` 没有日期参数 → 它列的是**全库**证据（边① 24 → 42 条）；
-     · 边列表 `/api/graph` 读日期框 → 仍是窗口口径，右端的 n 不变（24/22/32/18）。
+     · 边列表 `/api/graph` 读日期框 → 是窗口口径，右端的 n 随窗口抽取结果走（24/23/32/18）。
    这两处**故意不一样**，下面分别钉死，别再互相「校正」。
    ⚠ 另有一类数会随**采集**漂：全库/分析窗的篇数、分年发文量、主题占比分母。
      10:42 服务重启后两站又新采 14 篇（全库 28905→28919、分析窗 4421→4435、
-     2024 年 1495→1497、2026 年 1385→1397、2024-09 峰值 179→180），
-     这些「库快照」数变了照实测改；关系/实体/图谱的数不受影响（新文章还没抽取）。
+     2024 年 1495→1497、2026 年 1385→1397、2024-09 峰值 179→180）。
+     这些「库快照」数变了照实测改；上面那组抽取/图谱数则只在**补抽**后才变。
 
 跑法（服务要先起在 8770）：
     py -3 -X utf8 "（测试）/_verify_demo_docs.py"
@@ -74,7 +76,7 @@ def evidence(src, dst, rel="", limit=0):
 # ---------------------------------------------------------------- ① 默认图口径
 print("=" * 74)
 # ⚠ 必须显式带 date_from=2024-01-01：这是网页日期框的默认值（= 演示脚本的口径）。
-#   不带 = 全库 12160 节点那档，单次建图 ~4 分钟，而且数字与演示脚本不符。
+#   不带 = 全库 12162 节点那档，单次建图 ~5 分钟，而且数字与演示脚本不符。
 WEB = "&date_from=2024-01-01"
 an = get(f"/api/graph/analysis?min_degree=2&node_types={NODE_TYPES}{WEB}")
 g = an["graph"]
@@ -91,19 +93,19 @@ print(f"画布：{len(g['nodes'])} 节点 / {len(g['edges'])} 边，"
 print("=" * 74)
 
 print("\n① 演示脚本 §B1 的口径数字")
-check("子图 1757 节点", an["nodes"] == 1757, f"实测 {an['nodes']}")
-check("子图 4191 边", an["edges"] == 4191, f"实测 {an['edges']}")
+check("子图 1761 节点", an["nodes"] == 1761, f"实测 {an['nodes']}")
+check("子图 4211 边", an["edges"] == 4211, f"实测 {an['edges']}")
 check("126 个连通块", an["components"] == 126, f"实测 {an['components']}")
 check("画布 300 节点", len(g["nodes"]) == 300, f"实测 {len(g['nodes'])}")
-check("画布 1466 边", len(g["edges"]) == 1466, f"实测 {len(g['edges'])}")
-check("折叠 1457", g.get("hidden_nodes") == 1457, f"实测 {g.get('hidden_nodes')}")
+check("画布 1482 边", len(g["edges"]) == 1482, f"实测 {len(g['edges'])}")
+check("折叠 1461", g.get("hidden_nodes") == 1461, f"实测 {g.get('hidden_nodes')}")
 
 b = an.get("betweenness") or []
 check("介数 Top1 中央网信办 0.2109",
       bool(b) and b[0]["name"] == "中央网信办" and abs(b[0]["betweenness"] - 0.2109) < 1e-4,
       f"实测 {b[0]['name']} {b[0]['betweenness']}" if b else "无")
-check("介数 Top2 网信办 0.1196",
-      len(b) > 1 and b[1]["name"] == "网信办" and abs(b[1]["betweenness"] - 0.1196) < 1e-4,
+check("介数 Top2 网信办 0.1201",
+      len(b) > 1 and b[1]["name"] == "网信办" and abs(b[1]["betweenness"] - 0.1201) < 1e-4,
       f"实测 {b[1]['name']} {b[1]['betweenness']}" if len(b) > 1 else "无")
 
 fo = get(f"/api/graph/analysis?min_degree=2&focus={Q('中央网信办')}"
@@ -111,9 +113,9 @@ fo = get(f"/api/graph/analysis?min_degree=2&focus={Q('中央网信办')}"
 fb = fo.get("betweenness") or []
 fg = fo["graph"]
 check("一跳子图 286 节点", fg.get("scope_nodes") == 286, f"实测 {fg.get('scope_nodes')}")
-check("一跳子图 1115 边", fg.get("scope_edges") == 1115, f"实测 {fg.get('scope_edges')}")
-check("一跳介数 0.8487 / 0.0306",
-      len(fb) > 1 and abs(fb[0]["betweenness"] - 0.8487) < 1e-3
+check("一跳子图 1116 边", fg.get("scope_edges") == 1116, f"实测 {fg.get('scope_edges')}")
+check("一跳介数 0.8486 / 0.0306",
+      len(fb) > 1 and abs(fb[0]["betweenness"] - 0.8486) < 1e-3
       and abs(fb[1]["betweenness"] - 0.0306) < 1e-3,
       f"实测 {[x['betweenness'] for x in fb[:2]]}")
 
@@ -135,7 +137,7 @@ def find_edge(src, dst, rel):
 # (src, dst, rel, 列表右端 n = 窗口口径, 证据面板条数 = 全库口径, 中文名)
 DEMO = [
     ("中央网信办", "农业农村部", "joint_issue", 24, 42, "联合发文"),
-    ("公安部", "个人信息保护法", "issue", 22, 25, "发布"),
+    ("公安部", "个人信息保护法", "issue", 23, 26, "发布"),
     ("公安部", "个人信息", "target", 32, 50, "针对"),
     ("中央网信办", "开展2025年个人信息保护系列专项行动", "adopt", 18, 18, "采取"),
 ]
@@ -294,10 +296,10 @@ check("末月 2026-10 标为未过完",
 # ---------------------------------------------------------------- ⑦ 边②细节
 print("\n⑦ 边② 公安部 ↔ 个人信息保护法（脚本 §B3 念的那句）")
 i2 = evidence("公安部", "个人信息保护法", "issue")
-check("25 条（全库口径；列表右端写的是窗口 22）", len(i2) == 25, f"实测 {len(i2)}")
+check("26 条（全库口径；列表右端写的是窗口 23）", len(i2) == 26, f"实测 {len(i2)}")
 row2, ent2 = find_edge("公安部", "个人信息保护法", "issue")
-check("   列表右端 n=22（窗口口径）",
-      bool(ent2) and ent2.get("n") == 22, f"实测 {ent2.get('n') if ent2 else None}")
+check("   列表右端 n=23（窗口口径）",
+      bool(ent2) and ent2.get("n") == 23, f"实测 {ent2.get('n') if ent2 else None}")
 check("首条含《小型个人信息处理者个人信息保护简化措施规定》",
       "小型个人信息处理者个人信息保护简化措施规定" in (i2[0].get("evidence") or ""),
       f"实测 {(i2[0].get('evidence') or '')[:50]}")
