@@ -1658,10 +1658,16 @@ class ExtractReq(BaseModel):
     date_to: str = "2099-12-31"
     limit: int = 500                 # 与报告分母一致（已拍板：默认样本口径）
     strategy: str = "stratified"     # ⚠ 别用 recent：会把 2024 整年丢掉
+    mode: str = "full"               # full=重跑命中每一篇；incremental=只跑还没有抽取结果的
     with_measures: bool = True
     write: bool = False              # ⚠ 默认只预览不落库
     clear_first: bool = False        # ⚠ 清库不可逆，必须显式开
     confirm_clear: bool = False
+
+
+#: mode 的两档。大小写/空白不敏感，其余值一律**报错**而不是悄悄当全量 ——
+#: 「填错档位跑成另一档」是那种不报错、只是白等半小时的坑。
+EXTRACT_MODES = ("full", "incremental")
 
 
 @app.post("/api/extract/run")
@@ -1672,18 +1678,40 @@ def api_extract_run(req: ExtractReq):
     ⚠ 默认 write=false 只返回结果不落库 —— 抽取要跑几十秒，
       误触就写库会污染主库。
     ⚠ clear_first 会**删光**实体和关系，必须同时 confirm_clear=true。
+    ⚠ mode 两档（默认 full，保持原行为）：
+        full        重跑命中口径里的每一篇（= 加 mode 之前的老行为）
+        incremental 只跑「还没有抽取结果」的篇（已有实体或关系就跳过）
+      增量省的是时间，不等于「跑过一次以后就永不再跑」：抽过但**一个实体
+      一个关系都没抽出来**的文章两边都没有记录可判，下次增量仍会重跑。
+      （口径与边界写在 db._drop_extracted 的注释里。）
+    ⚠ 报账字段的落位：`scope.mode` / `scope.skipped` / `scope.processed`，
+      顶层另有 `processed` 与 `skipped_existing`。
+      **不能**把顶层 `skipped` 拿去表示「增量跳过篇数」—— 那个键已经被
+      extract_batch 占用（正文不足被跳过的篇数），覆盖会静默改掉旧含义。
     """
+    mode = (req.mode or "").strip().lower()
+    if mode not in EXTRACT_MODES:
+        return {"error": f"未知的 mode {req.mode!r}，只支持 "
+                         f"{' / '.join(EXTRACT_MODES)}"}
+
     d = _db()
     if req.clear_first:
         if not req.confirm_clear:
             return {"error": "clear_first 不可逆，必须同时传 confirm_clear=true"}
         d.clear_graph(only="auto")
 
-    arts = d.extract_sources(site=req.site, column=req.column,
-                             date_from=req.date_from, date_to=req.date_to,
-                             limit=req.limit, strategy=req.strategy)
-    if not arts:
+    inc = mode == "incremental"
+    sc = d.extract_scope(site=req.site, column=req.column,
+                         date_from=req.date_from, date_to=req.date_to,
+                         limit=req.limit, strategy=req.strategy,
+                         only_unextracted=inc)
+    arts = sc["articles"]
+    if not arts and not sc["pool_hit"]:
         return {"error": "这个口径下没有文章，检查栏目名与时间区间"}
+    # ⚠ 增量档下「全都抽过了」是**正常结果**而不是错误：
+    #   照常走下面的流程（extract_batch([]) 返回空结果），
+    #   前端只会在 scope 里看到 processed=0 / skipped=命中数。
+    #   早退成 error 的话，前端会把它渲染成红色的失败提示。
 
     t0 = time.time()
     res = extract.extract_batch(arts, with_measures=req.with_measures)
@@ -1691,7 +1719,16 @@ def api_extract_run(req: ExtractReq):
     res["scope"] = {"site": req.site, "column": req.column,
                     "date_from": req.date_from, "date_to": req.date_to,
                     "limit": req.limit, "strategy": req.strategy,
-                    "articles_found": len(arts)}
+                    "mode": mode,
+                    # articles_found 仍是「口径命中几篇」（= 抽样抽到的篇数），
+                    # 与档位无关；实抽篇数看 processed。
+                    "articles_found": sc["pool_hit"],
+                    "skipped": sc["skipped_existing"],
+                    "processed": len(arts)}
+    # 顶层再放一份不含歧义的：processed（实抽）与 skipped_existing（增量跳过）。
+    # 顶层 `skipped` 留给 extract_batch 的原义（正文不足），不要覆盖。
+    res["processed"] = len(arts)
+    res["skipped_existing"] = sc["skipped_existing"]
 
     if req.write:
         # 只写高置信（不进图谱的那些低置信仍写库，便于复核与后续分析）
