@@ -66,6 +66,34 @@ if errorlevel 1 (
     echo.
 )
 
+rem ---- is the database there? ----
+rem Database.__init__ does mkdir + sqlite3.connect, and sqlite3.connect
+rem CREATES an empty file when it is missing. So a pack that failed to
+rem extract (or an extraction that skipped data/) starts up perfectly
+rem happily and shows an EMPTY tool -- no error, no explanation, just
+rem "0 articles" everywhere. That is the single most likely first-run
+rem failure for a 429 MB zip, and the old launcher never mentioned it.
+rem Check it here, where a human is still reading.
+if not exist "data\cacx.db" (
+    echo [ERROR] data\cacx.db is missing.
+    echo   The pack ships the database, so this almost always means the
+    echo   zip was not extracted completely, or data\ was skipped.
+    echo.
+    echo   Fix: re-extract the whole zip to a short path, e.g. D:\cacx
+    echo         Then run this file again.
+    echo   If you deliberately want an empty library and will run
+    echo   "python -m cacx sync" yourself, press Y to continue anyway.
+    echo.
+    choice /c YN /n /m "Continue without the database? (Y/N) "
+    if errorlevel 2 (
+        pause
+        exit /b 1
+    )
+    echo.
+    echo   Continuing. The site will open but contain NO articles.
+    echo.
+)
+
 rem ---- port already in use? ----
 set OLD_PID=
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8770" ^| findstr "LISTENING"') do set OLD_PID=%%p
@@ -85,9 +113,17 @@ if defined OLD_PID (
 
 echo Starting server. Browser will open automatically.
 echo.
-echo   URL  : http://127.0.0.1:8770/
-echo   API  : http://127.0.0.1:8770/docs
-echo   Stop : close this window (or press Ctrl+C)
+echo   Web UI  : http://127.0.0.1:8770/
+echo   API docs: http://127.0.0.1:8770/docs
+echo   Stop    : close this window (or press Ctrl+C)
+echo.
+rem Do NOT put the Chinese folder/file name here. This whole file must
+rem stay pure ASCII -- see the note in the Chinese-named wrapper:
+rem cmd.exe decodes .bat with the OEM codepage, a UTF-8 Chinese line
+rem gets chopped and "python -m cacx serve" never runs. Point at the
+rem docs/ path only.
+echo   Startup guide: docs\STARTUP-GUIDE-zh.md
+echo   Classmate FAQ: README.md
 echo.
 echo ============================================================
 echo.
