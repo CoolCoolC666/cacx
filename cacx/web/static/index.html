@@ -120,6 +120,11 @@
   .bar-x{font-size:9.5px;color:var(--dim);white-space:nowrap;
           height:16px;line-height:16px}
   .bar-v{font-size:10px;color:var(--dim)}
+  /* 联合发文趋势的时间范围滑块（由 barWin 生成/复用）。
+     ⚠ 纯视图层控件：它只决定画哪一段柱子，不参与任何请求口径。 */
+  .bar-win{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+           margin:0 0 6px;font-size:11.5px;color:var(--dim)}
+  .bar-win input[type=range]{width:132px;vertical-align:middle;margin:0}
   .form{display:flex;flex-direction:column;gap:10px}
   .form label{display:flex;align-items:center;gap:8px;
               color:var(--dim);font-size:12.5px;flex-wrap:wrap}
@@ -292,6 +297,11 @@
           </select></label>
         <button class="btn" style="padding:5px 14px" onclick="runSample()">生成样本</button>
         <button class="btn" style="padding:5px 12px" onclick="dlSampleCsv()">⬇ 样本 CSV</button>
+        <label style="font-size:12.5px" title="只影响「抽取并写入」：增量跳过已有结果的文章（快），全量重跑口径内所有文章（慢）。「预览抽取」恒为全量，不受这个开关影响。">写入模式
+          <select id="sp_extmode">
+            <option value="incremental" selected>增量（只抽新增，推荐）</option>
+            <option value="full">全量（重跑所有）</option>
+          </select></label>
         <button class="btn on" style="padding:5px 12px"
                 onclick="runExtract(false)"
                 title="用当前口径跑一次内置规则抽取，抽出实体与关系，但不写库（先看结果）">🔧 预览抽取</button>
@@ -302,7 +312,10 @@
       <div style="font-size:12.5px;color:var(--dim);line-height:1.7;margin-top:10px">
         抽取用<b>内置规则引擎</b>从原文实时抽取实体（机构/政策/治理问题/措施）与四类关系，
         每条关系都带<b>可回溯的原文出处</b>，老师追问「这数哪来的」时可当场重跑、结果永远一致。<br>
-        <b>先点「预览抽取」</b>看结果，满意了再点「抽取并写入」让图谱页出图。
+        <b>先点「预览抽取」</b>看结果，满意了再点「抽取并写入」让图谱页出图。<br>
+        「写入模式」<b>只影响「抽取并写入」</b>：<b>增量</b>跳过已有抽取结果的文章（推荐、快）；
+        <b>全量</b>把口径内所有文章重跑一遍（篇数多时耗时较长）。
+        <b>「预览抽取」恒为全量</b>，不受这个开关影响 —— 预览要看的就是全量结果。
       </div>
     </div>
 
@@ -409,9 +422,9 @@
         <span style="font-size:12.5px;color:var(--dim)">站点</span>
         <span id="gp_sites" style="display:flex;gap:10px;flex-wrap:wrap"></span>
         <label style="font-size:12.5px">日期
-          <input id="gp_dfrom" type="month" style="width:118px"
+          <input id="gp_dfrom" type="month" style="width:118px" value="2024-01"
                  onchange="loadGraph()"
-                 title="关系的来源文章从哪个月开始。留空 = 不限"></label>
+                 title="默认 2024-01 起（不含更早），与后端 date_from 默认 2024-01-01 一致；可手动改。清空仍是按 2024 起算，不是「不限」"></label>
         <label style="font-size:12.5px">至
           <input id="gp_dto" type="month" style="width:118px"
                  onchange="loadGraph()"
@@ -660,6 +673,8 @@
           <button class="btn" style="padding:1px 7px;font-size:11px"
             onclick="dlPanel('joint')" title="下载这张图的数据（CSV）">⬇ 数据</button>
         </h3>
+        <!-- 时间范围滑块的宿主编排：barWin() 复用它（没有才建），空数据时藏起来 -->
+        <div class="bar-win" id="bar_joint_win" style="display:none"></div>
         <div class="bars" id="bar_joint"></div>
         <div class="dim" style="font-size:11px;margin-top:6px">
           按标题含「联合/印发/会同/联发/共同」粗筛；精确数字以 R1 抽取的「联合发文」关系为准</div>
@@ -1761,12 +1776,17 @@ function dlSampleCsv(){
 //   和「图谱其实抽了另一批」会对不上——这是评审最容易抓的点。
 async function runExtract(write){
   const q = spQs();
+  // 写入模式：**只影响「抽取并写入」**。预览恒为 full ——
+  //   预览的意义是「先看全量结果对不对」；挂上增量，预览里没有的文章
+  //   在写入时会被增量跳过，两条路径看到的就不是同一批文章。
+  const mode = (write && ($('sp_extmode')?.value==='incremental')) ? 'incremental' : 'full';
   const body = {
     site: q.get('site')||'', column: q.get('column')||'',
     date_from: q.get('date_from')||'2024-01-01',
     date_to:   q.get('date_to')||'2099-12-31',
     limit: parseInt(q.get('limit')||'500',10)||500,
     strategy:  q.get('strategy')||'stratified',
+    mode: mode,                    // full | incremental（后端默认 full；老后端会静默忽略）
     with_measures: true,
     write: !!write,
   };
@@ -1775,7 +1795,11 @@ async function runExtract(write){
   box.innerHTML = `<div style="font-size:12.5px;color:var(--acc2)">
     ${write?'正在抽取并写入':'正在抽取（预览）'}…
     按 ${esc(body.date_from)} ~ ${esc(body.date_to)}、${esc(body.strategy)}、
-    上限 ${body.limit} 篇。500 篇约需十几秒，请稍候。</div>`;
+    上限 ${body.limit} 篇。${write
+      ? (mode==='incremental'
+         ? '增量：只处理还没有抽取结果的文章，比全量快得多。'
+         : '全量：口径内的文章都要重跑一遍，篇数较多时耗时较长，建议改用增量。')
+      : '预览看的是全量结果，不受「写入模式」影响。'}请稍候。</div>`;
   try{
     const r = await fetch('/api/extract/run', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -1793,6 +1817,15 @@ async function runExtract(write){
       const label = (m && typeof m==='object') ? (m.cn||k) : (m||k);
       return `<span>${esc(label)} <b style="color:var(--acc2)">${obj[k]}</b></span>`;
     }).join('　');
+    // ⚠ 「跳过已有结果」**不是** r.skipped：顶层 skipped 是 extract_batch 的
+    //   「正文不足，没抽」原义（extract.py:643），后端特意没让它被覆盖。
+    //   增量跳过的篇数单独放在 r.skipped_existing（顶层）与 r.scope.skipped 里。
+    //   读错字段会一直显示另一个数字，还不报错 —— 所以这里只认这两个来源。
+    const incMode = !!(r.scope && r.scope.mode === 'incremental');
+    const incSkip = r.skipped_existing !== undefined ? r.skipped_existing
+                    : (r.scope ? r.scope.skipped : 0);
+    const incProc = r.processed !== undefined ? r.processed
+                    : (r.scope ? r.scope.processed : 0);
     box.innerHTML = `
       <div style="font-size:13px;color:var(--acc2);font-weight:600;margin-bottom:6px">
         ${write?'✓ 已写入数据库':'预览结果（未写库）'}</div>
@@ -1806,6 +1839,10 @@ async function runExtract(write){
         ${r.written
           ? `已写入：实体 <b>${r.written.entities}</b> 行、关系 <b>${r.written.relations}</b> 行。`
           : '这是预览，数据库未变。满意后点「🔧 抽取并写入」。'}<br>
+        ${incMode
+          ? `增量：新增处理 <b style="color:var(--acc2)">${incProc||0}</b> 篇、
+             跳过已有结果 <b style="color:var(--acc2)">${incSkip||0}</b> 篇。<br>`
+          : ''}
         <span style="font-size:11.5px">
           ${write
             ? '现在去「关系图谱」页点刷新即可出图。'
@@ -1996,7 +2033,10 @@ function gpReset(){
   $('gp_kw').value = '';
   $('gp_find').value = '';
   $('gp_hop').value = 1;
-  $('gp_dfrom').value = '';
+  // 默认起算月 = 2024-01（与 gp_dfrom 的 value 属性、后端 date_from 默认 2024-01-01 三处一致）。
+  // ⚠ 这里**不能**再清成 ''：清空后 gpQuery 不传 date_from，看着像「不限」，
+  //   实际后端仍按 2024 起算 —— 控件与真实口径就对不上了。
+  $('gp_dfrom').value = '2024-01';
   $('gp_dto').value = '';
   document.querySelectorAll('#gp_types input').forEach(x=>x.checked = true);
   document.querySelectorAll('#gp_sites input').forEach(x=>x.checked = true);
@@ -4182,6 +4222,82 @@ function drawBars(el, rows){
   }).join('');
 }
 
+/* ---- 联合发文月度趋势：时间范围滑块（**视图层**的局部窗口） ----
+   为什么加：这张图有近 40 个月，X 轴标签密排互相遮挡，最右那个还被容器右边缘
+   裁掉（用户截图实证）。与其去改标签抽稀（那会波及所有走 drawBars 的图），
+   不如让用户自己把窗口收窄 —— 收窄后柱子变宽、标签自然散开。
+   ⚠ 它**不是筛选**：
+     · 不重取数据，/api/panel/joint 的口径一个字没改；
+     · 不碰顶部 pn_months / 面板日期控件 / 站点，也不碰图谱任何控件；
+     · 只重画这一个容器，其它图一动不动（改窗口不重置任何状态）。
+   ⚠ 「屏幕 = 导出」照旧：窗口内那一段会写回 PN_CACHE（见 renderJointBars），
+     所以「⬇ 图」下载到的正是屏幕上这批柱子，而不是全部月份。
+   rows = 完整月份序列（每项带 k）；render(seg) 负责把窗口内一段画进 el。 */
+function barWin(el, rows, render){
+  if(!el) return;
+  const sk = document.getElementById(el.id+'_win');
+  // 不到 2 个月没有可滑的区间：藏掉滑块 —— 留个拖不动的控件只会让人以为坏了
+  if(!rows.length || rows.length<2){
+    if(sk) sk.style.display = 'none';
+    render(rows);
+    return;
+  }
+  let bar = sk;
+  if(!bar){                       // 定制面板那种每次重建 innerHTML 的宿主：没有就现建
+    bar = document.createElement('div');
+    bar.id = el.id+'_win';
+    bar.className = 'bar-win';
+    el.parentElement.insertBefore(bar, el);
+  }
+  bar.style.display = '';
+  const n = rows.length;
+  bar.innerHTML = '<span>时间范围</span>'
+    + `<input type="range" class="bw-a" min="0" max="${n-1}" step="1" value="0"`
+    + ' title="窗口起始月" aria-label="时间范围起">'
+    + `<input type="range" class="bw-b" min="0" max="${n-1}" step="1" value="${n-1}"`
+    + ' title="窗口结束月" aria-label="时间范围止">'
+    + '<b class="bw-t" style="color:var(--acc2)"></b>'
+    + '<button class="btn bw-all" style="padding:1px 7px;font-size:11px"'
+    + ' title="把窗口拉回整段（只影响画出来的范围，不改数据口径）">全窗</button>';
+  const a = bar.querySelector('.bw-a'), b = bar.querySelector('.bw-b'),
+        t = bar.querySelector('.bw-t');
+  // 起止联动：**拖谁谁说了算**，另一边跟着走 → 起 ≤ 止恒成立，窗口最小 1 个月。
+  // ⚠ 不能写成「对两个值取 min/max 再回填」：那样把「起」拖过「止」时，
+  //   被拖的那根会自己弹回去，用户永远拖不出 1 个月的窗口。
+  const paint = (moved)=>{
+    let i = +a.value, j = +b.value;
+    if(i > j){ if(moved === 'a') j = i; else i = j; }
+    a.value = i; b.value = j;
+    t.textContent = rows[i].k + ' ~ ' + rows[j].k;
+    render(rows.slice(i, j+1));
+  };
+  a.addEventListener('input', ()=>paint('a'));
+  b.addEventListener('input', ()=>paint('b'));
+  bar.querySelector('.bw-all').addEventListener('click', ()=>{
+    a.value = 0; b.value = n-1; paint();
+  });
+  // 每次（重）取数都重建控件并把窗口复位到整段：边界变了，沿用旧下标会指向别的月份
+  paint();                        // 首绘 = 整段（与加滑块之前逐像素相同）
+}
+
+/* 面板「联合发文类文章月度趋势」的柱子渲染（从 loadPanel 内联块抽出来，供滑块复用）。
+   ⚠ 它没有 drawBars 那套「按容器宽度算柱宽 + 转 60° + 抽稀标签」的防遮挡逻辑 ——
+     月份多时标签本来就会挤，这是**已知现状**；本轮不动它，靠 barWin 让用户收窄窗口。 */
+function renderJointBars(el, rows){
+  if(!el) return;
+  if(!rows.length){
+    el.innerHTML = '<div class="empty" style="padding:20px">无数据</div>'; return;
+  }
+  const mx = Math.max(...rows.map(r=>r.pct)) || 1;
+  // 缓存给「下载图片」用：下载的必须是**屏幕上这批**，所以滑块一动它就跟着变
+  PN_CACHE[el.id] = rows.map(x=>({k:x.k, n:x.pct}));
+  el.innerHTML = rows.map(r=>
+    `<div class="bar-item" title="${esc(r.k)}：${r.raw}/${r.total} 篇 = ${r.pct}%">
+       <div class="bar-v">${r.pct}</div>
+       <div class="bar-fill" style="height:${Math.max(2,Math.round(r.pct/mx*94))}px"></div>
+       <div class="bar-x">${esc(r.k)}</div></div>`).join('');
+}
+
 async function loadTrend(){
   const site=$('pn_site')?.value||'';
   const months=Math.max(6, Math.min(120, parseInt($('pn_months')?.value||'36',10)||36));
@@ -4585,16 +4701,10 @@ async function loadPanel(){
   // 展示占比而非绝对篇数：发文多的月份会淹没趋势，占比才看得出「是不是更常联合发文」
   const jRows = jit.map(x=>({k:x.month.slice(2), n:Math.round(x.pct*10), pct:x.pct,
                              raw:x.joint, total:x.total}));
-  if($('bar_joint') && jRows.length){
-    PN_CACHE['bar_joint'] = jRows.map(x=>({k:x.k, n:x.pct}));
-    const mx = Math.max(...jRows.map(r=>r.pct)) || 1;
-    $('bar_joint').innerHTML = jRows.map(r=>
-      `<div class="bar-item" title="${esc(r.k)}：${r.raw}/${r.total} 篇 = ${r.pct}%">
-         <div class="bar-v">${r.pct}</div>
-         <div class="bar-fill" style="height:${Math.max(2,Math.round(r.pct/mx*94))}px"></div>
-         <div class="bar-x">${esc(r.k)}</div></div>`).join('');
-  } else if($('bar_joint')) {
-    $('bar_joint').innerHTML = '<div class="empty" style="padding:20px">无数据</div>';
+  if($('bar_joint')){
+    // 带时间范围滑块：窗口只裁**画出来的**那一段（barWin 里 slice），
+    // 请求、口径、其它三块图都不动。空数据由 renderJointBars 画「无数据」，滑块自动收起。
+    barWin($('bar_joint'), jRows, seg=>renderJointBars($('bar_joint'), seg));
   }
 
   // ---- 时间轴（PPT 要求的「发文量/主题随时间的变化」）----
@@ -4651,7 +4761,13 @@ async function buildCustomPanel(){
   box.innerHTML = `<div style="font-size:12.5px;color:var(--dim);margin-bottom:10px;
        padding:6px 10px;border-left:3px solid var(--line)">${esc(scopeTxt)}</div>`
     + seg.map(([t,id])=>`<h3 style="font-size:13px;margin:10px 0 6px">${esc(t)}</h3><div class="bars" id="${id}"></div>`).join('');
-  for(const [t,id,rows] of seg){ if($(id)) drawBars($(id), rows); }
+  // 联合发文那一张也带时间范围滑块（与面板那张共用同一份 barWin/renderJointBars 逻辑）；
+  // 其余图照旧 —— 它们没有「月份多到标签挤成一团」的问题，不必给每张图都加一层控件。
+  for(const [t,id,rows] of seg){
+    if(!$(id)) continue;
+    if(id==='spc_joint') barWin($(id), rows, s=>drawBars($(id), s));
+    else drawBars($(id), rows);
+  }
 }
 
 /* T7-B：达标判定。标准 = 阈值 + 判据 + 展示，三样都要有；只读调现有接口、不写库、不调 AI。
