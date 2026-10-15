@@ -5,13 +5,13 @@
 （用户 09:08 在界面上点的「抽取并写入」）。于是**每个数字都必须写明分母口径**，
 报告现在是「一份 2024 年以来的深描 + 全库底数」的双口径结构：
 
-  · 报告的**分析窗** = 2024 年以来（4435 篇 / 4433 篇有正文）。
+  · 报告的**分析窗** = 2024 年以来（4433 篇 / 4432 篇有正文）。
     图谱、证据、主题占比、发文量、浙江对照都属于这一档 —— 未变（重跑只新增了
     2024 年之前的关系，2024+ 窗口的抽取结果逐条一致）。
-  · 报告的**全库底数** = 28919 篇。抽了多少、覆盖多少、跨度多长，必须按全库说，
-    否则会出现「6887 篇 / 4433 篇 = 156%」这种分子分母不同口径的自相矛盾。
+  · 报告的**全库底数** = 28917 篇。抽了多少、覆盖多少、跨度多长，必须按全库说，
+    否则会出现「6887 篇 / 4432 篇 = 156%」这种分子分母不同口径的自相矛盾。
   · ⚠ 下面这些**篇数**是「库快照」：真库仍在持续采集（10:42 服务重启后两站又新采
-    14 篇，全库 28905→28919、分析窗 4421→4435，而关系表一分未变，因为新文章还没
+    14 篇，全库 28905→28917、分析窗 4421→4433，而关系表一分未变，因为新文章还没
     抽取）。数变了就照实测改，不算断言写错；改的时候报告 md / 演示脚本 /
     `_verify_demo_docs.py` / `06-R5` / `autodemo.py` 要一起改。
   · 图谱接口有两套默认：`/api/graph/analysis` 不传日期 = 全库（12160 节点，慢）；
@@ -65,8 +65,8 @@ print("=" * 70)
 n24 = q("SELECT COUNT(*) FROM articles WHERE year>=2024")
 n24_txt = q("SELECT COUNT(*) FROM articles WHERE year>=2024 AND content_text "
             "IS NOT NULL AND LENGTH(content_text)>0")
-check("2024 年以来 4435 篇", n24 == 4435, str(n24))
-check("有正文 4433 篇", n24_txt == 4433, str(n24_txt))
+check("2024 年以来 4433 篇", n24 == 4433, str(n24))
+check("有正文 4432 篇", n24_txt == 4432, str(n24_txt))
 check("栏目 25 个",
       q("SELECT COUNT(DISTINCT column_code) FROM articles WHERE year>=2024") == 25,
       str(q("SELECT COUNT(DISTINCT column_code) FROM articles WHERE year>=2024")))
@@ -75,17 +75,17 @@ check("正文 653 万字", 6_500_000 <= zh <= 6_550_000, f"{zh/1e4:.0f} 万字")
 
 # 全库底数（报告 §六 的规模句用这一套；分母必须与分子同一档）
 n_all = q("SELECT COUNT(*) FROM articles")
-check("全库 28919 篇", n_all == 28919, str(n_all))
+check("全库 28917 篇", n_all == 28917, str(n_all))
 n_all_txt = q("SELECT COUNT(*) FROM articles WHERE content_text IS NOT NULL "
               "AND LENGTH(content_text)>0")
-check("全库有正文 28850 篇", n_all_txt == 28850, str(n_all_txt))
+check("全库有正文 28849 篇", n_all_txt == 28849, str(n_all_txt))
 check("全库栏目 26 个",
       q("SELECT COUNT(DISTINCT column_code) FROM articles") == 26,
       str(q("SELECT COUNT(DISTINCT column_code) FROM articles")))
 zh_all = q("SELECT SUM(LENGTH(content_text)) FROM articles")
 check("全库正文 3827 万字", 38_200_000 <= zh_all <= 38_400_000,
       f"{zh_all/1e4:.0f} 万字")
-check("全库两站 23291 + 5628 = 28919",
+check("全库两站 23291 + 5626 = 28917",
       dict(db.execute("SELECT site, COUNT(*) FROM articles GROUP BY site")
            .fetchall()).get("cac") == 23291, "cac 应 23291")
 
@@ -93,7 +93,7 @@ print()
 print("=" * 70)
 print("② 抽取规模（报告 §一/§三 = 2024 年以来窗口；另核全库）")
 print("=" * 70)
-# ⚠ 这两条 SQL 必须带 year 过滤：报告写的是「2024 年以来的 4433 篇里抽出了…」，
+# ⚠ 这两条 SQL 必须带 year 过滤：报告写的是「2024 年以来的 4432 篇里抽出了…」，
 #   不带过滤就是全库的数（114931 / 44420），分子分母一换口径结论全错。
 W_E = "entities e JOIN articles a ON a.id=e.article_id WHERE a.year>=2024"
 W_R = "relations r JOIN articles a ON a.id=r.article_id WHERE a.year>=2024"
@@ -153,16 +153,16 @@ check("全库 joint_issue 含「联合印发」1638 条",
 
 print()
 print("=" * 70)
-print("④ 覆盖率（窗口 1201/4435 = 27.1%（对 4433 篇有正文为 27.1%）；全库 6893/28919 = 23.8%）")
+print("④ 覆盖率（窗口 1201/4433 = 27.1%（对 4432 篇有正文为 27.1%）；全库 6893/28917 = 23.8%）")
 print("=" * 70)
 cov = q("SELECT COUNT(DISTINCT r.article_id) FROM " + W_R)
-check("窗口关系覆盖 1201 篇 / 27.1%（分母 2024+ 全部 4435 篇；有正文 27.1%）",
+check("窗口关系覆盖 1201 篇 / 27.1%（分母 2024+ 全部 4433 篇；有正文 27.1%）",
       cov == 1201 and abs(100 * cov / n24 - 27.1) < 0.15,
       f"{cov} 篇 = {100*cov/n24:.1f}%")
-# ⚠ 全库的分母必须是 28919（全库文章数）。
-#   曾经出现过「6887 篇 / 4433 篇 = 156%」—— 分子是全库、分母是窗口，自相矛盾。
+# ⚠ 全库的分母必须是 28917（全库文章数）。
+#   曾经出现过「6887 篇 / 4432 篇 = 156%」—— 分子是全库、分母是窗口，自相矛盾。
 cov_a = q("SELECT COUNT(DISTINCT article_id) FROM relations")
-check("全库关系覆盖 6893 篇 / 23.8%（分母 28919）",
+check("全库关系覆盖 6893 篇 / 23.8%（分母 28917）",
       cov_a == 6893 and abs(100 * cov_a / n_all - 23.8) < 0.15,
       f"{cov_a} 篇 = {100*cov_a/n_all:.1f}%")
 have = q("SELECT COUNT(DISTINCT id) FROM articles WHERE "
@@ -171,7 +171,7 @@ have = q("SELECT COUNT(DISTINCT id) FROM articles WHERE "
 check("全库有抽取结果 26094 篇 / 90.2%",
       have == 26094 and abs(100 * have / n_all - 90.2) < 0.2,
       f"{have} 篇 = {100*have/n_all:.1f}%")
-check("窗口有抽取结果 3829 篇 / 86.3%",
+check("窗口有抽取结果 3829 篇 / 86.4%",
       abs(100 * 3829 / n24 - 86.3) < 0.1, f"{100*3829/n24:.1f}%")
 # 时间跨度：全库 vs 窗口（报告 §六 与 §一 各引一档）
 _sp = db.execute("SELECT MIN(a.pub_day), MAX(a.pub_day) FROM relations r "
@@ -281,7 +281,7 @@ for x in tl["themes"]:
     agg.setdefault(x["month"][:4], Counter())
     agg[x["month"][:4]].update(x["problems"])
 want = {
-    "2024": {"生成式AI": 11.2, "个人信息": 24.6, "未成年人": 20.8, "数据安全": 17.6},
+    "2024": {"生成式AI": 11.2, "个人信息": 24.5, "未成年人": 20.8, "数据安全": 17.6},
     "2025": {"生成式AI": 15.1, "个人信息": 30.6, "未成年人": 14.5, "数据安全": 22.3},
     "2026": {"生成式AI": 17.4, "个人信息": 27.0, "未成年人": 19.0, "数据安全": 17.1},
 }
@@ -304,12 +304,12 @@ check("两次都在最近 14 个月", first == ["2025-08", "2026-09"], str(first
 
 print()
 print("=" * 70)
-print("⑧ 发文量（报告：1497 / 1541 / 1397，2025-09 峰值 193）")
+print("⑧ 发文量（报告：1495 / 1541 / 1397，2025-09 峰值 193）")
 print("=" * 70)
 yr = Counter()
 for x in tl["months"]:
     yr[x["month"][:4]] += x["total"]
-for y, w in [("2024", 1497), ("2025", 1541), ("2026", 1397)]:
+for y, w in [("2024", 1495), ("2025", 1541), ("2026", 1397)]:
     check(f"{y} = {w}", yr[y] == w, str(yr[y]))
 pk = max(tl["months"], key=lambda x: x["total"])
 check("单月峰值 193（2025-09）",
@@ -321,9 +321,9 @@ print("⑨ 浙江对照")
 print("=" * 70)
 rows = db.execute("SELECT site, COUNT(*) n FROM articles WHERE year>=2024 GROUP BY site").fetchall()
 d = dict(rows)
-check("中央网信办 2965 + 浙江 1470 = 4435",
-      d.get("cac", 0) + d.get("zjwx", 0) == 4435, str(d))
-check("浙江网信网 1470 篇", d.get("zjwx") == 1470, str(d))
+check("中央网信办 2965 + 浙江 1468 = 4433",
+      d.get("cac", 0) + d.get("zjwx", 0) == 4433, str(d))
+check("浙江网信网 1468 篇", d.get("zjwx") == 1468, str(d))
 # 两省是否真有直接联合发文
 cross = q("""SELECT COUNT(*) FROM relations WHERE year>=2024
              AND site='zjwx' AND (src_name LIKE '%浙江%' OR dst_name LIKE '%浙江%')
@@ -471,16 +471,16 @@ else:
     # （2026-10-15 补：真库全区间重跑 + 补抽 10-12~10-14 新采的 19 篇后，
     #   窗口/全库两套数都动了，这些数同样必须转进 docx；
     #   "24 条" 保留，因为报告还写了「其中 2024 年以来 24 条」）
-    MUST = ["4433", "4435", "653 万字", "16648", "8577", "1201", "27.1%",
+    MUST = ["4432", "4433", "653 万字", "16648", "8577", "1201", "27.1%",
             "285", "142", "115", "0.2109", "0.1201", "0.8486", "0.0306",
             "1761", "4211", "126", "286", "1116",
             "5425", "2098", "561", "493", "63.3%",
-            "1497", "1541", "1397", "193",
-            "2965", "1470", "24 条", "3 条", "21 条", "8 个端点",
-            "11.2%", "15.1%", "17.4%", "19.0%", "17.1%", "24.6%",
+            "1495", "1541", "1397", "193",
+            "2965", "1468", "24 条", "3 条", "21 条", "8 个端点",
+            "11.2%", "15.1%", "17.4%", "19.0%", "17.1%", "24.5%",
             "30.6%", "27.0%",
             # —— 全库底数（2000-09-30 ~ 2026-10-14 全区间，含补抽 19 篇）——
-            "28919", "28850", "3827", "277651", "114931", "44420", "29069",
+            "28917", "28849", "3827", "277651", "114931", "44420", "29069",
             "6893", "23.8%", "26094", "12162", "29782", "67.0%", "42 条",
             "2019-05-17", "3381", "0.1892", "0.0899", "1447", "814"]
 

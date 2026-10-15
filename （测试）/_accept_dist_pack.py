@@ -193,7 +193,10 @@ d = (pk / "字段说明.md").read_text(encoding="utf-8") if (pk / "字段说明.
 # ⚠ 这里也**不写死** 4416：改成「字段说明自述的数 == 库真值」。
 chk("字段说明.md 的 2024+ 数 == 库真值", str(n24) in d, f"库里 {n24}")
 for stale in ("4519 篇", "28999", "4416"):
-    chk(f"字段说明无过期 {stale}", stale not in d)
+    # ⚠ 「口径变更记录」那一节**正当**写着旧值（"4416 → 4433"），
+    #   那是这段历史的一部分，不是没更新。所以哨兵只查记录**之前**的正文。
+    body = d.split("> **口径变更记录**")[0]
+    chk(f"字段说明正文无过期 {stale}", stale not in body)
 cl = list(csv.DictReader((pk / "栏目候选清单.csv")
                          .read_text(encoding="utf-8-sig").splitlines()))
 chk("栏目清单 25 行且篇数合计 == 库里的 2024+",
