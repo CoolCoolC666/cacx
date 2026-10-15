@@ -19,6 +19,23 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem ---- version check: "python exists" is NOT "python is new enough" ----
+rem Found python, but never checked its version -> a 3.8/3.9 install sails
+rem past the check above, then pip install fails on mcp>=2.3 (needs 3.10+),
+rem and the error we print is "install failed, try running the same command
+rem manually" -- which fails the same way. A dead end pointing the wrong way.
+rem Check it here, where the diagnosis is still cheap and actionable.
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>nul
+if errorlevel 1 (
+    echo [ERROR] Python 3.10 or newer is required ^(this one is older^).
+    echo   pyproject.toml also declares requires-python ^>=3.10^.
+    echo   Fix: install Python 3.10+ from https://www.python.org/downloads/
+    echo   and tick "Add Python to PATH", then run this file again.
+    echo.
+    pause
+    exit /b 1
+)
+
 rem ---- install deps on first run ----
 rem The graph page also needs pyvis (inlines vis-network) / networkx (analysis)
 rem / jieba (tokenizer + org mining). Checking only fastapi+uvicorn would skip
