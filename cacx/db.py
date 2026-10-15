@@ -1653,13 +1653,25 @@ class Database:
 
     def top_orgs(self, site: str = "", date_from: str = "2024-01-01",
                  date_to: str = "2099-12-31",
-                 limit: int = 12) -> List[dict]:
+                 limit: int = 12, mode: str = "coarse") -> List[dict]:
         """
         高频机构 Top —— 直接对应「谁在发文中反复出现」。
 
         走 textseg.mine_orgs 的候选 + 归并，而不是自己写正则：
         「中央网信办 / ……公安部 / 公安部：」会被并成一个主体。
+
+        ⚠ T8 起有**两档口径**（粗选/精选）：
+          · mode="coarse"（默认，与历史行为逐字一致）= 只走 org_like 粗筛；
+          · mode="refine" = 再过一道 `textseg.eventish_org` 通用形态闸门。
+        ⚠ 返回类型**不能变**（List[dict]，调用方直接消费），所以精选档
+          「被滤候选 / 缺省说明」不放这里 —— 走 `top_orgs_refine`。
+          本方法的 mode="refine" 只是「顺手能取精选 items」的便利口，
+          仍返回 List[dict]。
+        ⚠ 切档只影响**读取与统计展示**，不动抽取库（不重跑抽取）。
         """
+        if (mode or "").strip().lower() == "refine":
+            return self.top_orgs_refine(site=site, date_from=date_from,
+                                        date_to=date_to, limit=limit)["items"]
         from . import textseg as TS
         where, args = ["pub_day>=?", "pub_day<=?",
                        "COALESCE(content_empty,0)=0"], [date_from, date_to]
@@ -1672,6 +1684,47 @@ class Database:
         raw = TS.mine_orgs(titles, min_count=3, topn=400)
         merged = TS.normalize_orgs(raw)
         return merged[:limit]
+
+    def top_orgs_refine(self, site: str = "", date_from: str = "2024-01-01",
+                        date_to: str = "2099-12-31",
+                        limit: int = 12) -> Dict[str, Any]:
+        """
+        高频机构 Top 的**精选口径**：粗筛之后再过 `textseg.eventish_org`
+        通用形态闸门，并给出「因此缺省的组」说明。
+
+        返回 `{"items": [...12 条...], "refine": {...}}`：
+          refine.mode            "refine"
+          refine.filtered_total  被闸门滤掉的候选**按出现次数合计**（不重复计同一串）
+          refine.filtered_n      被滤掉的候选串个数
+          refine.filtered_groups 归并后的被滤组（最多 5 个），每项 {org, count}
+                                 —— 这些就是「因为滤掉活动名而缺省」的组
+
+        ⚠ 为什么另开一个方法而不是改 `top_orgs` 的返回类型：`top_orgs` 被
+          `/api/panel/orgs`、导出、快照、MCP 直接消费，返回 `List[dict]`。
+          两档的候选**同源**（同一段挖掘循环），所以 items 只差「被闸门滤掉的那批」。
+        ⚠ filtered_total 是**候选串的出现次数合计**，是「过滤量」的说明口径，
+          不是「少了多少组」—— 组数看 filtered_groups 的条数，两者都给出。
+        """
+        from . import textseg as TS
+        where, args = ["pub_day>=?", "pub_day<=?",
+                       "COALESCE(content_empty,0)=0"], [date_from, date_to]
+        if site:
+            where.append("site=?"); args.append(site)
+        with self._lock:
+            titles = [r[0] for r in self.conn.execute(
+                f"SELECT title FROM articles WHERE {' AND '.join(where)}",
+                args)]
+        raw, filtered = TS.mine_orgs_refine(titles, min_count=3, topn=400)
+        merged = TS.normalize_orgs(raw)
+        fgroups = TS.normalize_orgs(filtered)
+        refine = {
+            "mode": "refine",
+            "filtered_total": sum(int(f.get("count") or 0) for f in filtered),
+            "filtered_n": len(filtered),
+            "filtered_groups": [{"org": g["org"], "count": g["count"]}
+                                for g in fgroups[:5]],
+        }
+        return {"items": merged[:limit], "refine": refine}
 
     def joint_issue_trend(self, site: str = "",
                           date_from: str = "2024-01-01",

@@ -639,18 +639,42 @@ def api_panel_problems(site: str = "", date_from: str = "", date_to: str = ""):
 
 @app.get("/api/panel/orgs")
 def api_panel_orgs(site: str = "", limit: int = Query(12, ge=1, le=50),
-                   date_from: str = "", date_to: str = ""):
+                   date_from: str = "", date_to: str = "",
+                   mode: str = Query("coarse")):
     """
     高频机构 Top —— 直接对应「谁在发文中反复出现」。
 
     ⚠ 每条带 needs_review 标记：归并算法基于「前缀 / 包含 / 去噪骨架」，
     会把部分无关机构吸进同一组（尤其「XX会 / XX大会 / XX峰会」这类会议名，
     它们以机构后缀结尾但不是发文机关）。**带 ⚠ 的必须人工复核后再引用。**
+
+    ⚠ T8 起两档口径（**切档只影响读取与统计展示，抽取库不动**）：
+      · mode=coarse（默认）= 粗选：只走 org_like 粗筛，召回高，与历史行为一致；
+      · mode=refine        = 精选：再过一道 `textseg.eventish_org` 通用形态闸门，
+        活动/会议片段不进榜；响应**多一个 refine 字段**说明「滤掉了多少、
+        哪些组因此缺省」。
+    ⚠ coarse 响应**不加** refine 字段（前端用 `resp.refine` 是否存在判档），
+      其余字段（items / review_count / note）两档同形，导出与快照零改动。
     """
     kw = {}
     if date_from: kw["date_from"] = date_from
     if date_to:   kw["date_to"] = date_to
-    items = _db().top_orgs(site=site, limit=limit, **kw)
+    d = _db()
+    if _refine_mode_on(mode):
+        r = d.top_orgs_refine(site=site, limit=limit, **kw)
+        items, rf = r["items"], r["refine"]
+        miss = "、".join(f"{g['org']}（{g['count']}）"
+                        for g in rf["filtered_groups"]) or "无"
+        note = (f"精选模式：通用形态闸门已滤掉 {rf['filtered_total']} 个"
+                f"活动/会议名候选（{rf['filtered_n']} 个候选串，"
+                f"{len(rf['filtered_groups'])} 组因此缺省：{miss}）；"
+                f"其余为机器挖掘的候选，非定论，带 ⚠ 的组需人工复核")
+        rf = dict(rf)
+        rf["note"] = note
+        return {"site": site, "items": items,
+                "review_count": sum(1 for i in items if i.get("needs_review")),
+                "refine": rf, "note": note}
+    items = d.top_orgs(site=site, limit=limit, **kw)
     return {"site": site, "items": items,
             "review_count": sum(1 for i in items if i.get("needs_review")),
             "note": "机器挖掘的候选，非定论；带 ⚠ 的组需人工复核"}
@@ -677,7 +701,8 @@ def api_panel_joint(site: str = "", date_from: str = "", date_to: str = ""):
 def api_panel_export(which: str, site: str = "",
                      granularity: str = "month", days: int = 30,
                      limit: int = Query(12, ge=1, le=200),
-                     date_from: str = "", date_to: str = ""):
+                     date_from: str = "", date_to: str = "",
+                     mode: str = ""):
     """
     把面板上的图表数据导成 CSV。
 
@@ -690,6 +715,9 @@ def api_panel_export(which: str, site: str = "",
       都留空时由 pn_months 换算成 date_from（见 index.html 的 dlPanel）。
       不带日期参数的话，屏幕按「近 N 个月」筛、导出的却是全量数字 ——
       「屏幕=导出」这条铁律当场断掉。空则不传、走后端默认区间（T1 同款）。
+
+    ⚠ T8：mode 与 /api/panel/orgs 同款（只有 which=orgs 吃它）。屏幕在精选档、
+      导出却给粗选那份，「屏幕=导出」同样断 —— 所以导出必须接受这个参数。
     """
     which = (which or "").lower()
     d = _db()
@@ -736,7 +764,8 @@ def api_panel_export(which: str, site: str = "",
         title = "problem_distribution"
     elif which == "orgs":
         src = api_panel_orgs(site=site, limit=limit,
-                             date_from=date_from, date_to=date_to)
+                             date_from=date_from, date_to=date_to,
+                             mode=mode)
         rows = [{"org": r["org"], "count": r["count"],
                  "needs_review": "是" if r.get("needs_review") else "",
                  "aliases": "|".join(r.get("aliases") or []),
@@ -1034,7 +1063,8 @@ td{font-family:Consolas,monospace}
 def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
                        days: int = Query(30, ge=1, le=365),
                        top: int = Query(12, ge=1, le=50),
-                       date_from: str = "", date_to: str = ""):
+                       date_from: str = "", date_to: str = "",
+                       mode: str = ""):
     """
     把整个数据面板导出成一个**独立的 HTML 文件**。
 
@@ -1048,6 +1078,9 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
     ⚠ date_from/date_to 必须与屏幕同一套口径（前端 pn_from/pn_to 优先，
       都留空时由 pn_months 换算）—— 快照里那几块要跟屏幕上的数字对得上，
       否则「屏幕=导出」就只剩下标题相同。空则不传、走后端默认区间。
+
+    ⚠ T8：mode 与 /api/panel/orgs 同款（只作用于「高频机构」那一块）。
+      屏幕在精选档、快照却给粗选榜，等于交上去的榜和看到的是两份数。
     """
     d = _db()
     trend_m = api_trend(site=site, granularity="month")["items"][-months:]
@@ -1102,7 +1135,7 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
     # ---- 三张作业相关的图（与网页端同源，保证「看到的 = 交出去的」）----
     prob = api_panel_problems(site=site, date_from=date_from, date_to=date_to)
     orgg = api_panel_orgs(site=site, limit=top,
-                          date_from=date_from, date_to=date_to)
+                          date_from=date_from, date_to=date_to, mode=mode)
     joint = api_panel_joint(site=site, date_from=date_from, date_to=date_to)
 
     prob_rows = [{"k": r["problem"], "n": r["articles"]} for r in prob["items"]]
@@ -1374,7 +1407,8 @@ class RelationIn(BaseModel):
 
 @app.get("/api/graph")
 def api_graph(site: str = "", date_from: str = "", date_to: str = "",
-              limit: int = Query(300, ge=1, le=2000)):
+              limit: int = Query(300, ge=1, le=2000),
+              mode: str = Query("coarse")):
     """
     关系图谱：{nodes, edges}。
     edges 带 article_ids —— 前端「点一条关系回溯原文」直接用它。
@@ -1383,11 +1417,32 @@ def api_graph(site: str = "", date_from: str = "", date_to: str = "",
       画布筛了，边列表必须同步筛，否则两个数字打架。
       date_from/date_to 空串不传（SQLite 碰巧对、PostgreSQL 会错），
       走 db 默认区间（2024-01-01 ~ 2099-12-31）。
+
+    ⚠ T8：mode=refine 时在**这里（app 层）**把活动形态的 org 节点剔掉，
+      **不在 db.graph 内做** —— 一个开关只影响读取口径，库与 SQL 不动。
+      剔法：`type=='org' 且 eventish_org(name)` 的 node 去掉；
+      端点沾到这些名字的 edge 一起去掉（否则边指向一个画布上不存在的点）。
+      响应加 `refined_count`（被剔掉的 org 节点条数）—— **refine 档下
+      0 也带**，便于前端统一按 mode 渲染说明；coarse 档不加该字段。
+      计数 = 本次响应里实际被剔的节点条数（与 refined_count 同源同口径，
+      不是全库同名数），所以能直接和「少了几条」对上。
     """
     kw = {"site": site, "limit": limit}
     if date_from: kw["date_from"] = date_from
     if date_to:   kw["date_to"] = date_to
-    return _db().graph(**kw)
+    data = _db().graph(**kw)
+    if not _refine_mode_on(mode):
+        return data
+    ev = _eventish_org_names(_db())
+    drop = {n.get("name") for n in data.get("nodes") or []
+            if n.get("type") == "org" and (n.get("name") or "") in ev}
+    nodes = [n for n in (data.get("nodes") or [])
+             if not (n.get("type") == "org" and (n.get("name") or "") in ev)]
+    edges = [e for e in (data.get("edges") or [])
+             if (e.get("src_name") not in drop
+                 and e.get("dst_name") not in drop)]
+    return {"nodes": nodes, "edges": edges,
+            "refined_count": len(data.get("nodes") or []) - len(nodes)}
 
 
 @app.get("/api/graph/stats")
@@ -1664,6 +1719,47 @@ def api_extract_run(req: ExtractReq):
 _GRAPH_BLOCK_TYPES = {"measure"}
 
 
+def _refine_mode_on(mode) -> bool:
+    """
+    是不是精选档。大小写/空白不敏感；其余任何值一律按粗选（默认口径）。
+
+    ⚠ 为什么要容得下非字符串：这些路由的默认值是 FastAPI 的 `Query(...)`
+      **实例**，只有在走 HTTP 时才被框架替换成真字符串。而本项目的测试与
+      内部复用（`tests_panel_dates.py` 直接调 `api_panel_orgs(...)` 断言
+      `d.top_orgs` 的 kwargs；`api_panel_export` / `api_panel_snapshot`
+      直接调它）**都是直接调函数**—— 那时 mode 就是 Query 对象，
+      `(mode or "").strip()` 当场 AttributeError。这里统一吃掉：
+      Query 实例读它的 default，读不出就当粗选（默认档）。
+    """
+    if isinstance(mode, str):
+        return mode.strip().lower() == "refine"
+    dv = getattr(mode, "default", None)      # FastAPI Query 实例
+    return isinstance(dv, str) and dv.strip().lower() == "refine"
+
+
+def _eventish_org_names(d) -> set:
+    """
+    精选档要滤掉的 org 名集合 = {type=org 且 `textseg.eventish_org(name)`}。
+
+    ⚠ 判据是**形态**（活动/会议片段），与抽取库内容无关 —— 这就是
+      「切换只影响读取/统计展示、库数据不动」之所以成立的原因。
+    ⚠ 走 `distinct_entity_names("org")` 而不是 list_entities：后者要 JOIN
+      articles 再逐行造 11 列 dict（0.7 秒级），而图谱每次拖筛选都会调到；
+      这里只要名字（实测 12075 个 org 去重名，一条 DISTINCT 查询）。
+    """
+    out = set()
+    try:
+        for n in d.distinct_entity_names("org"):
+            n = (n or "").strip()
+            if n and textseg.eventish_org(n):
+                out.add(n)
+    except Exception:
+        # 形态闸门是**展示增强**：查不到名字不该让图谱整块挂掉，
+        # 退化成「不过滤」（即粗选口径）是安全的，而不是 500。
+        return set()
+    return out
+
+
 def _blocked_for_graph(d, allow_types: Optional[set] = None) -> set:
     """
     算出「不进图」的节点名集合。
@@ -1760,7 +1856,8 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
                    topn: int, max_degree: int = 0, rel_types: str = "",
                    keyword: str = "", focus: str = "", hop: int = 1,
                    site: str = "", date_from: str = "", date_to: str = "",
-                   node_types: str = "", find: str = "", hl: str = ""
+                   node_types: str = "", find: str = "", hl: str = "",
+                   mode: str = ""
                    ) -> Dict[str, Any]:
     """
     关联分析的**内部实现**（路由和 pyvis 产物都调它）。
@@ -1816,6 +1913,26 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
     #   措施从 0 变成 9，不知道中间发生了什么。
     blocked_all = _blocked_for_graph(d)
     blocked = _blocked_for_graph(d, allow_types=want_nt)
+    # ---- T8 精选档：活动/会议形态的 org 名并入黑名单 --------------------
+    # ⚠ 必须在 **build_graph 之前**并入。事后挑节点/边是错的：
+    #   那样 graph_nodes_all / graph_edges_all / by_type / by_site 全是粗选口径，
+    #   画布少一块而计数没少 —— 正是这个项目一直在防的「图与数字两套口径」。
+    # ⚠ blocked_all 也要并：它是「不解除过滤时会被挡掉的量」，用于界面说明；
+    #   只并 blocked 会让 blocked_kept_out = blocked_all - blocked 变成负数。
+    # ⚠ 形态闸门不受图例勾选（allow_types）影响：它拦的是「活动名不是机构」，
+    #   与「措施类低置信」是两回事，用户勾不勾都不该把它放回图上。
+    refine_on = _refine_mode_on(mode)
+    ev_orgs = _eventish_org_names(d) if refine_on else set()
+    if ev_orgs:
+        blocked_all = blocked_all | ev_orgs
+        blocked = blocked | ev_orgs
+    # 被剔的 org 名数 = **本次关系端点里**真正会变成节点的那些（不是全库同名数）——
+    # 只有这样它才能和「少了几条」对上，不至于报一个用户永远验不了的数字。
+    refined_count = 0
+    if ev_orgs:
+        ends = {(x.get("src_name") or "").strip() for x in rows}
+        ends |= {(x.get("dst_name") or "").strip() for x in rows}
+        refined_count = len(ends & ev_orgs)
     G, types = GA.build_graph(rows, min_weight=min_weight,
                               blocked_nodes=blocked,
                               rel_types=want or None)
@@ -1949,6 +2066,10 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
         "scope_nodes": ne.get("scope_nodes", 0),
         "scope_edges": ne.get("scope_edges", 0),
     }
+    # ⚠ 只有**精选档且真剔到了**才加 refined_count：粗选档不加（前端靠这个键
+    #   的有无判档，加了会让粗选响应凭空多一句说明）。
+    if refine_on and refined_count:
+        r["filters"]["refined_count"] = refined_count
     return r
 
 
@@ -1965,7 +2086,8 @@ def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
                        site: str = "",
                        date_from: str = "",
                        date_to: str = "",
-                       node_types: str = "", find: str = "", hl: str = ""):
+                       node_types: str = "", find: str = "", hl: str = "",
+                       mode: str = ""):
     """
     关联指标（networkx）：度/加权度/介数/PageRank/Louvain 社区。
 
@@ -1984,6 +2106,9 @@ def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
       · find        高亮：含此串的所有节点 + 两端都命中的边（只标不改图）
       · hl          点击聚焦：节点名 → 该节点+一跳邻居+关联边；
                     a|b → 恰好 2 节点 + 1 边（同样只标不改图）
+      · mode        口径档位：空/coarse = 粗选（默认，与历史逐字一致）；
+                    refine = 精选，活动/会议形态的 org 节点并入黑名单，
+                    画布/排名/各计数一起收紧，响应 filters 里多 refined_count
 
     ⚠ node_types 与 focus/keyword 的**先后顺序固定为 类型 → 聚焦 → 关键词**
       （见 graph_analysis.crop_scope）。所以「只看政策 + 聚焦某机构」=
@@ -1993,16 +2118,23 @@ def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
                           int(topn), int(max_degree), rel_types,
                           keyword, focus, int(hop),
                           site, date_from, date_to,
-                          node_types=node_types, find=find, hl=hl)
+                          node_types=node_types, find=find, hl=hl,
+                          mode=mode)
 
 
 @app.get("/api/graph/facets")
-def api_graph_facets(limit: int = Query(20, ge=1, le=60)):
+def api_graph_facets(limit: int = Query(20, ge=1, le=60),
+                     mode: str = ""):
     """筛选器的候选项：有哪些关系类型、各有多少条；哪些节点适合当焦点。
 
     ⚠ 这些数字来自**未加任何筛选**的全图 —— 它们是筛子的选项说明，
       不是筛选后的结果。混了就会把「全库有多少条 issue」说成
       「筛完还有多少条 issue」。
+
+    ⚠ T8：mode=refine 时 **focus_candidates 里也滤掉活动形态的 org 名** ——
+      否则会出现「焦点下拉框里能选『协会召开第二届理事会』，选了却查出空图」
+      （它已不在精选画布上）。其余计数（rel_types / graph_nodes / sites /
+      years）是**筛子的候选说明**，保持全量口径不动。
     """
     d = _db()
     # ⚠ 这些计数是筛子的**候选说明**，必须是全量口径：截断了就会把
@@ -2025,10 +2157,16 @@ def api_graph_facets(limit: int = Query(20, ge=1, le=60)):
     # ⚠ 机构名要用**全量去重名**：早先走 list_entities(limit=5000)，
     #   那按 name 排序截断，等于「只有笔画靠前的机构能当焦点」——
     #   下拉框里机构缺了一大半，却完全看不出来。
+    refine_on = _refine_mode_on(mode)
     best: Dict[str, int] = {}
     for n in d.distinct_entity_names("org"):
         n = (n or "").strip()
         if not n or n in blocked:
+            continue
+        # ⚠ 精选档：活动名不进候选，否则「选了它 → 空图」。
+        #   滤在 **[:limit] 截断之前** —— 截断后再滤会白占名额，
+        #   下拉框凭空少几项却看不出来。
+        if refine_on and textseg.eventish_org(n):
             continue
         best[n] = max(best.get(n, 0), deg.get(n, 0))
     cands = [{"name": n, "degree": dv} for n, dv in best.items()
@@ -2112,7 +2250,8 @@ def api_graph_vis(min_degree: int = Query(1, ge=1, le=50),
                   rel_types: str = "", keyword: str = "",
                   focus: str = "", hop: int = Query(1, ge=1, le=4),
                   site: str = "", date_from: str = "", date_to: str = "",
-                  node_types: str = "", find: str = "", hl: str = ""):
+                  node_types: str = "", find: str = "", hl: str = "",
+                  mode: str = ""):
     """
     产出 pyvis 用的单文件 HTML（vis.js **内联**，零 CDN）。
 
@@ -2122,11 +2261,14 @@ def api_graph_vis(min_degree: int = Query(1, ge=1, le=50),
     ⚠ 参数必须与 /api/graph/analysis **完全对齐**：导出的是「屏幕上
       看到的那张图」。少接一个筛选参数，用户筛完了导出出来却是全图，
       交付物和演示当场对不上，而且这种错误极难察觉。
+      T8 的 `mode` 同理：屏幕在精选档、导出的是粗选那张图，
+      就是「屏幕=导出」断掉 —— 所以这里的 mode 直通 `_graph_payload`。
     """
     data = _graph_payload(int(min_degree), int(limit), 1.0, 20,
                           int(max_degree), rel_types, keyword, focus,
                           int(hop), site, date_from, date_to,
-                          node_types=node_types, find=find, hl=hl)
+                          node_types=node_types, find=find, hl=hl,
+                          mode=mode)
     g = data.get("graph") or {}
     if not g.get("nodes"):
         return {"error": "当前筛选下没有可显示的节点"}
