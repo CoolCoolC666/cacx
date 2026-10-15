@@ -371,6 +371,15 @@
            会留下多少 —— 所以下面那块口径回显是跟着一起做的。 -->
       <div class="row" id="gp_filters"
            style="gap:10px;flex-wrap:wrap;margin-top:10px;align-items:center">
+        <!-- 两档口径：与面板「高频机构」同一套闸门，refine 时机构节点/计数/焦点候选
+             一起收紧。⚠ 只是往 qs 里**追加** mode，其它筛选（类型/站点/日期/聚焦/关键词）
+             一律保持用户当前设置，切换时不重置。 -->
+        <label style="font-size:12.5px">口径
+          <select id="gp_mode" onchange="gpModeChange()"
+            title="粗选 = 不加形态闸门（默认）；精选 = 滤掉形如「协会召开第二届理事会」的活动名机构候选，节点/计数/焦点候选一起收紧。只影响读取口径，不重跑抽取。">
+            <option value="coarse" selected>粗选</option>
+            <option value="refine">精选</option>
+          </select></label>
         <span style="font-size:12.5px;color:var(--dim)">关系类型</span>
         <span id="gp_types" style="display:flex;gap:10px;flex-wrap:wrap"></span>
         <label style="font-size:12.5px">最小度数
@@ -628,6 +637,15 @@
       </div>
       <div class="box">
         <h3>高频机构 Top 12
+          <!-- 两档口径切换：粗选=不加闸门（默认，与加档位之前逐字节相同）；
+               精选=应用通用形态闸门，滤掉形如「协会召开第二届理事会」的活动名候选。
+               只切这一张卡的**读取口径**，不重跑抽取库、也不动其它三张图。 -->
+          <select id="pn_orgmode" onchange="loadPanelOrgs()"
+            style="padding:2px 6px;font-size:11.5px"
+            title="粗选 = 不加形态闸门，召回高（默认）；精选 = 滤掉形如「协会召开第二届理事会」的活动名候选，榜单更干净。只影响这张卡的读取口径，不重跑抽取。">
+            <option value="coarse" selected>粗选</option>
+            <option value="refine">精选</option>
+          </select>
           <button class="btn" style="padding:1px 7px;font-size:11px"
             onclick="dlBarsPng('rank_org','高频机构Top12')" title="下载这张图为 PNG 图片">⬇ 图</button>
           <button class="btn" style="padding:1px 7px;font-size:11px"
@@ -1880,6 +1898,15 @@ function ensureVis(){
 // ------------------------------------------------------------ 图谱筛选
 let GP_FACETS = null;      // 关系类型计数 + 焦点候选（未加任何筛选时的全图口径）
 
+/* 图谱的两档口径（与面板「高频机构」同一个闸门）：
+     coarse 粗选 = 不加闸门，召回高 —— **默认**，且不往 qs 里写 mode，
+                  于是请求与加档位之前逐字节相同，默认口径的数字一个都不变；
+     refine 精选 = 应用通用形态闸门，滤掉形如「协会召开第二届理事会」的活动名机构候选。
+   ⚠ 只影响读取/统计展示，不重跑抽取库。 */
+function gpMode(){
+  return ($('gp_mode')?.value === 'refine') ? 'refine' : 'coarse';
+}
+
 // 收集当前筛选条件。⚠ 未勾选任何关系类型时必须传**空串**，
 // 而不是传全部类型 —— 「全部」和「显式勾了全部」在口径上不是一回事：
 // 后者会让人以为你**只**想要这几类关系。
@@ -1948,8 +1975,18 @@ function gpQuery(){
   // 点击聚焦（hl）：与 find 独立，**必须一起带进导出请求** ——
   // 「屏幕 = 导出」：导出的 HTML 也要能看到点击聚焦态。
   if(GP_HL) q.set('hl', GP_HL);
+  // 档位只是**追加**一个参数，绝不动上面任何一条筛选 ——
+  // 「换个档位顺手把人家的筛选重置了」是这类开关最容易犯的错。
+  if(gpMode()==='refine') q.set('mode','refine');
   q.set('limit','300'); q.set('topn','12');
   return q;
+}
+
+/* 切档位：facets 也必须按新档位重取（焦点候选就是机构名，闸门一变名单就变），
+   缓存里那份是旧档位的，所以这里强制刷新；随后 loadGraph 会命中刚取回的那份。 */
+async function gpModeChange(){
+  await gpLoadFacets(true);
+  loadGraph();
 }
 
 function gpReset(){
@@ -2087,23 +2124,50 @@ function gpFindNote(a){
     : `　<span style="color:var(--warn)">◆「${esc(fd)}」在本图中没有命中（节点数与关系数未变）</span>`;
 }
 
-async function gpLoadFacets(){
-  if(GP_FACETS) return GP_FACETS;
+// facets 也吃 mode：精选时后端给的是**闸门过滤后**的关系类型计数与焦点候选。
+// 粗选不写 mode —— 与加档位之前的 URL 逐字节相同。
+function gpFacetsQs(){
+  const q = new URLSearchParams({limit:'24'});
+  if(gpMode()==='refine') q.set('mode','refine');
+  return q.toString();
+}
+
+/* 重建勾选列表时保留用户当前的勾选态。
+   ⚠ 切档位要按新 mode 重取 facets，而下面几个 innerHTML 模板里写死了 checked ——
+   直接重建等于「换个档位」顺手把关系类型/站点的勾选重置了，
+   而口径回显上还写着用户自己设的条件，两边就对不上了。
+   首屏（列表里还没有任何 input）保持模板的默认全勾。 */
+function gpRebuildChecks(box, html){
+  if(!box) return;
+  const had = box.querySelectorAll('input').length > 0;
+  const on = new Set([...box.querySelectorAll('input:checked')].map(x=>x.value));
+  box.innerHTML = html;
+  if(had) box.querySelectorAll('input').forEach(x=>{ x.checked = on.has(x.value); });
+}
+
+async function gpLoadFacets(force){
+  if(GP_FACETS && !force) return GP_FACETS;
   try{
-    GP_FACETS = await (await fetch('/api/graph/facets?limit=24')).json();
+    GP_FACETS = await (await fetch('/api/graph/facets?'+gpFacetsQs())).json();
   }catch(e){ GP_FACETS = null; return null; }
+  gpRenderFacets();
+  return GP_FACETS;
+}
+
+function gpRenderFacets(){
+  if(!GP_FACETS) return;
   const box = $('gp_types');
   if(box){
     // 显示中文，value 仍传 rel_type 原值。
     // ⚠ 别直接显示 `t.key`：界面上摆一串 joint_issue / issue / target / adopt，
     //   读的人（老师、组员）根本不知道它们分别指什么；而这三个字的中文
     //   标签在下方 GP_REL_CN 里本来就有，只是这个筛选器从前没用上。
-    box.innerHTML = (GP_FACETS.rel_types||[]).map(t=>
+    gpRebuildChecks(box, (GP_FACETS.rel_types||[]).map(t=>
       `<label class="inline" style="font-size:12px;cursor:pointer"
         title="全图共 ${t.n} 条该类型关系（内部名 ${esc(t.key)}）">
         <input type="checkbox" value="${esc(t.key)}" checked>
         <span>${esc(GP_REL_CN[t.key]||t.key)} <span style="color:var(--dim)">${t.n}</span></span>
-      </label>`).join('');
+      </label>`).join(''));
   }
   const dl = $('gp_focus_opts');
   if(dl && GP_FACETS.focus_candidates){
@@ -2112,12 +2176,12 @@ async function gpLoadFacets(){
   }
   const sb = $('gp_sites');
   if(sb && GP_FACETS.sites && GP_FACETS.sites.length){
-    sb.innerHTML = GP_FACETS.sites.map(s=>
+    gpRebuildChecks(sb, GP_FACETS.sites.map(s=>
       `<label class="inline" style="font-size:12px;cursor:pointer"
         title="全图共 ${s.n} 条关系来自该站点">
         <input type="checkbox" value="${esc(s.key)}" checked>
         <span>${esc(s.key)} <span style="color:var(--dim)">${s.n}</span></span>
-      </label>`).join('');
+      </label>`).join(''));
     // 日期框的上下界按库里实际有的年份给，别让用户选到没有数据的月份
     const ys = (GP_FACETS.years||[]).map(y=>y.key).filter(Boolean).sort();
     if(ys.length){
@@ -2127,7 +2191,6 @@ async function gpLoadFacets(){
       });
     }
   }
-  return GP_FACETS;
 }
 
 // 口径回显：把「筛完剩什么」写清楚。数字必须来自接口的 filters，
@@ -2181,7 +2244,15 @@ function gpRenderScope(an){
           ? `（且只统计这些来源文章的关系）` : ''}——
        拿它和全库的数字比大小是没有意义的。</div>`
     : '';
-  box.innerHTML = bits.join('　·　') + warn;
+  // 精选档的回显：只认**响应里的** refined_count，不看下拉框选了什么 ——
+  //   后端还没上线 mode 时，按档位判断会凭空多出一句「已过滤 0 个」；
+  //   而 refined_count 不存在/为 0 就什么都不显示，粗选档（后端不给这个字段）
+  //   自然保持原样，一个字符都不多。
+  const refined = Number(f.refined_count || 0);
+  const refNote = refined > 0
+    ? `<div style="margin-top:4px">精选模式已过滤 <b>${refined}</b> 个活动名机构候选</div>`
+    : '';
+  box.innerHTML = bits.join('　·　') + warn + refNote;
 }
 
 async function loadGraph(){
@@ -4143,6 +4214,91 @@ function panelDateQs(qs){
   return qs;
 }
 
+/* 面板四张图共用的口径串：站点 + 日期。**只有这一份实现** ——
+   切档位时要单独重载机构榜，如果那边再拼一遍 site/date，
+   两条路径迟早漂移（「改了筛选忘了同步」正是最难发现的那类错）。
+   日期段直接复用 panelDateQs：pn_from/pn_to 优先，都留空才用 pn_months 换算。 */
+function panelScopeQs(){
+  const q = new URLSearchParams();
+  const site = $('pn_site')?.value || '';
+  if(site) q.set('site', site);
+  return panelDateQs(q);
+}
+
+/* 「高频机构 Top 12」的两档口径：
+     coarse 粗选 = 不加闸门，召回高 —— **默认**，而且不往 qs 里写 mode，
+                  于是请求与加档位之前逐字节相同，默认榜单的数字一个都不变；
+     refine 精选 = 应用通用形态闸门，滤掉形如「协会召开第二届理事会」的活动名候选。
+   ⚠ 只影响读取/统计展示，不重跑抽取库。 */
+function pnOrgMode(){
+  return ($('pn_orgmode')?.value === 'refine') ? 'refine' : 'coarse';
+}
+
+// 机构榜的口径串：与面板其余三张图同一套 site/date，再按档位决定是否追加 mode。
+function panelOrgsQs(){
+  const q = panelScopeQs();
+  if(pnOrgMode()==='refine') q.set('mode','refine');
+  return q.toString() ? '?' + q : '';
+}
+
+/* 精选档的「缺省说明」。
+   ⚠ 必须靠**响应里有没有 refine 对象**判断，不能看下拉框选了什么 ——
+   后端还没上线 mode 时，按档位判断会让卡片凭空多一句「已过滤 0 个」；
+   而粗选档后端本来就不给这个字段，于是这里返回空串，卡片与改动前逐字相同。 */
+function pnRefineNote(orgs){
+  const rf = orgs && orgs.refine;
+  if(!rf) return '';
+  // 说明条的外壳：两条分支共用，免得同一句话在屏幕上长得不一样。
+  // ⚠ 名字别叫 box —— 本文件里 box 一直是「DOM 元素」的意思，容易看串。
+  const wrap = t => `<div style="margin-top:9px;color:var(--dim);font-size:11.5px;
+      border-left:3px solid var(--line);padding-left:8px">${t}</div>`;
+  // ① 后端给了 note —— 一律用它，不自作主张改写。
+  //    快照导出的那一路渲染的就是**同一句** orgg["note"]（app.py:1265），
+  //    两边共用后端这一句，「屏幕=导出」在措辞层面才真正成立；
+  //    而且它是信息最全的版本（过滤量 + 候选串数 + 组数 + 名单带出现次数）。
+  if(orgs.note) return wrap(esc(orgs.note));
+  // ② 后备：只有结构化字段、没有 note 时自己拼一句 ——
+  //    否则后端一旦降级（或换了实现），这一条说明就从屏幕上哑掉。
+  const total = Number(rf.filtered_total || 0);
+  const gs = rf.filtered_groups || [];
+  if(!total && !gs.length) return '';
+  const ex = gs.slice(0,3).map(g=>esc(g.org));
+  // 契约里 filtered_groups 最多给 5 组，正好 5 组时**可能是被截断的**，
+  // 所以满 5 组不写死「共 5 组」、写 ≥5 —— 否则就是在编一个我们并不知道的数。
+  const gTxt = gs.length
+    ? `（共 ${gs.length >= 5 ? '≥5' : gs.length} 组因此缺省`
+      + (ex.length ? `，如 ${ex.join('、')}` : '') + '）'
+    : '';
+  return wrap(`精选模式已过滤 <b>${total.toLocaleString()}</b> 个活动名候选${gTxt}`);
+}
+
+/* 只重载「高频机构 Top 12」这一张卡：切档位时其余三张图不必重发请求，
+   屏幕上的其它口径（站点/日期/月份）也一个都不动。 */
+async function loadPanelOrgs(){
+  if(!$('rank_org')) return;                 // 面板未渲染，别往下走
+  const orgs = await (await fetch('/api/panel/orgs'+panelOrgsQs())).json();
+  renderPanelOrgs(orgs);
+}
+
+function renderPanelOrgs(orgs){
+  const oit = orgs.items||[];
+  PN_CACHE['rank_org'] = oit.map(x=>({k:x.org, n:x.count}));
+  $('rank_org').innerHTML = (oit.length
+    ? oit.map(x=>`<div class="rank"
+         title="${esc(x.merge_basis||'')} · 归并自 ${(x.aliases||[]).length} 种写法">
+         <span class="t">${x.needs_review
+           ? '<span style="color:var(--warn)" title="归并结果需人工复核">⚠</span> ' : ''}${esc(x.org)}</span>
+         <span class="v">${x.count}</span></div>`).join('')
+      + (orgs.review_count
+        ? `<div style="margin-top:9px;color:var(--warn);font-size:11.5px">
+             有 ${orgs.review_count} 项带 ⚠：机器归并可能把无关机构吸进同一组，
+             引用进报告前必须人工复核</div>` : '')
+      + `<div style="margin-top:6px;color:var(--dim);font-size:11px">
+           机器挖掘的候选，非定论</div>`
+    : '<div class="empty" style="padding:20px">该站点无机构数据</div>')
+    + pnRefineNote(orgs);
+}
+
 /* 下载面板图表的原始数据（CSV）。
    走 /api/panel/export 而不是前端拼 —— 界面看到的数字与导出的数字
    必须来自同一次查询，否则「改了筛选忘了同步」这种错最难发现。 */
@@ -4156,6 +4312,14 @@ function dlPanel(which, granularity){
   // 时间口径跟着屏幕走。只有后端真的按日期筛的四张图才带 ——
   // trend / events 两个分支不吃 date_from，硬拼上去是假口径，比不拼更坏。
   if(['columns','problems','orgs','joint'].indexOf(which)>=0) panelDateQs(qs);
+  // 档位跟着屏幕走：机构榜在精选档下要带 mode=refine，否则屏幕上滤过、导出的还是粗选那份，
+  // 「屏幕=导出」当场就断。只有 orgs 这一张吃闸门 —— 其余三张不在屏幕上按档位渲染，
+  // 硬拼上去是假口径（与 trend/events 不吃 date_from 同理）。
+  // ⚠ 后端已确认接受该参数（本轮后端子代理并行加的，读源码核对过）：
+  //   /api/panel/export 的 `mode: str = ""`；且注释写明「只有 which=orgs 吃它」。
+  //   FastAPI 对**未声明**的 query 参数是静默忽略、不会 422，所以万一后端还没上，
+  //   这里也不会报错，只会退化成粗选那份导出（那是「屏幕≠导出」，不是崩）。
+  if(which==='orgs' && pnOrgMode()==='refine') qs.set('mode','refine');
   const a=document.createElement('a');
   a.href='/api/panel/export?'+qs.toString();
   a.download='';
@@ -4174,6 +4338,9 @@ function dlSnapshot(){
   // 快照里的栏目榜/治理问题/高频机构/联合发文在屏幕上是按日期筛的，
   // 导出必须同一段区间 —— 否则「屏幕=导出」只剩标题相同。
   panelDateQs(qs);
+  // 「高频机构」是面板的一部分：屏幕上是精选档，快照里那一块就必须同口径，
+  // 否则导出的 HTML 给人看的榜和屏幕上看到的是两份数。
+  if(pnOrgMode()==='refine') qs.set('mode','refine');
   const a=document.createElement('a');
   a.href='/api/panel/snapshot?'+qs.toString();
   a.download='';
@@ -4349,20 +4516,11 @@ function monthsToFrom(N){
 
 async function loadPanel(){
   const site=$('pn_site')?.value||'';
-  // 日期优先于月份：pn_from/pn_to 填了 → 按日期筛；**都留空** → 用「近 N 个月」换算成 date_from。
-  //   换算后的 date_from 与趋势图同源（同一个 pn_months），四张图同一时间口径。
-  const df = $('pn_from')?.value || '';
-  const dt = $('pn_to')?.value || '';
-  const mN = Math.max(6, Math.min(120, parseInt($('pn_months')?.value||'36',10)||36));
-  const q = new URLSearchParams();
-  if(site) q.set('site', site);
-  if(df || dt){
-    if(df) q.set('date_from', df);
-    if(dt) q.set('date_to', dt);
-  }else{
-    // 月份模式：date_to 不传，走后端默认 2099-12-31
-    q.set('date_from', monthsToFrom(mN));
-  }
+  // 站点 + 日期口径（日期优先于月份：pn_from/pn_to 填了按日期筛，
+  //   都留空才用「近 N 个月」换算成 date_from，与趋势图同源）。
+  //   ⚠ 这段**只有 panelScopeQs() 一份** —— 切档位时要单独重载机构榜，
+  //     两处各拼一遍必然漂移。
+  const q = panelScopeQs();
   const qs = q.toString() ? '?' + q : '';
   await loadTrend();
   const f=await (await fetch('/api/facets'+qs)).json();
@@ -4417,22 +4575,10 @@ async function loadPanel(){
   const pRows = pit.map(x=>({k:x.problem, n:x.articles}));
   if($('bar_prob')) drawBars($('bar_prob'), pRows);
 
-  const orgs = await (await fetch('/api/panel/orgs'+s2)).json();
-  const oit = orgs.items||[];
-  PN_CACHE['rank_org'] = oit.map(x=>({k:x.org, n:x.count}));
-  $('rank_org').innerHTML = oit.length
-    ? oit.map(x=>`<div class="rank"
-         title="${esc(x.merge_basis||'')} · 归并自 ${(x.aliases||[]).length} 种写法">
-         <span class="t">${x.needs_review
-           ? '<span style="color:var(--warn)" title="归并结果需人工复核">⚠</span> ' : ''}${esc(x.org)}</span>
-         <span class="v">${x.count}</span></div>`).join('')
-      + (orgs.review_count
-        ? `<div style="margin-top:9px;color:var(--warn);font-size:11.5px">
-             有 ${orgs.review_count} 项带 ⚠：机器归并可能把无关机构吸进同一组，
-             引用进报告前必须人工复核</div>` : '')
-      + `<div style="margin-top:6px;color:var(--dim);font-size:11px">
-           机器挖掘的候选，非定论</div>`
-    : '<div class="empty" style="padding:20px">该站点无机构数据</div>';
+  // 机构榜单独走 panelOrgsQs()：与上面几处同一套 site/date，再按当前档位追加 mode。
+  // 渲染抽到 renderPanelOrgs()，切档位那条路径直接复用同一段，不会出现两份榜单。
+  const orgs = await (await fetch('/api/panel/orgs'+panelOrgsQs())).json();
+  renderPanelOrgs(orgs);
 
   const jt = await (await fetch('/api/panel/joint'+s2)).json();
   const jit = jt.items||[];
