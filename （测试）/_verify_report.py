@@ -94,51 +94,51 @@ print("=" * 70)
 print("② 抽取规模（报告 §一/§三 = 2024 年以来窗口；另核全库）")
 print("=" * 70)
 # ⚠ 这两条 SQL 必须带 year 过滤：报告写的是「2024 年以来的 4433 篇里抽出了…」，
-#   不带过滤就是全库的数（114807 / 44342），分子分母一换口径结论全错。
+#   不带过滤就是全库的数（114931 / 44420），分子分母一换口径结论全错。
 W_E = "entities e JOIN articles a ON a.id=e.article_id WHERE a.year>=2024"
 W_R = "relations r JOIN articles a ON a.id=r.article_id WHERE a.year>=2024"
 ew = q("SELECT COUNT(DISTINCT e.name) FROM " + W_E)
-check("窗口去重实体 16507", ew == 16507, str(ew))
+check("窗口去重实体 16648", ew == 16648, str(ew))
 rw = q("SELECT COUNT(*) FROM " + W_R)
-check("窗口关系 8499", rw == 8499, str(rw))
+check("窗口关系 8577", rw == 8577, str(rw))
 ear = q("SELECT COUNT(DISTINCT e.article_id) FROM " + W_E)
-check("窗口实体来源 3815 篇", ear == 3815, str(ear))
-check("窗口实体行数 43927",
-      q("SELECT COUNT(*) FROM " + W_E) == 43927,
+check("窗口实体来源 3829 篇", ear == 3829, str(ear))
+check("窗口实体行数 44223",
+      q("SELECT COUNT(*) FROM " + W_E) == 44223,
       str(q("SELECT COUNT(*) FROM " + W_E)))
-check("窗口关系去重对 4191",
-      q("SELECT COUNT(DISTINCT r.src_name || '#' || r.dst_name) FROM " + W_R) == 4191,
+check("窗口关系去重对 4211",
+      q("SELECT COUNT(DISTINCT r.src_name || '#' || r.dst_name) FROM " + W_R) == 4211,
       str(q("SELECT COUNT(DISTINCT r.src_name || '#' || r.dst_name) FROM " + W_R)))
 
 # 全库（报告 §六 的「全库底数」）
 ea = q("SELECT COUNT(DISTINCT name) FROM entities")
-check("全库去重实体 114807", ea == 114807, str(ea))
-check("全库实体行数 277355",
-      q("SELECT COUNT(*) FROM entities") == 277355,
+check("全库去重实体 114931", ea == 114931, str(ea))
+check("全库实体行数 277651",
+      q("SELECT COUNT(*) FROM entities") == 277651,
       str(q("SELECT COUNT(*) FROM entities")))
 ra = q("SELECT COUNT(*) FROM relations")
-check("全库关系 44342", ra == 44342, str(ra))
-check("全库关系去重对 29049",
-      q("SELECT COUNT(DISTINCT src_name || '#' || dst_name) FROM relations") == 29049,
+check("全库关系 44420", ra == 44420, str(ra))
+check("全库关系去重对 29069",
+      q("SELECT COUNT(DISTINCT src_name || '#' || dst_name) FROM relations") == 29069,
       str(q("SELECT COUNT(DISTINCT src_name || '#' || dst_name) FROM relations")))
-check("全库关系来源 6887 篇",
-      q("SELECT COUNT(DISTINCT article_id) FROM relations") == 6887,
+check("全库关系来源 6893 篇",
+      q("SELECT COUNT(DISTINCT article_id) FROM relations") == 6893,
       str(q("SELECT COUNT(DISTINCT article_id) FROM relations")))
 
 print()
 print("=" * 70)
-print("③ 关系类型分布（窗口 5367/2082/561/489；全库 29724/9724/2725/2169）")
+print("③ 关系类型分布（窗口 5425/2098/561/493；全库 29782/9740/2729/2169）")
 print("=" * 70)
-for rt, want in [("joint_issue", 5367), ("issue", 2082), ("target", 561), ("adopt", 489)]:
+for rt, want in [("joint_issue", 5425), ("issue", 2098), ("target", 561), ("adopt", 493)]:
     got = q("SELECT COUNT(*) FROM " + W_R + " AND r.rel_type='" + rt + "'")
     check(f"窗口 {rt} = {want}", got == want, str(got))
 ci = q("SELECT COUNT(*) FROM " + W_R + " AND r.rel_type='joint_issue'")
-check("窗口 joint_issue 占 63.1%", abs(100 * ci / rw - 63.1) < 0.15,
+check("窗口 joint_issue 占 63.3%", abs(100 * ci / rw - 63.3) < 0.15,
       f"实测 {100*ci/rw:.1f}%")
 check("无证据关系为 0",
       q("SELECT COUNT(*) FROM relations WHERE evidence IS NULL OR evidence=''") == 0)
 # 全库
-for rt, want in [("joint_issue", 29724), ("issue", 9724), ("adopt", 2725),
+for rt, want in [("joint_issue", 29782), ("issue", 9740), ("adopt", 2729),
                  ("target", 2169)]:
     got = q("SELECT COUNT(*) FROM relations WHERE rel_type='" + rt + "'")
     check(f"全库 {rt} = {want}", got == want, str(got))
@@ -153,35 +153,35 @@ check("全库 joint_issue 含「联合印发」1638 条",
 
 print()
 print("=" * 70)
-print("④ 覆盖率（窗口 1195/4435 = 26.9%（对 4433 篇有正文为 27.0%）；全库 6887/28919 = 23.8%）")
+print("④ 覆盖率（窗口 1201/4435 = 27.1%（对 4433 篇有正文为 27.1%）；全库 6893/28919 = 23.8%）")
 print("=" * 70)
 cov = q("SELECT COUNT(DISTINCT r.article_id) FROM " + W_R)
-check("窗口关系覆盖 1195 篇 / 26.9%（分母 2024+ 全部 4435 篇；有正文 27.0%）",
-      cov == 1195 and abs(100 * cov / n24 - 26.9) < 0.15,
+check("窗口关系覆盖 1201 篇 / 27.1%（分母 2024+ 全部 4435 篇；有正文 27.1%）",
+      cov == 1201 and abs(100 * cov / n24 - 27.1) < 0.15,
       f"{cov} 篇 = {100*cov/n24:.1f}%")
 # ⚠ 全库的分母必须是 28919（全库文章数）。
 #   曾经出现过「6887 篇 / 4433 篇 = 156%」—— 分子是全库、分母是窗口，自相矛盾。
 cov_a = q("SELECT COUNT(DISTINCT article_id) FROM relations")
-check("全库关系覆盖 6887 篇 / 23.8%（分母 28919）",
-      cov_a == 6887 and abs(100 * cov_a / n_all - 23.8) < 0.15,
+check("全库关系覆盖 6893 篇 / 23.8%（分母 28919）",
+      cov_a == 6893 and abs(100 * cov_a / n_all - 23.8) < 0.15,
       f"{cov_a} 篇 = {100*cov_a/n_all:.1f}%")
 have = q("SELECT COUNT(DISTINCT id) FROM articles WHERE "
          "id IN (SELECT article_id FROM entities) "
          "OR id IN (SELECT article_id FROM relations)")
-check("全库有抽取结果 26080 篇 / 90.2%",
-      have == 26080 and abs(100 * have / n_all - 90.2) < 0.2,
+check("全库有抽取结果 26094 篇 / 90.2%",
+      have == 26094 and abs(100 * have / n_all - 90.2) < 0.2,
       f"{have} 篇 = {100*have/n_all:.1f}%")
-check("窗口有抽取结果 3815 篇 / 86.0%",
-      abs(100 * 3815 / n24 - 86.0) < 0.1, f"{100*3815/n24:.1f}%")
+check("窗口有抽取结果 3829 篇 / 86.3%",
+      abs(100 * 3829 / n24 - 86.3) < 0.1, f"{100*3829/n24:.1f}%")
 # 时间跨度：全库 vs 窗口（报告 §六 与 §一 各引一档）
 _sp = db.execute("SELECT MIN(a.pub_day), MAX(a.pub_day) FROM relations r "
                  "JOIN articles a ON a.id=r.article_id").fetchone()
-check("全库关系跨度 2000-09-30 ~ 2026-10-10",
-      tuple(_sp) == ("2000-09-30", "2026-10-10"), str(tuple(_sp)))
+check("全库关系跨度 2000-09-30 ~ 2026-10-14",
+      tuple(_sp) == ("2000-09-30", "2026-10-14"), str(tuple(_sp)))
 _sp2 = db.execute("SELECT MIN(a.pub_day), MAX(a.pub_day) FROM relations r "
                   "JOIN articles a ON a.id=r.article_id WHERE a.year>=2024").fetchone()
-check("窗口关系跨度 2024-01-02 ~ 2026-10-10",
-      tuple(_sp2) == ("2024-01-02", "2026-10-10"), str(tuple(_sp2)))
+check("窗口关系跨度 2024-01-02 ~ 2026-10-14",
+      tuple(_sp2) == ("2024-01-02", "2026-10-14"), str(tuple(_sp2)))
 
 print()
 print("=" * 70)
@@ -197,11 +197,11 @@ NT = "org,policy,problem,measure"
 WEB = "&date_from=2024-01-01"
 an = get("/api/graph/analysis?min_degree=2&node_types=" + NT + WEB)
 nodes = {n["id"]: n for n in an["graph"]["nodes"]}
-check("窗口 1757 节点 / 4191 边 / 126 连通块",
-      (an["nodes"], an["edges"], an["components"]) == (1757, 4191, 126),
+check("窗口 1761 节点 / 4211 边 / 126 连通块",
+      (an["nodes"], an["edges"], an["components"]) == (1761, 4211, 126),
       f'{an["nodes"]}/{an["edges"]}/{an["components"]}')
-check("窗口最大连通块 1406（80.0%）",
-      an.get("largest_component") == 1406,
+check("窗口最大连通块 1410（80.1%）",
+      an.get("largest_component") == 1410,
       f'{an.get("largest_component")} = '
       f'{100*(an.get("largest_component") or 0)/max(1, an["nodes"]):.1f}%')
 # ⚠ 下面的度数是**窗口默认口径**（措施默认勾选放行）下的值。
@@ -213,17 +213,17 @@ for nm, want in [("中央网信办", 285), ("工业和信息化部", 142), ("公
 # 全库档（不传日期）—— 报告 §六 的规模句。⚠ 这一发实测 ~270s。
 an_all = get("/api/graph/analysis?min_degree=2&node_types=" + NT)
 nodes_all = {n["id"]: n for n in an_all["graph"]["nodes"]}
-check("全库 12160 节点 / 29049 边 / 887 连通块",
-      (an_all["nodes"], an_all["edges"], an_all["components"]) == (12160, 29049, 887),
+check("全库 12162 节点 / 29069 边 / 886 连通块",
+      (an_all["nodes"], an_all["edges"], an_all["components"]) == (12162, 29069, 886),
       f'{an_all["nodes"]}/{an_all["edges"]}/{an_all["components"]}')
-check("全库画布 300 节点 / 2993 边",
-      (len(an_all["graph"]["nodes"]), len(an_all["graph"]["edges"])) == (300, 2993),
+check("全库画布 300 节点 / 2995 边",
+      (len(an_all["graph"]["nodes"]), len(an_all["graph"]["edges"])) == (300, 2995),
       f'{len(an_all["graph"]["nodes"])}/{len(an_all["graph"]["edges"])}')
-# ⚠ 全库口径下度/介数第一是**泛称「网信办」**（3377 条实体记录），不是中央网信办 ——
+# ⚠ 全库口径下度/介数第一是**泛称「网信办」**（3381 条实体记录），不是中央网信办 ——
 #   早期文章里大量只写「网信办」。报告第四章把这列为「别名归并过窄」的已知局限，
 #   这里钉住实测值，避免哪天写成「中央网信办第一」却没人发现。
-check("全库度数第一 网信办 1446",
-      nodes_all.get("网信办", {}).get("degree") == 1446,
+check("全库度数第一 网信办 1447",
+      nodes_all.get("网信办", {}).get("degree") == 1447,
       f'实测 {nodes_all.get("网信办", {}).get("degree")}')
 check("全库度数次席 中央网信办 814",
       nodes_all.get("中央网信办", {}).get("degree") == 814,
@@ -236,25 +236,25 @@ check("全库工信部 456 / 公安部 464",
 
 print()
 print("=" * 70)
-print("⑥ 介数（窗口 0.2109/0.1196 + 聚焦 0.8487/0.0306；全库 0.1891/0.0900）")
+print("⑥ 介数（窗口 0.2109/0.1201 + 聚焦 0.8486/0.0306；全库 0.1892/0.0899）")
 print("=" * 70)
 bt = sorted(((n["id"], n.get("betweenness", 0)) for n in an["graph"]["nodes"]),
             key=lambda kv: -kv[1])
 check("窗口全图第一 = 中央网信办 0.2109",
       bt[0][0] == "中央网信办" and abs(bt[0][1] - 0.2109) < 0.001,
       f'{bt[0][0]} = {bt[0][1]}')
-check("窗口全图第二 = 网信办 0.1196", bt[1][0] == "网信办" and abs(bt[1][1] - 0.1196) < 0.001,
+check("窗口全图第二 = 网信办 0.1201", bt[1][0] == "网信办" and abs(bt[1][1] - 0.1201) < 0.001,
       f'{bt[1][0]} = {bt[1][1]}')
 r = bt[0][1] / bt[1][1]
 check("窗口两者相差 1.76 倍", abs(r - 1.76) < 0.05, f"实测 {r:.2f}")
 
 bt_a = sorted(((n["id"], n.get("betweenness", 0)) for n in an_all["graph"]["nodes"]),
               key=lambda kv: -kv[1])
-check("全库全图第一 = 网信办 0.1891",
-      bt_a[0][0] == "网信办" and abs(bt_a[0][1] - 0.1891) < 0.001,
+check("全库全图第一 = 网信办 0.1892",
+      bt_a[0][0] == "网信办" and abs(bt_a[0][1] - 0.1892) < 0.001,
       f'{bt_a[0][0]} = {bt_a[0][1]}')
-check("全库全图第二 = 中央网信办 0.0900",
-      bt_a[1][0] == "中央网信办" and abs(bt_a[1][1] - 0.0900) < 0.001,
+check("全库全图第二 = 中央网信办 0.0899",
+      bt_a[1][0] == "中央网信办" and abs(bt_a[1][1] - 0.0899) < 0.001,
       f'{bt_a[1][0]} = {bt_a[1][1]}')
 check("全库两者相差 2.10 倍", abs(bt_a[0][1] / bt_a[1][1] - 2.10) < 0.05,
       f"实测 {bt_a[0][1]/bt_a[1][1]:.2f}")
@@ -263,10 +263,10 @@ g1 = get("/api/graph/analysis?focus=" + urllib.parse.quote("中央网信办")
          + "&hops=1&node_types=" + NT + WEB)
 b1 = sorted(((n["id"], n.get("betweenness", 0)) for n in g1["graph"]["nodes"]),
             key=lambda kv: -kv[1])
-check("聚焦 286 节点 / 1115 边", (g1["nodes"], g1["edges"]) == (286, 1115),
+check("聚焦 286 节点 / 1116 边", (g1["nodes"], g1["edges"]) == (286, 1116),
       f'{g1["nodes"]}/{g1["edges"]}')
-check("聚焦第一 = 中央网信办 0.8487",
-      b1[0][0] == "中央网信办" and abs(b1[0][1] - 0.8487) < 0.001,
+check("聚焦第一 = 中央网信办 0.8486",
+      b1[0][0] == "中央网信办" and abs(b1[0][1] - 0.8486) < 0.001,
       f'{b1[0][0]} = {b1[0][1]}')
 check("聚焦第二 0.0306", abs(b1[1][1] - 0.0306) < 0.001, f'{b1[1][0]} = {b1[1][1]}')
 check("聚焦两者相差 28 倍", 24 < b1[0][1] / b1[1][1] < 32, f"实测 {b1[0][1]/b1[1][1]:.0f} 倍")
@@ -468,20 +468,21 @@ else:
     check("docx 已生成", True, f"{docx_path.stat().st_size:,} 字节")
 
     # 关键数字一个都不能少 —— Word 版最常见的失真就是转档时漏句/漏行
-    # （2026-10-15 补：真库全区间重跑后，报告多了「全库底数」这一档，
-    #   这些数同样必须转进 docx；"24 条" 保留，因为报告还写了「其中 2024 年以来 24 条」）
-    MUST = ["4433", "4435", "653 万字", "16507", "8499", "1195", "27.0%",
-            "285", "142", "115", "0.2109", "0.1196", "0.8487", "0.0306",
-            "1757", "4191", "126", "286", "1115",
-            "5367", "2082", "561", "489", "63.1%",
+    # （2026-10-15 补：真库全区间重跑 + 补抽 10-12~10-14 新采的 19 篇后，
+    #   窗口/全库两套数都动了，这些数同样必须转进 docx；
+    #   "24 条" 保留，因为报告还写了「其中 2024 年以来 24 条」）
+    MUST = ["4433", "4435", "653 万字", "16648", "8577", "1201", "27.1%",
+            "285", "142", "115", "0.2109", "0.1201", "0.8486", "0.0306",
+            "1761", "4211", "126", "286", "1116",
+            "5425", "2098", "561", "493", "63.3%",
             "1497", "1541", "1397", "193",
             "2965", "1470", "24 条", "3 条", "21 条", "8 个端点",
             "11.2%", "15.1%", "17.4%", "19.0%", "17.1%", "24.6%",
             "30.6%", "27.0%",
-            # —— 全库底数（2000-2026 全区间）——
-            "28919", "28850", "3827", "277355", "114807", "44342", "29049",
-            "6887", "23.8%", "26080", "12160", "29724", "67.0%", "42 条",
-            "2019-05-17", "3377", "0.1891", "0.0900", "1446", "814"]
+            # —— 全库底数（2000-09-30 ~ 2026-10-14 全区间，含补抽 19 篇）——
+            "28919", "28850", "3827", "277651", "114931", "44420", "29069",
+            "6893", "23.8%", "26094", "12162", "29782", "67.0%", "42 条",
+            "2019-05-17", "3381", "0.1892", "0.0899", "1447", "814"]
 
     missing = [m for m in MUST if m not in full]
     check(f"关键数字 {len(MUST)} 个全部保留",

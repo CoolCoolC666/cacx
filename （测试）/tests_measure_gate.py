@@ -9,20 +9,22 @@
   **默认勾上**（默认图含措施与 adopt 边；报告/README/演示脚本已同步该口径）
   **仍可取消**（取消即回到门槛口径，门槛过滤依然有效）
 
-⚠⚠ 2026-10-15：真库按**全区间**（2000-09-30 ~ 2026-10-10）重跑落库后，
-「默认口径」变成了**两套**，必须分开钉（否则会拿 A 口径的期望去测 B 口径的响应）：
+⚠⚠ 2026-10-15：真库按**全区间**（2000-09-30 ~ 2026-10-14）抽出结果，
+并补抽了 10-12 ~ 10-14 新采的 19 篇之后，「默认口径」是**两套**，必须分开钉
+（否则会拿 A 口径的期望去测 B 口径的响应）：
 
   · **网页首屏口径** —— `index.html:425` 的图谱日期起点 `gp_dfrom` 默认 `2024-01`，
     `gpQuery()` 每次都带上它，所以老师在浏览器里第一眼看到的图是这一档：
-    **1757 节点 / 4191 边 / 126 连通块，画布 300/1466**（与重抽前逐字一致；
-    2024 窗口的抽取结果在全区间重跑中未发生变化）。
+    **1761 节点 / 4211 边 / 126 连通块，画布 300/1482**（全区间重抽 + 补抽后的新基线）。
   · **API 默认口径** —— 直接调 `/api/graph/analysis`（不传 date_from）时是全库：
-    **12160 节点 / 29049 边 / 887 连通块，画布 300/2993**（重抽后的新基线）。
+    **12162 节点 / 29069 边 / 886 连通块，画布 300/2995**（同上新基线）。
 
-⚠ 性能：不带 site/date 的调用要在 **12160 节点全图**上算介数，实测单次 ≈ 250–270s；
-带 date_from 的调用只在筛选后的小图上算（2024 档实测 4.4s）。
+⚠ 性能：不带 site/date 的调用要在 **12162 节点全图**上算介数，实测单次 ≈ 268s
+（2026-10-15 走接口的 4 类口径实测 327.8s，同量级）；
+带 date_from 的调用只在筛选后的小图上算（2024 档实测 3.6s）。
 所以本文件所有真库请求都走 `_payload()` **记忆化**（同一组参数只建一次图），
-真库请求数固定为：API 口径 2 次（4 类 / 3 类）+ 网页口径若干次（各 ≈ 4s）。
+真库请求数固定为：API 口径 2 次（4 类 / 3 类）+ 网页口径若干次（各 ≈ 4s）；
+2026-10-15 全量实测 22 用例共 **357s**，远低于 `_regress.py` 的单文件 1800s 上限。
 —— 这条修复**只动测试**，不碰 `cacx/web/app.py`（另一路并行在改它）。
 """
 import importlib
@@ -88,21 +90,21 @@ class TestMeasureGatedDefault(unittest.TestCase):
 
     def test_两套口径的图规模数字(self):
         api = _api(node_types=ALL)
-        self.assertEqual(api["graph"]["scope_nodes"], 12160)
-        self.assertEqual(api["graph"]["scope_edges"], 29049)
-        self.assertEqual(api.get("components"), 887)
+        self.assertEqual(api["graph"]["scope_nodes"], 12162)
+        self.assertEqual(api["graph"]["scope_edges"], 29069)
+        self.assertEqual(api.get("components"), 886)
         self.assertEqual(len(api["graph"]["nodes"]), 300)
-        self.assertEqual(len(api["graph"]["edges"]), 2993)
-        self.assertEqual(api["graph"].get("hidden_nodes"), 11860)
+        self.assertEqual(len(api["graph"]["edges"]), 2995)
+        self.assertEqual(api["graph"].get("hidden_nodes"), 11862)
 
         web = _web(node_types=ALL)
-        self.assertEqual(web["graph"]["scope_nodes"], 1757)
-        self.assertEqual(web["graph"]["scope_edges"], 4191)
+        self.assertEqual(web["graph"]["scope_nodes"], 1761)
+        self.assertEqual(web["graph"]["scope_edges"], 4211)
         self.assertEqual(web.get("components"), 126)
-        self.assertEqual(web.get("largest_component"), 1406)
+        self.assertEqual(web.get("largest_component"), 1410)
         self.assertEqual(len(web["graph"]["nodes"]), 300)
-        self.assertEqual(len(web["graph"]["edges"]), 1466)
-        self.assertEqual(web["graph"].get("hidden_nodes"), 1457)
+        self.assertEqual(len(web["graph"]["edges"]), 1482)
+        self.assertEqual(web["graph"].get("hidden_nodes"), 1461)
 
     def test_默认图里措施可见且adopt边在(self):
         for tag, d in (("API", _api(node_types=ALL)), ("网页", _web(node_types=ALL))):
@@ -113,16 +115,16 @@ class TestMeasureGatedDefault(unittest.TestCase):
     def test_两套口径的机构度数与介数(self):
         api = _api(node_types=ALL)
         deg = _deg(api)
-        self.assertEqual(deg.get("网信办"), 1446)
+        self.assertEqual(deg.get("网信办"), 1447)
         self.assertEqual(deg.get("中央网信办"), 814)
         self.assertEqual(deg.get("工业和信息化部"), 456)
         # 全区间口径下第一名是泛称「网信办」（早期文章里未按层级归一，
         # 见报告第四章「机构别名归并过宽」），中央网信办居第二。
         bt = _bt(api)
         self.assertEqual(bt[0][0], "网信办")
-        self.assertAlmostEqual(bt[0][1], 0.1891, places=3)
+        self.assertAlmostEqual(bt[0][1], 0.1892, places=3)
         self.assertEqual(bt[1][0], "中央网信办")
-        self.assertAlmostEqual(bt[1][1], 0.0900, places=3)
+        self.assertAlmostEqual(bt[1][1], 0.0899, places=3)
 
         web = _web(node_types=ALL)
         wdeg = _deg(web)
@@ -133,14 +135,14 @@ class TestMeasureGatedDefault(unittest.TestCase):
         self.assertEqual(wbt[0][0], "中央网信办")
         self.assertAlmostEqual(wbt[0][1], 0.2109, places=3)
         self.assertEqual(wbt[1][0], "网信办")
-        self.assertAlmostEqual(wbt[1][1], 0.1196, places=3)
+        self.assertAlmostEqual(wbt[1][1], 0.1201, places=3)
         self.assertAlmostEqual(wbt[0][1] / wbt[1][1], 1.76, places=2)
 
     def test_默认放行数等于门槛挡住的量(self):
         for tag, d in (("API", _api(node_types=ALL)), ("网页", _web(node_types=ALL))):
             self.assertEqual(d["blocked_kept_out"], d["blocked_count"], tag)
-            self.assertEqual(d["blocked_count"], 1374, tag)
-            self.assertEqual(d["blocked_by_type"]["measure"], 1374, tag)
+            self.assertEqual(d["blocked_count"], 1375, tag)
+            self.assertEqual(d["blocked_by_type"]["measure"], 1375, tag)
 
 
 class TestGatedStillReachable(unittest.TestCase):
@@ -150,8 +152,8 @@ class TestGatedStillReachable(unittest.TestCase):
         web = _web(node_types="org,policy,problem")
         self.assertEqual(_avail(web)["measure"], 0)
         self.assertEqual(web["blocked_kept_out"], 0)
-        self.assertEqual(web["graph"]["scope_nodes"], 1631)
-        self.assertEqual(web["graph"]["scope_edges"], 3958)
+        self.assertEqual(web["graph"]["scope_nodes"], 1634)
+        self.assertEqual(web["graph"]["scope_edges"], 3977)
         self.assertEqual(web.get("components"), 115)
         self.assertEqual(_deg(web).get("中央网信办"), 243)
         self.assertAlmostEqual(_bt(web)[0][1], 0.1942, places=3)
@@ -159,9 +161,9 @@ class TestGatedStillReachable(unittest.TestCase):
         api = _api(node_types="org,policy,problem")
         self.assertEqual(_avail(api)["measure"], 0)
         self.assertEqual(api["blocked_kept_out"], 0)
-        self.assertEqual(api["graph"]["scope_nodes"], 11290)
-        self.assertEqual(api["graph"]["scope_edges"], 27309)
-        self.assertEqual(api.get("components"), 818)
+        self.assertEqual(api["graph"]["scope_nodes"], 11291)
+        self.assertEqual(api["graph"]["scope_edges"], 27328)
+        self.assertEqual(api.get("components"), 817)
 
     def test_不传node_types也回到门槛口径(self):
         """「没勾任何特殊类」= 门槛生效。后端按「空=不筛」读，
@@ -169,8 +171,8 @@ class TestGatedStillReachable(unittest.TestCase):
         for tag, d in (("空串", _web(node_types="")), ("不传", _web())):
             self.assertEqual(_avail(d)["measure"], 0, tag)
             self.assertEqual(d["blocked_kept_out"], 0, tag)
-            self.assertEqual(d["graph"]["scope_nodes"], 1631, tag)
-            self.assertEqual(d["graph"]["scope_edges"], 3958, tag)
+            self.assertEqual(d["graph"]["scope_nodes"], 1634, tag)
+            self.assertEqual(d["graph"]["scope_edges"], 3977, tag)
 
 
 class TestMeasureGatedOptIn(unittest.TestCase):
