@@ -1817,6 +1817,16 @@ async function runExtract(write){
       const label = (m && typeof m==='object') ? (m.cn||k) : (m||k);
       return `<span>${esc(label)} <b style="color:var(--acc2)">${obj[k]}</b></span>`;
     }).join('　');
+    // ⚠ 响应里**没有** entity_total / relation_total 这两个键，别再去读它们。
+    //   后端只回 types / rel_types 两个**分类直方图**（app.py 把 entities/relations
+    //   数组 pop 掉了，免得把上万条塞进 HTTP）。早先读 r.entity_total||0 恒为 0，
+    //   卡片上「实体 0」「关系 0」就是这么来的。
+    //   实测预览响应顶层键：articles / skipped / skipped_reasons / low_confidence /
+    //   elapsed / scope / processed / skipped_existing / written / hint / types / rel_types
+    //   —— 无 *_total；types 形如 {org:25, policy:3, problem:2, measure:1}。
+    //   真实计数 = 把分类直方图求和，与下面逐类明细**同源**，总数与分项永远对得上。
+    const sumVals = (obj)=>Object.values(obj||{}).reduce((a,b)=>a+(b||0),0);
+    const entN = sumVals(t), relN = sumVals(rt);
     // ⚠ 「跳过已有结果」**不是** r.skipped：顶层 skipped 是 extract_batch 的
     //   「正文不足，没抽」原义（extract.py:643），后端特意没让它被覆盖。
     //   增量跳过的篇数单独放在 r.skipped_existing（顶层）与 r.scope.skipped 里。
@@ -1832,9 +1842,9 @@ async function runExtract(write){
       <div style="font-size:12.5px;color:var(--dim);line-height:1.9">
         口径命中 <b style="color:var(--acc2)">${r.scope.articles_found}</b> 篇，
         耗时 <b style="color:var(--acc2)">${r.elapsed}s</b>。<br>
-        实体 <b style="color:var(--acc2)">${r.entity_total||0}</b>：
+        实体 <b style="color:var(--acc2)">${entN}</b>：
         ${sum(t,TN)}<br>
-        关系 <b style="color:var(--acc2)">${r.relation_total||0}</b>：
+        关系 <b style="color:var(--acc2)">${relN}</b>：
         ${sum(rt,RN)}<br>
         ${r.written
           ? `已写入：实体 <b>${r.written.entities}</b> 行、关系 <b>${r.written.relations}</b> 行。`
