@@ -550,8 +550,30 @@ GitHub: https://github.com/CoolCoolC666/cacx  （已开源，MIT）
 
 print()
 print("=" * 66)
-print("5  压缩")
+print(f"5  压缩（{'闸门全过' if not fail else f'🔴 有 {fail} 项失败 —— 不出包'}）")
 print("=" * 66)
+# ⚠⚠⚠ 压缩必须排在**所有闸门之后**，且失败时绝不出包。
+#
+#   上一版把压缩放在检查之前、无条件执行，后果实测踩中了：
+#   做反向验证时故意放开排除规则让闸门转红，那次运行的 zip **照样被写出**，
+#   而且它还先把旧 zip 送进了回收站 —— 于是磁盘上剩下的是
+#   「唯一那个包，正好是坏的那个」。
+#   脚本最后确实 exit(1) 了，可产物早就在那里，看上去完全正常。
+#
+#   失败时该做的是：把不合格的暂存目录回收掉，**保持既有包原封不动**，
+#   让人手上永远至少有一个能用的包。宁可不出，也不出错包 ——
+#   与 bfc4e50「取不到数就中止，不退回写死的旧数」同一条底线。
+if fail:
+    try:
+        to_recycle(stage)
+        print(f"  🔴 闸门未过，不出包；不合格暂存目录已回收：{stage}")
+    except Exception as _re:
+        print(f"  🔴 不出包，且暂存目录回收失败（{_re}）。")
+        print(f"     请手动处理：{stage}   ——它**不可交付**。")
+    print(f"     磁盘上原有的 {NAME}.zip 保持原样未受影响。")
+    print(f"\n通过 {ok} 项，失败 {fail} 项")
+    sys.exit(1)
+
 zp = DEST / f"{NAME}.zip"
 if zp.exists():
     if not to_recycle_file(zp):
