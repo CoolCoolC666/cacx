@@ -219,6 +219,15 @@ check("全包无 SQLite 边车文件", not junk_db,
 
 # 排除项**逐项点名**核对 —— 上一版就是靠抽查漏掉了 sites.d。
 # 断言写在包里「不该有的东西」清单上，而不是靠肉眼扫一遍排除表。
+#
+# ⚠⚠ 但点名式排除断言有个致命前提：**被排除的东西必须在源里存在**。
+#   断言写的是 `包 / 该路径 不存在`，一旦源文件本身没了，这条断言就变成
+#   恒真 —— 它会因为「源里没有所以包里不会有」而通过，与「排除规则生效了」
+#   完全无关。2026-10-15 移除重复站点源 config/sites.d/zjwx-api.json 后
+#   就是这个状态：绿灯，但什么也没验。
+#   所以下面每条都要**先看源里有没有**，源里没有就如实说「源已移除」，
+#   不许拿恒真的 PASS 充数。真正的防线在最后那条「包内无任何
+#   config/sites.d/*.json」——它不依赖具体文件名，源里新增站点照样能兜住。
 for bad_path, why in [
     ("config/settings.json", "含打包方密钥"),
     ("config/sites.d/zjwx-api.json", "站点配置，含选择器与分页参数"),
@@ -231,12 +240,25 @@ for bad_path, why in [
     ("（测试）/_rev_autodemo.py", "反向验证脚本，随（测试）整目录排除"),
     ("（测试）/演示产物", "截图与录像，派生物可重跑生成"),
 ]:
-    exists = (stage / bad_path).exists()
-    must_exist = bad_path.endswith("__init__.py")
-    if must_exist:
-        check(f"必须存在：{bad_path}（{why}）", exists)
+    in_stage = (stage / bad_path).exists()
+    in_src = (SRC / bad_path).exists()
+    if bad_path.endswith("__init__.py"):
+        check(f"必须存在：{bad_path}（{why}）", in_stage)
+    elif not in_src:
+        # 源里已经没有了 —— 这条断言此刻验不了任何东西，明说，不装作通过。
+        check(f"⚠ 源已移除、断言空跑：{bad_path}（{why}）", not in_stage,
+              "包内确无此文件；但排除规则本身未被验证，别信这条 PASS")
     else:
-        check(f"已排除：{bad_path}（{why}）", not exists)
+        check(f"已排除：{bad_path}（{why}）", not in_stage,
+              "" if not in_stage else f"❗包内混入了 {bad_path}")
+
+# 目录级防线：不点名任何具体文件名，只问「包里有没有自定义站点配置」。
+# 点名式断言会随源文件的增删变成恒真或恒假，目录级不会 ——
+# 以后新增任何一个 config/sites.d/<code>.json，这条照样兜得住。
+_sitesd = sorted(p.relative_to(stage).as_posix()
+                 for p in stage.rglob("config/sites.d/*") if p.is_file())
+check("包内无任何自定义站点配置（config/sites.d/*）", not _sitesd,
+      f"❗混入 {_sitesd[:3]}" if _sitesd else f"（源里现有 {len(list((SRC / 'config' / 'sites.d').glob('*.json')))} 个）")
 
 # 密钥：唯一判据是「与真实 key 逐字节相同」
 import json
