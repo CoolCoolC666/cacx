@@ -1,0 +1,23 @@
+# 换行符：.bat 必须是 CRLF
+#
+# ⚠ 为什么专门钉这一条（2026-10-15 实测）：
+#   cmd.exe 解析 LF-only 的 .bat 时，会把 UTF-8 中文注释行的字节
+#   当成命令执行，直接在双击后吐红色报错：
+#       '??文注释' is not recognized as an internal or external command
+#   而纯 ASCII 注释 + LF 实测正常 —— 所以真正的触发条件是
+#   **LF 与中文注释同时存在**，不是 LF 本身。
+#
+# ⚠ 更隐蔽的是：仓库里 core.autocrlf=true，git 会在比较时把 LF 规范化
+#   成 CRLF，于是工作区被改成 LF 之后 `git status` 依然显示**干净**。
+#   也就是说换行被改坏这件事**不会出现在提交里，也不会被 review 发现**，
+#   只有用户双击时才炸。core.autocrlf 管的是「提交时转换」，
+#   它管不住「有人在编辑器里直接存成 LF」——
+#   .gitattributes 的 eol=crlf 才是 checkout 侧的强制项。
+*.bat text eol=crlf
+
+# ⚠ 中文文件名的 .bat 同样适用。cmd.exe 用当前 OEM 代码页解码 .bat
+#   （zh-CN 机器上是 GBK），这三个组合在本机实测全挂：
+#     UTF-8 无 BOM + chcp 65001  -> 中文行被当命令执行
+#     UTF-8 带 BOM                -> 同上，且 @echo off 也会被破坏
+#     纯 ASCII                    -> 正常
+#   结论：中文名的包装脚本正文必须纯 ASCII，逻辑交给英文名脚本。

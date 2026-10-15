@@ -20,12 +20,20 @@ if errorlevel 1 (
 )
 
 rem ---- install deps on first run ----
-rem 关系图谱依赖 pyvis(内联 vis-network)/networkx(关联分析)/jieba(分词与机构挖掘)，
-rem 首启自检必须一并检查，否则这 4 个装了而 pyvis 等缺失时，脚本会跳过安装、
-rem 图谱页因缺少 vis 资源无法加载。
+rem The graph page also needs pyvis (inlines vis-network) / networkx (analysis)
+rem / jieba (tokenizer + org mining). Checking only fastapi+uvicorn would skip
+rem the install, then the graph page fails to load its vis assets.
+rem KEEP THIS COMMENT IN ASCII: see the note in the Chinese-named wrapper.
+rem Measured on this machine, a UTF-8 Chinese comment line inside a LF-only
+rem .bat gets executed as a command by cmd.exe.
 python -c "import fastapi, uvicorn, requests, bs4, pyvis, jieba, networkx" >nul 2>nul
 if errorlevel 1 (
-    echo [1/2] First run - installing dependencies (incl. graph libs pyvis/networkx/jieba), one time only.
+    rem DO NOT put a bare "(" or ")" in an echo line inside an if-block.
+    rem cmd.exe must scan the whole block to find its matching ")", and an
+    rem unescaped bracket breaks that scan: it aborts with
+    rem   "xxx was unexpected at this time." -- even when the condition is
+    rem FALSE and the branch never runs. Escape them as ^( ^) instead.
+    echo [1/2] First run - installing dependencies ^(incl. graph libs pyvis/networkx/jieba^), one time only.
     echo.
     python -m pip install -r requirements.txt
     if errorlevel 1 (
