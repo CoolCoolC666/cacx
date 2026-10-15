@@ -11,6 +11,7 @@ import importlib
 import shutil
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from cacx.ai.base import AIError       # noqa: E402
 class Base(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient
-        self.tmp = Path(tempfile.mkdtemp(prefix="cacx_aiapi_"))
+        self.tmp = Path(_temppool.mkdtemp(prefix="cacx_aiapi_"))
         cfg = {"db": {"path": str(self.tmp / "t.db")},
                "ai": {"provider": "none"}, "search": {"min_fts_chars": 3}}
         self.d = D.open_db(cfg)

@@ -15,6 +15,7 @@ T3 后端：边列表 graph() 接 articles JOIN 后吃 site/date 筛选
 import os
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -80,7 +81,7 @@ def _make_db(path):
 class TestGraphJoinFilter(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmp = Path(tempfile.mkdtemp(prefix="cacx_gj_"))
+        cls.tmp = Path(_temppool.mkdtemp(prefix="cacx_gj_"))
         cls.d = _make_db(cls.tmp / "t.db")
 
     @classmethod

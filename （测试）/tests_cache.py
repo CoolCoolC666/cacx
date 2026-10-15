@@ -27,6 +27,7 @@ import json
 import shutil
 import sys
 import tempfile
+import _temppool
 import threading
 import time
 import unittest
@@ -46,7 +47,7 @@ class Base(unittest.TestCase):
 
     def setUp(self):
         from fastapi.testclient import TestClient
-        self.tmp = Path(tempfile.mkdtemp(prefix="cacx_cache_"))
+        self.tmp = Path(_temppool.mkdtemp(prefix="cacx_cache_"))
         cfg = {"db": {"path": str(self.tmp / "t.db")},
                "ai": {"provider": "none"}, "search": {"min_fts_chars": 3}}
         self.d = D.open_db(cfg)
@@ -245,7 +246,7 @@ class TestDbSwap(Base):
         first = self.c.get(url).json()
         miss0 = self.WA._CACHE_STATS["miss"]
 
-        tmp2 = Path(tempfile.mkdtemp(prefix="cacx_cache2_"))
+        tmp2 = Path(_temppool.mkdtemp(prefix="cacx_cache2_"))
         self.addCleanup(shutil.rmtree, tmp2, ignore_errors=True)
         d2 = D.open_db({"db": {"path": str(tmp2 / "t2.db")},
                         "ai": {"provider": "none"},

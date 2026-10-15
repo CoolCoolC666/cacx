@@ -11,6 +11,7 @@ import shutil
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import tempfile
+import _temppool
 import unittest
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -28,7 +29,7 @@ FAIL_NOTE = []
 class BaseGraph(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="cacx_gtest_")
+        cls.tmp = _temppool.mkdtemp(prefix="cacx_gtest_")
         from cacx import db as D
         # ⚠ 先存旧引用，再改全局 —— 否则拿到的已是自己覆盖过的值
         cls.orig_db = MOD._db

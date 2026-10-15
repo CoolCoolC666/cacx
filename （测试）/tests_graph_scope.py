@@ -22,6 +22,7 @@
 """
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 
@@ -74,7 +75,7 @@ class TempDbCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tmp = Path(tempfile.mkdtemp(prefix="cacx_scope_"))
+        cls.tmp = Path(_temppool.mkdtemp(prefix="cacx_scope_"))
         cls.d = _make_db(cls.tmp / "t.db")
 
     @classmethod

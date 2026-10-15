@@ -16,6 +16,7 @@ import importlib
 import shutil
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 
@@ -33,7 +34,7 @@ def _cfg(root: Path, sites: dict) -> dict:
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="cacx_bl_"))
+        self.tmp = Path(_temppool.mkdtemp(prefix="cacx_bl_"))
         # ⚠ 必须把 sites.list_custom 也隔离掉。
         #   sites.all_sites(cfg) = builtin_specs(cfg) + list_custom()，
         #   而 list_custom 直接读磁盘上的 config/sites.d/*.json。

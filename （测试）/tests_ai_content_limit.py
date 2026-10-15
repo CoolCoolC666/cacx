@@ -16,6 +16,7 @@ import json
 import shutil
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 
@@ -175,7 +176,7 @@ class TestConfigApi(unittest.TestCase):
 
     def setUp(self):
         from fastapi.testclient import TestClient
-        self.tmp = Path(tempfile.mkdtemp(prefix="cacx_cfglimit_"))
+        self.tmp = Path(_temppool.mkdtemp(prefix="cacx_cfglimit_"))
         self.old_settings = C.SETTINGS_FILE
         # 指到临时目录：C.load/C.save 与 web.app 共用同一个模块对象
         C.SETTINGS_FILE = self.tmp / "settings.json"

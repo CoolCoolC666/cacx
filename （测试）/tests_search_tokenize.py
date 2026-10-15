@@ -8,13 +8,14 @@ sys.path.insert(0, os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 import shutil
 import tempfile
+import _temppool
 import unittest
 
 from cacx.db import Database, _split_query, _tokenize_for_search
 
 
 def _mk(rows):
-    tmp = Path(tempfile.mkdtemp()) / "t.db"
+    tmp = Path(_temppool.mkdtemp()) / "t.db"
     db = Database(str(tmp))
     db.conn.execute("""CREATE TABLE IF NOT EXISTS articles(
       id INTEGER PRIMARY KEY, site TEXT, site_name TEXT, column_name TEXT,

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import _temppool
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent   # 本文件在（测试）下
@@ -33,7 +34,7 @@ MUTANTS = [
 ]
 
 fails = []
-bak_dir = Path(tempfile.mkdtemp())
+bak_dir = Path(_temppool.mkdtemp())
 (bak_dir / "graph_analysis.py").write_text(orig, encoding="utf-8")
 
 try:

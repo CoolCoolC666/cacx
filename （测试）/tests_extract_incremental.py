@@ -28,6 +28,7 @@ import shutil
 import sys
 import sys as _sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 
@@ -84,7 +85,7 @@ def _add_articles(d, n=6, year="2024"):
 def _tmpdb(prefix="cacx_incr_"):
     """临时库。⚠ 用 mkdtemp 而不是 TemporaryDirectory：
     Windows 上后者退出时会因连接未关而 PermissionError。"""
-    tmp = Path(tempfile.mkdtemp(prefix=prefix))
+    tmp = Path(_temppool.mkdtemp(prefix=prefix))
     d = D.open_db({"db": {"path": str(tmp / "t.db")}})
     real = (Path(__file__).resolve().parent.parent
             / "data" / "cacx.db").resolve()
@@ -225,7 +226,7 @@ class TestExtractRunApi(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="cacx_incr_api_")
+        cls.tmp = _temppool.mkdtemp(prefix="cacx_incr_api_")
         cls.orig_db = MOD._db
         cls.store = D.open_db({"db": {"path": os.path.join(cls.tmp, "t.db")}})
         real = (Path(__file__).resolve().parent.parent

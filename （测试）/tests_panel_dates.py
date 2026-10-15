@@ -12,6 +12,7 @@ T1 后端：面板三张图（problems / orgs / joint）接上日期筛选
 """
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -101,7 +102,7 @@ class TestPanelDatesRealRun(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from cacx import db as DB
-        cls.tmp = Path(tempfile.mkdtemp(prefix="cacx_pd_"))
+        cls.tmp = Path(_temppool.mkdtemp(prefix="cacx_pd_"))
         cls.d = DB.Database(cls.tmp / "t.db")
         cls._orig = A._db
         A._db = lambda: cls.d

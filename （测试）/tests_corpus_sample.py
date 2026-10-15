@@ -20,6 +20,7 @@ SQLite 按 rowid 取 → 实际等于「取最早入库的 N 篇」。实测 600
 """
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from cacx import db as D  # noqa: E402
 def _mk():
     """造一个小库，站点与年份都有明显缺口 ——
     用真库跑这类断言太慢，而且真库数据会随抓取变化。"""
-    tmp = Path(tempfile.mkdtemp(prefix="cacx_corp_"))
+    tmp = Path(_temppool.mkdtemp(prefix="cacx_corp_"))
     d = D.open_db({"db": {"path": str(tmp / "t.db")}})
     with d._lock:
         rows = []

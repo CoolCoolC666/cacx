@@ -14,6 +14,7 @@ import inspect
 import shutil
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 
@@ -32,7 +33,7 @@ def _cfg(root: Path) -> dict:
 
 class PurgeBase(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="cacx_purge_"))
+        self.tmp = Path(_temppool.mkdtemp(prefix="cacx_purge_"))
         self.d = D.open_db(_cfg(self.tmp))
         # 安全断言：本套测试的所有删除都必须发生在临时库上。
         # 万一哪天 _cfg 写错键，后面每个删除用例都会去删用户的真数据。

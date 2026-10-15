@@ -10,6 +10,7 @@ A3：sample_articles 的 min(limit, 5000) → 200000，路由 Query le 同步。
 import inspect
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -47,7 +48,7 @@ def _make_db(path):
 class TestFacetsDateFilter(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmp = Path(tempfile.mkdtemp(prefix="cacx_fd_"))
+        cls.tmp = Path(_temppool.mkdtemp(prefix="cacx_fd_"))
         cls.d = _make_db(cls.tmp / "t.db")
 
     @classmethod

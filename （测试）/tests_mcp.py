@@ -18,6 +18,7 @@ import json
 import shutil
 import sys
 import tempfile
+import _temppool
 import traceback
 from pathlib import Path
 
@@ -194,7 +195,7 @@ def test_offline_and_key_zero_echo():
     import cacx.mcp_server as m
     from cacx import db as D
 
-    tmp = Path(tempfile.mkdtemp(prefix="cacx_mcp_"))
+    tmp = Path(_temppool.mkdtemp(prefix="cacx_mcp_"))
     cfg = _make_cfg(tmp)
 
     # 记录 settings.json 修改时间，测试前后应不变
@@ -313,7 +314,7 @@ def test_ai_status():
     section("7. cacx_ai_status（只读 / 密钥零回显）")
     import cacx.mcp_server as m
 
-    tmp = Path(tempfile.mkdtemp(prefix="cacx_mcp_ais_"))
+    tmp = Path(_temppool.mkdtemp(prefix="cacx_mcp_ais_"))
     m._CFG_OVERRIDE = _make_cfg(tmp)
     try:
         r = m.cacx_ai_status()
@@ -340,7 +341,7 @@ def test_ai_config():
     import cacx.mcp_server as m
     from cacx import config as C
 
-    tmp = Path(tempfile.mkdtemp(prefix="cacx_mcp_cfg_"))
+    tmp = Path(_temppool.mkdtemp(prefix="cacx_mcp_cfg_"))
     cfg = _make_cfg(tmp)
     m._CFG_OVERRIDE = cfg
 
@@ -441,7 +442,7 @@ def test_newwords_adopt_gate():
     import cacx.mcp_server as m
     from cacx import newwords as NW
 
-    tmp = Path(tempfile.mkdtemp(prefix="cacx_mcp_nw_"))
+    tmp = Path(_temppool.mkdtemp(prefix="cacx_mcp_nw_"))
     try:
         # 把 userdict 指向临时目录：⚠ 绝不碰真实的 data/userdict.txt
         d = tmp / "data"
@@ -507,7 +508,7 @@ def test_summarize_batch():
     from cacx import db as D
     from cacx.ai import tasks as AI_tasks
 
-    tmp = Path(tempfile.mkdtemp(prefix="cacx_mcp_batch_"))
+    tmp = Path(_temppool.mkdtemp(prefix="cacx_mcp_batch_"))
     cfg = _make_cfg(tmp)
     cfg["sites"]["cac"] = {"enabled": True, "name": "中国网信办",
                            "base_url": "https://www.cac.gov.cn"}
