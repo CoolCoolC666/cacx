@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 import warnings
-from typing import Iterable, List, Optional, Set
+from typing import Iterable, List, Optional, Set, Tuple
 
 _jieba = None
 _load_failed = False
@@ -175,6 +175,70 @@ ORG_BANNED_TAILS = (
     "奖励大会", "分享会",
 )
 
+#: T8 通用形态闸门的**活动形态尾缀**表（元组）。精选模式（`mine_orgs_refine` /
+#: `db.top_orgs_refine` / 图谱 mode=refine）用它判定「这串是不是活动/会议片段」。
+#:
+#: 与 `ORG_BANNED_TAILS` 的关系：有重叠没关系 —— 后者是**无歧义活动尾巴**，
+#: 在粗筛 `org_like()` 里就拦（连粗选都不放行）；这里是形态判定用的**更宽**的表，
+#: 单独一条尾巴不足以定案（见 `eventish_org` 的条件 b/c/d 要动词/序数/「的」配）。
+#:
+#: ⚠ 裸「会 / 委员会 / 法院 / 检察院 / 政府」**都不在表内** —— 它们是真建制的尾巴
+#:   （全国人大常委会 / 政协第十四届全国委员会 / 杭州互联网法院…），
+#:   放进来就是整类误杀（R5 §9 的老坑）。
+#: ⚠ 表是「含」（至少这些），不是穷举：给定清单之外补了现场 Top50 残留里的
+#:   同一族尾巴（见下方注释），否则「周年文艺晚会」这类照样漏。
+ORG_EVENT_TAILS = (
+    # —— 给定清单 ——
+    "大会", "会议", "理事会", "论坛", "峰会", "博览会", "研讨会", "交流会",
+    "年会", "运动会", "大赛", "庆典", "仪式", "典礼", "座谈会", "全会",
+    "代表大会", "发布会", "推进会", "恳谈会", "观摩会", "对话会", "报告会",
+    "招待会", "分享会", "奖励大会", "院士大会", "互联网大会", "文明大会",
+    "周年大会", "中全会", "开幕式", "闭幕式", "宴会",
+    # —— 补充：现场 Top50 残留里的同族活动尾巴 ——
+    #   「周年文艺晚会」8 /「全国政协新年茶话会」6 /「春节团拜会」6 /
+    #   「开幕会」5 /「闭幕会」5 /「发表70周年纪念大会」6 /
+    #   「民族团结进步表彰大会」6 /「60周年庆祝大会」5
+    #   给定清单没有「晚会 / 茶话会 / 团拜会 / 开幕会 / 闭幕会」这一族，
+    #   漏了它们，「周年文艺晚会」就仍然留在榜上。
+    "晚会", "茶话会", "团拜会", "开幕会", "闭幕会",
+    "庆祝大会", "纪念大会", "表彰大会",
+)
+
+#: 活动形态尾缀里**真机构绝不会以它结尾**的那一批 —— 可以只凭尾巴定案
+#: （`eventish_org` 条件 a′）。
+#:
+#: ⚠ 「理事会」**必须排除**：欧洲理事会 / 欧盟理事会 / 亚奥理事会 /
+#:   APEC工商咨询理事会都是真建制（实测库内 35 个以「理事会」结尾的 org 名里
+#:   有 4 个是真机构）。所以「理事会」只留给**带动词或序数**的重条件（b/c）：
+#:   「协会召开第二届理事会」命中，「欧洲理事会」不命中。
+#: ⚠ 「大会 / 会议」留在表内是安全的：实测库内以它们结尾的 org 名各只有 1 个 ——
+#:   全国人民代表大会（白名单）与中国人民政治协商会议（白名单），都已先放行。
+_EVENT_TAILS_PLAIN = tuple(t for t in ORG_EVENT_TAILS if t != "理事会")
+
+#: 活动动词上下文（条件 b）。串里带这些动作词，说明它不是纯建制名。
+_ORG_EVENT_VERBS = ("召开", "举行", "举办", "承办", "出席", "参加")
+
+#: 序数（条件 c）。⚠ 必须同时收**中文数字**：「第九届」「第十一次」「第二届」
+#: 都是中文数，只写 `第\d+[届次]` 会漏掉它们（实测这三例全漏）。
+_ORDINAL_RE = re.compile(r"第[0-9〇零一二三四五六七八九十两]{1,4}[届次]")
+
+#: 序数判定时承认的活动尾巴 —— 比 `ORG_EVENT_TAILS` 窄，只留「开一次会/办一场赛」的。
+#: ⚠ 刻意**不含「委员会」**：「第二十届中央委员会」是真建制，不得因序数被滤。
+_ORG_ORDINAL_TAILS = ("代表大会", "理事会", "大会", "全会", "会议", "年会",
+                      "运动会", "大赛")
+
+#: 建制词 / 行政司法机构后缀 —— 以它结尾且**串内无活动动词**者判为真建制，
+#: 形态闸门放行（保护优先于一切命中条件）。
+#:
+#: ⚠ 这里都是**具体后缀**，不是裸「会 / 院 / 委」：裸后缀会连「周年文艺晚会」
+#:   「闭幕会」一起保护掉，闸门当场失效。
+_ESTABLISHED_TAILS = (
+    "人民政府", "人大常委会", "常委会", "中央委员会", "委员会", "组委会",
+    "人民法院", "人民检察院", "法院", "检察院", "网信办", "办公室", "办公厅",
+    "人民政府办公厅", "总局", "央行", "政府", "党委", "人大", "政协",
+    "中心", "部", "委", "署", "厅", "局", "院", "办",
+)
+
 _STOP = {"关于", "的通知", "的意见", "的公告", "有关", "进一步", "有关情况"}
 # 拼接时要剥掉的前后标点（jieba 会把「，」「、」单独切成 token）
 _PUNCT = "，。；、！？,.;!?：:（）()《》“”\"'‘’【】[]—… \t"
@@ -318,20 +382,104 @@ def org_like(word: str) -> bool:
     return w.endswith(_ORG_SUFFIX)
 
 
-def mine_orgs(titles: Iterable[str], min_count: int = 3,
-              min_len: int = 3, topn: int = 200) -> List[dict]:
+def _established(w: str) -> bool:
+    """像不像**真建制**：以行政/司法后缀结尾，且串里没有活动动词。"""
+    if any(v in w for v in _ORG_EVENT_VERBS):
+        return False
+    return w.endswith(_ESTABLISHED_TAILS)
+
+
+def eventish_org(name: str) -> bool:
     """
-    从标题里挖掘机构候选词。
+    **通用形态闸门**（T8）：这串是不是「活动 / 会议片段」的形态。
 
-    这是**辅助**：它只给出「哪些串像机构名、出现多少次」，
-    不保证正确。真正的判断（这是不是发文机关）仍然要人来做。
+    True  = 活动/会议片段 → 精选模式应当滤掉
+    False = 保留（真建制，或形态上判不出是活动名）
 
-    做法：把每个标题切分成 n-gram（2~8 字），挑出以机构后缀结尾的，
-    按出现次数排序 —— 高频 + 带机构后缀，是发文机关最典型的特征。
+    为什么要有它（而不是继续加长 `ORG_BANNED_TERMS`）：
+      上一轮点名封堵 7 个活动名之后，同族的**未点名**变体照样进榜 ——
+      实测「协会召开第二届理事会」45、「第十一次全国代表大会」11，
+      Top50 里还有「周年文艺晚会 / IPv6创新发展大会 / 全球数字经济大会 /
+      第九届亚洲冬季运动会」。逐条拉黑是打地鼠：拉黑主名，同族变体立刻顶上。
+      所以这里判**形态**，不判具体名字。
+
+    判定顺序（保护优先，命中任一即 True）：
+
+      ⓪ 精确白名单 `ORG_WHITELIST` → 直接 False（中共中央 / 中国人民银行 /
+         全国人民代表大会 / 中国人民政治协商会议）。
+      ① 建制词保护 → False：以 `_ESTABLISHED_TAILS` 结尾且无活动动词
+         （人民政府 / 人大常委会 / 中央委员会 / 委员会 / 组委会 / 部 / 署 /
+         厅 / 局 / 总局 / 央行 / 法院 / 检察院 / 中心 / 网信办…）。
+      ② (a) `endswith(ORG_BANNED_TAILS)` → True
+         （峰会/博览会/研讨会/交流会/周年大会/中全会/互联网大会/文明大会…）
+      ③ (a′) `endswith(_EVENT_TAILS_PLAIN)` → True
+         （活动形态尾缀里真机构不用的那批；⚠ 不含「理事会」，见常量注释）
+      ④ (b) 含活动动词（召开/举行/举办/承办/出席/参加）
+             且 `endswith(ORG_EVENT_TAILS)` → True
+      ⑤ (c) 含「第…届 / 第…次」序数（阿拉伯数字与中文数字都认）
+             且 `endswith(_ORG_ORDINAL_TAILS)` → True
+      ⑥ (d) 含「的」且 `endswith(ORG_EVENT_TAILS)` → True（偏正残片）
+
+    ⚠ 只判**形态**，不看上下文、不查抽取库 —— 这是「读取/统计展示」层的事，
+      与抽取库里的数据无关（切档不重跑抽取）。
+    ⚠ 已知边界（如实记）：判据是形态，不是语义。「安全治理新格局」这类
+      **主题残片**（专家解读标题被切出来的）不含活动词、也不以活动后缀结尾，
+      本闸门判不出（False），仍在精选榜上 —— 它属于「主题名」问题，
+      不归形态闸门管。
+    """
+    w = (name or "").strip(_PUNCT)
+    if not w:
+        return False
+    # ⓪ 精确全名白名单：真建制，任何形态规则都不得动它
+    if w in ORG_WHITELIST:
+        return False
+    # ① 建制词保护
+    if _established(w):
+        return False
+    # ② (a) 无歧义活动尾巴
+    if w.endswith(ORG_BANNED_TAILS):
+        return True
+    # ③ (a′) 活动形态尾缀里真机构不用的那批
+    if w.endswith(_EVENT_TAILS_PLAIN):
+        return True
+    # ④ (b) 活动动词 + 活动形态尾缀
+    if any(v in w for v in _ORG_EVENT_VERBS) and w.endswith(ORG_EVENT_TAILS):
+        return True
+    # ⑤ (c) 序数 + 活动形态尾缀
+    if _ORDINAL_RE.search(w) and w.endswith(_ORG_ORDINAL_TAILS):
+        return True
+    # ⑥ (d)「的」偏正残片 + 活动形态尾缀
+    if "的" in w and w.endswith(ORG_EVENT_TAILS):
+        return True
+    return False
+
+
+def _mine_orgs_split(titles: Iterable[str], min_count: int = 3,
+                     min_len: int = 3,
+                     topn: int = 200) -> Tuple[List[dict], List[dict]]:
+    """
+    粗选/精选**共用**的同一段机构候选挖掘循环。
+
+    返回 `(all_rows, filtered)`：
+      all_rows —— 过 `min_count` 的**全部**候选（次数降序、同次数长者在前），
+                  **未按 topn 截断**，由调用方切片。**粗选口径就是它。**
+      filtered —— all_rows 里被 `eventish_org` 判为活动/会议形态的那些，
+                  顺序与 all_rows 一致（同一趟排序的投影）
+
+    ⚠ 为什么必须是「一段循环、两个投影」：粗选与精选若各写一遍，
+      同一份标题迟早给出两套不同基数的候选 —— 那时「切档只影响读取/统计
+      展示、库数据不动」这条铁律就只剩一句口号，两档的数字也对不上了。
+    ⚠ 形态只判一次（`evflag`），精选 = all_rows 减去 filtered，**同一个集合
+      的补集**，不可能出现「滤掉的 + 剩下的 ≠ 全部」。
+
+    ⚠ 粗选口径（all_rows）必须与历史行为**逐字一致**：本函数只把原先内联在
+      `mine_orgs` 里的那段循环原样搬过来，`org_like` 前置条件、`min_count`
+      位置、排序键都没动。实测校核见 `（测试）/tests_org_refine.py`
+      与本轮交付说明里的 HEAD 对照（同标题集下候选逐项相同）。
     """
     j = _get()
     if j is None:
-        return []
+        return [], []
     counts: dict = {}
     surface: dict = {}
     for t in titles:
@@ -352,10 +500,65 @@ def mine_orgs(titles: Iterable[str], min_count: int = 3,
                     key = acc.strip(_PUNCT)
                     counts[key] = counts.get(key, 0) + 1
                     surface.setdefault(key, t)
-    out = [{"org": w, "count": c, "example_title": surface[w]}
-           for w, c in counts.items() if c >= min_count]
-    out.sort(key=lambda x: (-x["count"], -len(x["org"])))
-    return out[:topn]
+    all_rows: List[dict] = []
+    ev_rows: dict = {}
+    for w, c in counts.items():
+        if c < min_count:
+            continue
+        row = {"org": w, "count": c, "example_title": surface[w]}
+        all_rows.append(row)
+        if eventish_org(w):
+            ev_rows[w] = row
+    all_rows.sort(key=lambda x: (-x["count"], -len(x["org"])))
+    filtered = [ev_rows[r["org"]] for r in all_rows if r["org"] in ev_rows]
+    return all_rows, filtered
+
+
+def mine_orgs(titles: Iterable[str], min_count: int = 3,
+              min_len: int = 3, topn: int = 200) -> List[dict]:
+    """
+    从标题里挖掘机构候选词 —— **粗选口径（默认，与历史行为逐字一致）**。
+
+    这是**辅助**：它只给出「哪些串像机构名、出现多少次」，
+    不保证正确。真正的判断（这是不是发文机关）仍然要人来做。
+
+    做法：把每个标题切分成 n-gram（2~8 字），挑出以机构后缀结尾的，
+    按出现次数排序 —— 高频 + 带机构后缀，是发文机关最典型的特征。
+
+    ⚠ T8 起，粗选 = **不加通用形态闸门**（只走 `org_like` 粗筛，召回高）。
+      「活动名挤占机构榜」是**精选档**才处理的事（见 `mine_orgs_refine`）——
+      这里绝不能顺手把活动名滤掉：粗选是默认档，也是 MCP
+      (`cacx_mine_orgs`) 走的那条路，行为必须与加档位之前完全一致。
+    ⚠ 返回类型**不变**（List[dict]）—— `db.top_orgs` 与 MCP 都直接消费。
+    """
+    return _mine_orgs_split(titles, min_count=min_count,
+                            min_len=min_len, topn=topn)[0][:topn]
+
+
+def mine_orgs_refine(titles: Iterable[str], min_count: int = 3,
+                     min_len: int = 3,
+                     topn: int = 200) -> Tuple[List[dict], List[dict]]:
+    """
+    机构候选挖掘的**精选口径**：在 `org_like` 粗筛之后，再过一道
+    `eventish_org` 通用形态闸门。
+
+    返回 `(orgs, filtered)`：
+      orgs     —— 与 `mine_orgs` **同一套候选结构**（未被闸门滤掉的那些）
+      filtered —— 被闸门滤掉的候选 `[{org, count, example_title}]`，
+                  与 orgs 同一套排序（出现次数降序、同次数长者在前），
+                  供「精选模式缺省说明」用
+
+    ⚠ 为什么另开一个函数而不是给 `mine_orgs` 加参数：`mine_orgs` 的返回值
+      被 `db.top_orgs` 与 MCP 直接消费，**返回类型不能变**，且它的口径
+      必须是**粗选**（默认档）。两档共用 `_mine_orgs_split` 那一段循环，
+      所以 `orgs + filtered` 恰好等于粗选的全部候选（同一个集合的一刀两半）。
+    ⚠ `org_like` 本身**不动**：粗选行为必须保持现状。
+    """
+    all_rows, filtered = _mine_orgs_split(titles, min_count=min_count,
+                                          min_len=min_len, topn=topn)
+    bad = {r["org"] for r in filtered}
+    surv = [r for r in all_rows if r["org"] not in bad]
+    return surv[:topn], filtered[:topn]
 
 
 # 机构名归一化规则，做**等值改写**而非删除。
