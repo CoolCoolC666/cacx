@@ -2,6 +2,7 @@
 import shutil
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -15,7 +16,7 @@ from cacx.ai.base import AIError, classify_status  # noqa: E402
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="cacx_ai_"))
+        self.tmp = Path(_temppool.mkdtemp(prefix="cacx_ai_"))
         self.d = D.open_db({"db": {"path": str(self.tmp / "t.db")}})
         self.assertIn("cacx_ai_", str(self.d.path))
         self.cfg = {"db": {"path": str(self.tmp / "t.db")},

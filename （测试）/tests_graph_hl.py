@@ -20,6 +20,7 @@ import re
 import shutil
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 
@@ -257,7 +258,7 @@ class _BaseTmpDB(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="cacx_hl_")
+        cls.tmp = _temppool.mkdtemp(prefix="cacx_hl_")
         from cacx import db as D
         cls.orig_db = MOD._db
         cls.orig_cfg = MOD._cfg

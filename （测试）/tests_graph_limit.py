@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 
@@ -108,7 +109,7 @@ ENTITIES = [
 class BaseGraphLimit(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="cacx_limit_")
+        cls.tmp = _temppool.mkdtemp(prefix="cacx_limit_")
         cls.orig_db = MOD._db
         cls.orig_cfg = MOD._cfg
         cfg = dict(cls.orig_cfg())

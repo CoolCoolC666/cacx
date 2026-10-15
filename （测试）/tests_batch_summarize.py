@@ -22,6 +22,7 @@
 import shutil
 import sys
 import tempfile
+import _temppool
 import threading
 import time
 import traceback
@@ -60,7 +61,7 @@ def make_cfg():
 def setup_db(n=5, site="test.gov.cn"):
     """临时目录建库 + 插入 n 篇测试文章，返回 (tmp, db, articles)"""
     from cacx import db as D
-    tmp = Path(tempfile.mkdtemp(prefix="cacx_batch_"))
+    tmp = Path(_temppool.mkdtemp(prefix="cacx_batch_"))
     d = D.Database(tmp / "t.db")
     arts = []
     for i in range(n):

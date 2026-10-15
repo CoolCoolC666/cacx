@@ -10,6 +10,7 @@
 import importlib
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from cacx import db as D              # noqa: E402
 class T(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient
-        self.tmp = Path(tempfile.mkdtemp(prefix="cacx_sample_"))
+        self.tmp = Path(_temppool.mkdtemp(prefix="cacx_sample_"))
         self.d = D.open_db({"db": {"path": str(self.tmp / "t.db")},
                             "ai": {"provider": "none"}})
         self.WA = importlib.import_module("cacx.web.app")
@@ -38,6 +39,18 @@ class T(unittest.TestCase):
 
     def tearDown(self):
         self.WA.DB = self.old
+        # ⚠ 顺序不能反：**先关连接，再删目录**。
+        #   Windows 上 sqlite 连接开着就锁住 t.db，rmtree 必然失败；
+        #   原来的 `ignore_errors=True` 把这个失败吞了，于是每次跑都漏一个目录，
+        #   几十轮就攒出几百个（%TEMP% 里 849 个 cacx_sample_* 就是这么来的）。
+        try:
+            self.d.conn.close()
+        except Exception:
+            pass
+        if not _temppool.cleanup(self.tmp):
+            # 只留标记、不 raise：判定泄漏是外层 _regress.py 闸门的职责，
+            # 这里 raise 只会让「连接恰好没释放」的用例整片变红，掩盖真问题。
+            print(f"CACX_TEMP_LEAK tearDown 没删掉: {self.tmp}", file=sys.stderr)
 
     def seed(self, site, col, n, year):
         # url 是 (site,url) 唯一约束的一部分，必须每条都不一样

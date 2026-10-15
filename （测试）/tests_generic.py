@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
+import _temppool
 import traceback
 from pathlib import Path
 
@@ -129,7 +130,7 @@ def test_dig():
 # ---------------------------------------------------------------- 4. 站点注册表
 def test_sites_registry():
     from cacx import sites as S
-    tmp = tempfile.mkdtemp(prefix="cacx_sites_")
+    tmp = _temppool.mkdtemp(prefix="cacx_sites_")
     old = S.CUSTOM_DIR
     try:
         S.CUSTOM_DIR = Path(tmp)
@@ -190,7 +191,7 @@ def test_runner_diversion():
     from cacx import db as D
     from cacx.collector import runner as R
 
-    tmp = Path(tempfile.mkdtemp(prefix="cacx_db_"))
+    tmp = Path(_temppool.mkdtemp(prefix="cacx_db_"))
     d = D.Database(tmp / "t.db")
 
     class Stub:

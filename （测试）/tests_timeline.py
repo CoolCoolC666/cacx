@@ -11,6 +11,7 @@
 import re
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 
@@ -58,7 +59,7 @@ def _make_db(path):
 class TimelineCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmp = Path(tempfile.mkdtemp(prefix="cacx_tl_"))
+        cls.tmp = Path(_temppool.mkdtemp(prefix="cacx_tl_"))
         cls.d, cls.ids = _make_db(cls.tmp / "t.db")
         # 打两个 AI 主题标注
         cls.d.save_annotation(cls.ids[0], "theme", '["个人信息"]')

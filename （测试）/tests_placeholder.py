@@ -15,6 +15,7 @@ import importlib
 import shutil
 import sys
 import tempfile
+import _temppool
 import unittest
 from pathlib import Path
 
@@ -30,7 +31,7 @@ def _cfg(root: Path) -> dict:
 
 class PhBase(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="cacx_ph_"))
+        self.tmp = Path(_temppool.mkdtemp(prefix="cacx_ph_"))
         self.d = D.open_db(_cfg(self.tmp))
         self.assertIn("cacx_ph_", str(self.d.path),
                       "测试跑到了真实库上 —— 配置键写错了")
