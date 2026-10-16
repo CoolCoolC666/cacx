@@ -339,6 +339,19 @@ if health:
     for stale in ("1759", "4154", "1449", "28900", "1633", "3921"):
         chk(f"README.txt 无旧口径 {stale}", stale not in rt)
 
+    # ⚠ 数字哨兵盯不住**说法**的过期。加派这一条，是因为本包的启动逻辑
+    #   改过一次优先级：现在是「本机 Python 3.10+ 且有网就用本机并装依赖，
+    #   否则用自带 runtime」。README 一旦还写着「需要 Python 3.10+，
+    #   安装时务必勾选 Add Python to PATH」，就等于在教组员做一件
+    #   **根本不需要做的事**，而且会让人以为不装 Python 就跑不起来 ——
+    #   这正是当初随包携带运行时要消灭的那个印象。
+    #   说法型哨兵只能用子串匹配，因为数字哨兵对它无能为力。
+    for stale_claim in ("需要 Python 3.10+",
+                        'Add Python to PATH"'):
+        chk(f"README.txt 无过期说法「{stale_claim}」", stale_claim not in rt)
+    chk("README.txt 说清了「不用装也能跑」",
+        "什么都不用装" in rt and "runtime" in rt)
+
     if FULL_GRAPH:
         def _get_graph():
             last = None
