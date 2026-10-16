@@ -1,22 +1,26 @@
 # -*- coding: utf-8 -*-
 """核对报告里每个数字。只读真库 + 只打运行中的服务，口径 = 报告口径。
 
-⚠⚠ 2026-10-15：真库已按**全区间**（2000-09-30 ~ 2026-10-10）重跑落库
-（用户 09:08 在界面上点的「抽取并写入」）。于是**每个数字都必须写明分母口径**，
-报告现在是「一份 2024 年以来的深描 + 全库底数」的双口径结构：
+⚠⚠ 2026-10-16 报告已按新要求重写，结构变了：
+  · 四块 = 角色画像 / 权责边界（独立做·联合谁·文本里没做什么·中央与地方关系）/
+    问题与措施观察 / 已知局限（数据层面）。术语统一为「中央网信办」，
+    地方一律「浙江省委网信办」。
+  · **删掉了全库底数那一整套**（28917 篇 / 12162 节点 / 泛称「网信办」1447 度等）。
+    原因：课程要求「使用 2024 年之后的数据」，把 2000-2023 的底数搬进正文
+    既超字数上限，又会让「中央网信办 vs 泛称网信办」的别名问题盖过主线。
+    旧报告靠一个双口径结构解决这件事，新报告直接不用那批数据 —— 更干净。
+  · 本文件随之改了三处断言组：⑬ 的 MUST 数字表、表格结构（只剩 1 张 6x3）、
+    章节名；措辞守卫的豁免短语由「不是任意同句共现」改为「触发词门槛」；
+    并**新增 ⑭**，把本轮新写的每个数字（独立/联合/执法/央地/脏实体）钉到真库。
 
-  · 报告的**分析窗** = 2024 年以来（4433 篇 / 4432 篇有正文）。
-    图谱、证据、主题占比、发文量、浙江对照都属于这一档 —— 未变（重跑只新增了
-    2024 年之前的关系，2024+ 窗口的抽取结果逐条一致）。
-  · 报告的**全库底数** = 28917 篇。抽了多少、覆盖多少、跨度多长，必须按全库说，
-    否则会出现「6887 篇 / 4432 篇 = 156%」这种分子分母不同口径的自相矛盾。
-  · ⚠ 下面这些**篇数**是「库快照」：真库仍在持续采集（10:42 服务重启后两站又新采
-    14 篇，全库 28905→28917、分析窗 4421→4433，而关系表一分未变，因为新文章还没
-    抽取）。数变了就照实测改，不算断言写错；改的时候报告 md / 演示脚本 /
-    `_verify_demo_docs.py` / `06-R5` / `autodemo.py` 要一起改。
-  · 图谱接口有两套默认：`/api/graph/analysis` 不传日期 = 全库（12160 节点，慢）；
-    网页图谱页日期框默认 2024-01，所以**屏幕上**是 1757 节点那档。
-    本文件两档都核（全库那档只在 §⑤ 打一次，实测 ~270s，请耐心）。
+⚠⚠ 数字口径（与旧版一致，未变）：
+  · 报告的**分析窗** = 2024 年以来（4433 篇 / 4432 篇有正文 / 25 栏目 / 653 万字）。
+    图谱、证据、主题占比、发文量、中央—地方对照都属于这一档。
+  · 真库仍在持续采集，**篇数是快照**：数变了照实测改，不算断言写错；
+    改的时候报告 md/docx、演示脚本、`_verify_demo_docs.py` 要一起改。
+  · 图谱接口有两套默认：`/api/graph/analysis` 不传日期 = 全库（慢）；
+    报告引用的都是 `date_from=2024-01-01` 那一档。全库那一档默认不跑
+    （--full 才跑），理由见 FULL 变量处的说明。
 """
 import json
 import re
@@ -31,6 +35,23 @@ sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path(__file__).resolve().parent.parent
 B = "http://127.0.0.1:8770"
 ok = fail = 0
+
+# ⚠⚠ 2026-10-16 新增：默认**跳过**全库建图那组断言（⑤ 后半 + ⑥ 后半）。
+#   起因是实测：本轮跑闸门时，这一组在 node_types 四类全勾下连续算了
+#   **20 分钟仍未返回**（服务进程 CPU 打满 1493 秒、常驻内存涨到 1.04 GB），
+#   而早先记的「270 秒」很可能是一次缓存命中的读数，不是真实冷启动耗时。
+#
+#   为什么可以默认跳过：重写后的报告**只用 2024+ 分析窗口径**，
+#   全库底数那一整套（12162/29069/886、泛称「网信办」1447、介数 0.1892…）
+#   已从正文删除。所以对「报告」而言这些断言不再守任何东西，
+#   却让每次改报告都要先付 20 分钟 —— 最容易出的事就是有人等不及跳过整份闸门。
+#
+#   它们**没有删**：README、启动说明、演示脚本仍在引用全库视图的数，
+#   得有人守。跑 `py -3 -X utf8 "（测试）\_verify_report.py" --full` 才包含。
+#   跳过的条数会显式打出来，不让人以为「全跑过了」。
+FULL = "--full" in sys.argv
+if not FULL:
+    print("⚠ 本次**不含**全库建图那组断言（--full 才跑）；跳过条数见下方标注。")
 
 
 def check(name, cond, detail=""):
@@ -54,7 +75,12 @@ def get(p, timeout=900):
 
 db = sqlite3.connect("file:" + urllib.request.pathname2url(
     str(ROOT / "data" / "cacx.db")) + "?mode=ro", uri=True)
-q = lambda s: db.execute(s).fetchone()[0]
+# ⚠ q 必须**接受绑定参数**。原来只写成 `lambda s:`，于是 2026-10-16 新增的 ⑭ 节
+#   （带 IN (?,?,?) 的机构名查询）一调用就抛
+#   「Incorrect number of bindings supplied. The current statement uses 6, and there are 0 supplied」
+#   —— 而异常发生在 ⑬ **之后**，所以屏幕上看「前面全绿、最后崩」，
+#   很容易误以为是 ⑬ 里的 docx 校验出了问题。绑定参数不是可选项。
+q = lambda s, *p: db.execute(s, p).fetchone()[0]
 
 print("=" * 70)
 print("① 语料规模")
@@ -191,7 +217,8 @@ print("=" * 70)
 #   1) node_types 必须全勾：不带时服务端按「措施被低置信门槛整类挡在图外」
 #      的旧口径返回（实测 1631/3958/115），而报告的「默认分析口径」是措施放行的那套。
 #   2) date_from 必须显式带 2024-01-01：报告/演示脚本/网页首屏都是这一档
-#      （index.html 的 gp_dfrom 默认值）。不带 = 全库 12160 节点，
+#      （index.html 的 gp_dfrom 默认值）。不带 = 全库口径（1 万+ 节点、极慢，
+#      且默认不跑，见 FULL 说明）。
 #      而且要在全图上算介数（实测 268s，本文件会等）。
 NT = "org,policy,problem,measure"
 WEB = "&date_from=2024-01-01"
@@ -210,33 +237,51 @@ for nm, want in [("中央网信办", 285), ("工业和信息化部", 142), ("公
     got = nodes.get(nm, {}).get("degree")
     check(f"窗口 {nm} 度 {want}", got == want, f"实测 {got}")
 
-# 全库档（不传日期）—— 报告 §六 的规模句。⚠ 这一发实测 ~270s。
-an_all = get("/api/graph/analysis?min_degree=2&node_types=" + NT)
-nodes_all = {n["id"]: n for n in an_all["graph"]["nodes"]}
-check("全库 12162 节点 / 29069 边 / 886 连通块",
-      (an_all["nodes"], an_all["edges"], an_all["components"]) == (12162, 29069, 886),
-      f'{an_all["nodes"]}/{an_all["edges"]}/{an_all["components"]}')
-check("全库画布 300 节点 / 2995 边",
-      (len(an_all["graph"]["nodes"]), len(an_all["graph"]["edges"])) == (300, 2995),
-      f'{len(an_all["graph"]["nodes"])}/{len(an_all["graph"]["edges"])}')
-# ⚠ 全库口径下度/介数第一是**泛称「网信办」**（3381 条实体记录），不是中央网信办 ——
-#   早期文章里大量只写「网信办」。报告第四章把这列为「别名归并过窄」的已知局限，
-#   这里钉住实测值，避免哪天写成「中央网信办第一」却没人发现。
-check("全库度数第一 网信办 1447",
-      nodes_all.get("网信办", {}).get("degree") == 1447,
-      f'实测 {nodes_all.get("网信办", {}).get("degree")}')
-check("全库度数次席 中央网信办 814",
-      nodes_all.get("中央网信办", {}).get("degree") == 814,
-      f'实测 {nodes_all.get("中央网信办", {}).get("degree")}')
-check("全库工信部 456 / 公安部 464",
-      (nodes_all.get("工业和信息化部", {}).get("degree"),
-       nodes_all.get("公安部", {}).get("degree")) == (456, 464),
-      f'{nodes_all.get("工业和信息化部", {}).get("degree")}/'
-      f'{nodes_all.get("公安部", {}).get("degree")}')
+# 全库档（不传日期）—— 守 README / 启动说明 / 演示脚本引用的那批数。
+# ⚠ 这一发实测远超预期：四类 node_types 全勾时连续跑 20 分钟未返回。
+#   所以默认跳过，要跑显式加 --full。
+# 报告正文已不用全库口径（见文件头说明），跳过不损失对报告的覆盖。
+if not FULL:
+    print("  SKIP  全库建图组（③④⑥ 的全库部分）：本次未跑，"
+          "加 --full 才包含（实测冷启动 > 20 分钟）")
+else:
+    an_all = get("/api/graph/analysis?min_degree=2&node_types=" + NT)
+    nodes_all = {n["id"]: n for n in an_all["graph"]["nodes"]}
+    check("全库 12162 节点 / 29069 边 / 886 连通块",
+          (an_all["nodes"], an_all["edges"], an_all["components"]) == (12162, 29069, 886),
+          f'{an_all["nodes"]}/{an_all["edges"]}/{an_all["components"]}')
+    check("全库画布 300 节点 / 2995 边",
+          (len(an_all["graph"]["nodes"]), len(an_all["graph"]["edges"])) == (300, 2995),
+          f'{len(an_all["graph"]["nodes"])}/{len(an_all["graph"]["edges"])}')
+    # ⚠ 全库口径下度/介数第一是**泛称「网信办」**（3381 条实体记录），不是中央网信办 ——
+    #   早期文章里大量只写「网信办」。README 与演示脚本都据此说明「两个名字的度与介数
+    #   要分开看、不能相加」，这里钉住实测值。
+    check("全库度数第一 网信办 1447",
+          nodes_all.get("网信办", {}).get("degree") == 1447,
+          f'实测 {nodes_all.get("网信办", {}).get("degree")}')
+    check("全库度数次席 中央网信办 814",
+          nodes_all.get("中央网信办", {}).get("degree") == 814,
+          f'实测 {nodes_all.get("中央网信办", {}).get("degree")}')
+    check("全库工信部 456 / 公安部 464",
+          (nodes_all.get("工业和信息化部", {}).get("degree"),
+           nodes_all.get("公安部", {}).get("degree")) == (456, 464),
+          f'{nodes_all.get("工业和信息化部", {}).get("degree")}/'
+          f'{nodes_all.get("公安部", {}).get("degree")}')
+
+    bt_a = sorted(((n["id"], n.get("betweenness", 0)) for n in an_all["graph"]["nodes"]),
+                  key=lambda kv: -kv[1])
+    check("全库全图第一 = 网信办 0.1892",
+          bt_a[0][0] == "网信办" and abs(bt_a[0][1] - 0.1892) < 0.001,
+          f'{bt_a[0][0]} = {bt_a[0][1]}')
+    check("全库全图第二 = 中央网信办 0.0899",
+          bt_a[1][0] == "中央网信办" and abs(bt_a[1][1] - 0.0899) < 0.001,
+          f'{bt_a[1][0]} = {bt_a[1][1]}')
+    check("全库两者相差 2.10 倍", abs(bt_a[0][1] / bt_a[1][1] - 2.10) < 0.05,
+          f"实测 {bt_a[0][1]/bt_a[1][1]:.2f}")
 
 print()
 print("=" * 70)
-print("⑥ 介数（窗口 0.2109/0.1201 + 聚焦 0.8486/0.0306；全库 0.1892/0.0899）")
+print("⑥ 介数（窗口 0.2109/0.1201 + 聚焦 0.8486/0.0306）")
 print("=" * 70)
 bt = sorted(((n["id"], n.get("betweenness", 0)) for n in an["graph"]["nodes"]),
             key=lambda kv: -kv[1])
@@ -247,17 +292,6 @@ check("窗口全图第二 = 网信办 0.1201", bt[1][0] == "网信办" and abs(b
       f'{bt[1][0]} = {bt[1][1]}')
 r = bt[0][1] / bt[1][1]
 check("窗口两者相差 1.76 倍", abs(r - 1.76) < 0.05, f"实测 {r:.2f}")
-
-bt_a = sorted(((n["id"], n.get("betweenness", 0)) for n in an_all["graph"]["nodes"]),
-              key=lambda kv: -kv[1])
-check("全库全图第一 = 网信办 0.1892",
-      bt_a[0][0] == "网信办" and abs(bt_a[0][1] - 0.1892) < 0.001,
-      f'{bt_a[0][0]} = {bt_a[0][1]}')
-check("全库全图第二 = 中央网信办 0.0899",
-      bt_a[1][0] == "中央网信办" and abs(bt_a[1][1] - 0.0899) < 0.001,
-      f'{bt_a[1][0]} = {bt_a[1][1]}')
-check("全库两者相差 2.10 倍", abs(bt_a[0][1] / bt_a[1][1] - 2.10) < 0.05,
-      f"实测 {bt_a[0][1]/bt_a[1][1]:.2f}")
 
 g1 = get("/api/graph/analysis?focus=" + urllib.parse.quote("中央网信办")
          + "&hops=1&node_types=" + NT + WEB)
@@ -550,18 +584,22 @@ else:
     # （2026-10-15 补：真库全区间重跑 + 补抽 10-12~10-14 新采的 19 篇后，
     #   窗口/全库两套数都动了，这些数同样必须转进 docx；
     #   "24 条" 保留，因为报告还写了「其中 2024 年以来 24 条」）
-    MUST = ["4432", "4433", "653 万字", "16648", "8577", "1201", "27.1%",
-            "285", "142", "115", "0.2109", "0.1201", "0.8486", "0.0306",
-            "1761", "4211", "126", "286", "1116",
-            "5425", "2098", "561", "493", "63.3%",
+    # ⚠ 2026-10-16 报告按新要求重写（四块：角色画像／权责边界／问题与措施观察／
+    #   已知局限；统称「中央网信办」，新增「文本里没做什么」与中央—地方关系专节）。
+    #   下面的 MUST、表格结构、章节名都随之换过一轮 —— 数字全部来自
+    #   （测试）/_t10_report_stats.py 的 2024+ 只读取数（口径 = 分析窗）。
+    MUST = ["4432", "653 万字", "2965", "1468", "25 个栏目",
+            "16648", "8577", "1201", "27.1%", "561 条",
+            "1761", "4211", "126", "285", "0.2109", "0.1201",
+            "286", "1116", "0.8486", "0.0306",
+            "5425", "63.3%", "1518", "348", "137", "601", "87", "74",
+            "21 条", "8 个端点", "15 条", "17 条", "11 条", "18 条",
+            "91 条", "45 条", "39 条",
             "1495", "1541", "1397", "193",
-            "2965", "1468", "24 条", "3 条", "21 条", "8 个端点",
-            "11.2%", "15.1%", "17.4%", "19.0%", "17.1%", "24.5%",
-            "30.6%", "27.0%",
-            # —— 全库底数（2000-09-30 ~ 2026-10-14 全区间，含补抽 19 篇）——
-            "28917", "28849", "3827", "277651", "114931", "44420", "29069",
-            "6893", "23.8%", "26094", "12162", "29782", "67.0%", "42 条",
-            "2019-05-17", "3381", "0.1892", "0.0899", "1447", "814"]
+            "11.2%", "15.1%", "17.4%", "30.6%", "27.0%",
+            "14 条", "26 条", "20 条", "328 次", "35 次",
+            "57 篇", "37 篇", "67 篇", "59 篇",
+            "359/5425", "6.6%", "12140", "4317", "211", "10 个"]
 
     missing = [m for m in MUST if m not in full]
     check(f"关键数字 {len(MUST)} 个全部保留",
@@ -573,33 +611,131 @@ else:
     #   那样一行 PASS 会读成「出了这个问题」，看的人很快就学会忽略 detail，
     #   闸门也就跟着失效了（失败措辞印在 PASS 上 = 误报，误报会杀死闸门）。
     #
-    # ⚠ 同时把「豁免了几处」显式报出来：本断言靠一句精确短语做豁免，
-    #   豁免数为 0 时它会「什么都没检查就通过」，那种 PASS 不构成证据。
-    _EX = "不是任意同句共现"
+    # ⚠ 豁免短语改为「触发词门槛」——重写后的报告不再写「不是任意同句共现」，
+    #   而是正面写明「设触发词门槛」。若连这个正面表述也一并删掉，
+    #   断言就退化成「什么都没检查」，那种 PASS 不构成证据，故显式报出来。
+    _EX = "触发词门槛"
     _n_ex = full.count(_EX)
     _left = full.replace(_EX, "")
     _bad_joint = "同句共现" in _left
-    check("报告未把 joint_issue 误称为同句共现",
-          not _bad_joint,
+    check("报告未把 joint_issue 误称为同句共现，且写明了触发词门槛",
+          (not _bad_joint) and _n_ex > 0,
           (f"出现了未经否定的「同句共现」" if _bad_joint
-           else f"已豁免 {_n_ex} 处否定式用法，无残留误称"
-                if _n_ex else "⚠ 报告里根本没有这句，断言空跑 —— 检查豁免短语是否被改写"))
+           else (f"已豁免 {_n_ex} 处门槛表述，无残留误称" if _n_ex
+                 else "⚠ 报告里没有「触发词门槛」，断言空跑 —— 检查是否被改写")))
+    # 术语统一：正文不得把中央与地方网信办混称。新报告两处「浙江省委网信办」
+    # 是地方样本的正确写法，这里只守「浙江网信办」这一易混写法不出现。
+    _zjmix = full.count("浙江网信办")
+    check("未出现易混写法「浙江网信办」（地方一律「浙江省委网信办」）",
+          _zjmix == 0, f"出现 {_zjmix} 次" if _zjmix else "0 次")
 
     # markdown 残留：转换器失手时正文会露出星号或反引号
     residue = [tok for tok in ("**", "`") if tok in full]
     check("无 markdown 标记残留", not residue, f"残留 {residue}" if residue else "")
 
-    # 表格结构：主题占比表 表头+3 年 = 4 行 x 5 列；
-    # 问题应对表 表头+6 类问题（2026-10 新增「跨站重复入库」一行）= 7 行 x 3 列
+    # 表格结构：问题与措施观察表 = 表头 + 5 行观察 = 6 行 x 3 列
     shapes = [(len(t.rows), len(t.columns)) for t in d.tables]
-    check("主题表 4x5（表头+2024/2025/2026）", (4, 5) in shapes, f"实际表格 {shapes}")
-    check("问题应对表 7x3（表头+6 类问题）", (7, 3) in shapes, f"实际表格 {shapes}")
+    check("问题与措施观察表 6x3（表头+5 类观察）", (6, 3) in shapes, f"实际表格 {shapes}")
 
     # 六个一级章节标题都在
     heads = [p.text for p in d.paragraphs if p.style.name.startswith("Heading")]
     for need in ("一、方法与口径", "二、角色画像", "三、权责边界",
-                 "四、发现的问题与应对措施", "五、已知局限", "六、结论"):
+                 "四、问题与措施观察", "五、已知局限", "六、结论"):
         check(f"章节「{need}」", any(need in h for h in heads))
+
+print()
+print("=" * 70)
+print("⑭ 权责边界新增断言（§3.1 / §3.2 / §3.3 / §3.4 / §五 的每个新数字）")
+print("=" * 70)
+# ⚠ 这一节是 2026-10-16 重写报告时新增的。旧报告没有「独立/联合/文本里没做什么」
+#   这套分法，这些数字当时没有任何断言守着 —— 重写后必须逐条钉住，
+#   否则下次改报告又会悄悄漂。
+_C = ("中央网信办", "国家互联网信息办公室", "国家网信办")
+_CIN = ",".join("?" * len(_C))
+
+
+def qc(s):
+    """跑一条带 _CIN 占位符的 SQL。
+
+    ⚠ 本节每条查询都是 **两个** IN 子句（src_name IN / dst_name IN），
+    所以要传两遍名字（6 个绑定，不是 3 个）。写成只传一遍就会得到
+    「uses 6, and there are 0/3 supplied」—— 而且它发生在 ⑬ 全绿之后，
+    屏幕上看像是 docx 校验崩了，实际是这儿的绑定数量不对。
+    """
+    return db.execute(s, _C + _C).fetchone()[0]
+
+
+_c_all = qc("SELECT COUNT(*) FROM " + W_R + " AND (r.src_name IN (" + _CIN +
+            ") OR r.dst_name IN (" + _CIN + "))")
+check("§3.1 中央网信办相关关系 1518 条", _c_all == 1518, str(_c_all))
+for _rt, _want in [("issue", 348), ("adopt", 137)]:
+    _g = qc("SELECT COUNT(*) FROM " + W_R + " AND r.rel_type='" + _rt +
+            "' AND (r.src_name IN (" + _CIN + ") OR r.dst_name IN (" + _CIN + "))")
+    check(f"§3.1 中央 {_rt} = {_want}", _g == _want, str(_g))
+_jc = qc("SELECT COUNT(*) FROM " + W_R + " AND r.rel_type='joint_issue' AND (r.src_name IN (" +
+         _CIN + ") OR r.dst_name IN (" + _CIN + "))")
+check("§3.2 中央 joint_issue 959 条", _jc == 959, str(_jc))
+_src = q("SELECT COUNT(*) FROM " + W_R + " AND r.rel_type='joint_issue' AND r.src_name='中央网信办'")
+_dst = q("SELECT COUNT(*) FROM " + W_R + " AND r.rel_type='joint_issue' AND r.dst_name='中央网信办'")
+check("§3.2 源端 601 / 目标端 87",
+      (_src, _dst) == (601, 87) and abs(100 * _src / (_src + _dst) - 87) < 1.0,
+      f"{_src}/{_dst} = {100*_src/(_src+_dst):.1f}%")
+
+# §3.3 其一：与执法机关的 74 条关系**全部**是 joint_issue，target/adopt 各 0 条。
+#   这条是「文本里没做什么」的全部证据，所以要两头都钉：
+#   既钉总数 74，也钉「执法机关那一侧没有一条非 joint_issue」。
+_enf_all = qc("SELECT COUNT(*) FROM " + W_R + " AND (r.src_name IN (" + _CIN +
+              ") OR r.dst_name IN (" + _CIN + ")) AND ((r.src_name LIKE '%公安部%' "
+              "OR r.dst_name LIKE '%公安部%' OR r.src_name LIKE '%市场监管%' "
+              "OR r.dst_name LIKE '%市场监管%'))")
+check("§3.3 中央 × 执法机关 74 条", _enf_all == 74, str(_enf_all))
+_enf_other = qc("SELECT COUNT(*) FROM " + W_R + " AND r.rel_type<>'joint_issue' "
+                "AND (r.src_name IN (" + _CIN + ") OR r.dst_name IN (" + _CIN + ")) "
+                "AND ((r.src_name LIKE '%公安部%' OR r.dst_name LIKE '%公安部%' "
+                "OR r.src_name LIKE '%市场监管%' OR r.dst_name LIKE '%市场监管%'))")
+check("§3.3 其中 target/adopt 确为 0 条", _enf_other == 0, str(_enf_other))
+
+# §3.3 其二：2023 职责划出后的文本侧证据。
+for kw, n_all, n_cent, n_data in [("数字中国", 57, 17, None),
+                                  ("智慧城市", 37, 14, None),
+                                  ("数据局", 67, 40, 59)]:
+    _b = q("SELECT COUNT(*) FROM articles a WHERE a.year>=2024 AND a.content_text LIKE ?",
+           f"%{kw}%")
+    _c = q("SELECT COUNT(*) FROM articles a WHERE a.year>=2024 AND a.content_text LIKE ? "
+           "AND a.content_text LIKE '%中央网信办%'", f"%{kw}%")
+    check(f"§3.3 「{kw}」正文命中 {_b} 篇、含中央网信办 {_c} 篇",
+          _b == n_all and _c == n_cent, f"{_b}/{_c}")
+    if n_data is not None:
+        _d = q("SELECT COUNT(*) FROM articles a WHERE a.year>=2024 AND a.content_text LIKE ? "
+               "AND a.content_text LIKE '%国家数据局%'", f"%{kw}%")
+        check(f"§3.3 「{kw}」含国家数据局 {n_data} 篇", _d == n_data, str(_d))
+
+# §3.4 中央 × 省级
+_prov = qc("SELECT COUNT(*) FROM " + W_R + " AND r.rel_type='joint_issue' "
+           "AND (r.src_name IN (" + _CIN + ") OR r.dst_name IN (" + _CIN + ")) "
+           "AND ((r.src_name LIKE '%省委网信办%' OR r.dst_name LIKE '%省委网信办%') "
+           "OR (r.src_name LIKE '%网信浙江%' OR r.dst_name LIKE '%网信浙江%') "
+           "OR (r.src_name LIKE '浙江省委%' OR r.dst_name LIKE '浙江省委%'))")
+check("§3.4 中央 × 省级网信办 joint_issue 14 条", _prov == 14, str(_prov))
+_zj = q("SELECT COUNT(*) FROM " + W_R + " AND (r.src_name='浙江省委网信办' OR r.dst_name='浙江省委网信办')")
+check("§3.4 浙江省委网信办本体 26 条关系", _zj == 26, str(_zj))
+_zjc = q("SELECT COUNT(*) FROM " + W_R + " AND r.rel_type='joint_issue' AND "
+         "(r.src_name='浙江省委网信办' OR r.dst_name='浙江省委网信办')")
+check("§3.4 其中 joint_issue 20 条", _zjc == 20, str(_zjc))
+for nm, want in (("中央网信办", 328), ("浙江省委网信办", 35)):
+    _e = q("SELECT COUNT(*) FROM entities e JOIN articles a ON a.id=e.article_id "
+           "WHERE a.year>=2024 AND a.site='zjwx' AND e.type='org' AND e.name='" + nm + "'")
+    check(f"§3.4 zjwx 站机构「{nm}」{want} 条", _e == want, str(_e))
+
+# §五 局限第 4/5 条
+_bad = q("SELECT COUNT(*) FROM " + W_R + " AND r.rel_type='joint_issue' AND "
+         "(LENGTH(r.src_name)>10 OR r.src_name LIKE '%由%' OR r.src_name LIKE '%根据%' "
+         "OR r.src_name LIKE '%联合主办%' OR r.src_name LIKE '%的活动%')")
+check("§五 可疑端点 359 条 / 6.6%", _bad == 359 and abs(100 * _bad / ci - 6.6) < 0.1,
+      f"{_bad} 条 = {100*_bad/ci:.1f}%")
+for _ty, _want in (("org", 12140), ("policy", 4317), ("measure", 211), ("problem", 10)):
+    _n = q("SELECT COUNT(DISTINCT e.name) FROM " + W_E + " AND e.type='" + _ty + "'")
+    check(f"§五 去重实体 {_ty} = {_want}", _n == _want, str(_n))
 
 db.close()
 print()
