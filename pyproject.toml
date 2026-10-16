@@ -7,7 +7,12 @@ name = "cacx"
 version = "0.1.0"
 description = "网信办公开语料库工具：中国网信办/浙江网信网文章采集、检索与分析"
 readme = "README.md"
-requires-python = ">=3.10"
+# 下限查实过，不是拍脑袋：
+#   cacx 发布代码无任何 3.9/3.10 专有构造（见（测试）\_pyfloor_probe.py）
+#   唯一要求 3.10 的 mcp 已移到 optional-dependencies.mcp
+# 历史上这里写的是 >=3.10 —— 因为核心依赖里混进了 mcp>=2.3，
+# 一台装着 3.8 的正常机器会被依赖解析挡在门外。
+requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [{ name = "cacx" }]
 keywords = ["网络舆情", "网信办", "语料", "采集", "检索"]
@@ -16,10 +21,16 @@ dependencies = [
     "requests>=2.31",
     "fastapi>=0.110",
     "uvicorn>=0.27",
-    "mcp>=2.3",
+    "beautifulsoup4>=4.12",
+    "jieba>=0.42",
+    "pyvis>=0.3.2",
+    "networkx>=3.0",
 ]
 
 [project.optional-dependencies]
+# MCP Server 需要 Python >= 3.10（官方 SDK 的硬要求），
+# 因此不装也不影响网站任何功能。见 requirements-mcp.txt。
+mcp = ["mcp>=2.3"]
 ai = ["requests>=2.31"]
 dev = ["pytest>=8.0"]
 
