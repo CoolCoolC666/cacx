@@ -1,4 +1,15 @@
-# 依赖
+# 核心依赖 —— Python >= 3.8 即可运行
+#
+# ⚠ 版本下限是查出来的，不是拍脑袋写的。`_pyfloor_probe.py` 的实测结论：
+#   · cacx 发布代码里没有任何 3.9/3.10 专有构造（无 match 语句、
+#     无运行期 | 类型注解、无 removeprefix 等新标准库 API）
+#   · 唯一要求 3.10 的是 mcp，已拆到 requirements-mcp.txt
+#   · 本包列出的依赖都有支持 3.8 的历史版本，pip 会按 Requires-Python
+#     自动解析到与运行中的解释器匹配的那一版，无需在这里钉上限
+#     （钉了反而可能在 3.13 上白白降级）
+#
+# 装不上/装到不兼容的版本时，请看 docs\STARTUP-GUIDE-zh.md 的排查小节。
+
 requests>=2.31
 fastapi>=0.110
 uvicorn>=0.27
@@ -6,9 +17,6 @@ uvicorn>=0.27
 # HTML 解析：通用采集器(generic.py)与接口诊断(diagnose.py)都依赖；
 # start-cacx.bat 的首启自检也检查它
 beautifulsoup4>=4.12
-
-# MCP server（stdio，官方 mcp SDK；2.x 起 FastMCP 改名 MCPServer）
-mcp>=2.3
 
 # 中文分词。可选依赖 —— 没装时全文检索退化为标点切分，程序照常运行。
 # 装了之后：① 中文查询按词组检索（原来整串进去基本搜不到）
@@ -24,6 +32,9 @@ pyvis>=0.3.2
 
 # 关联分析：度/加权度/介数/PageRank/Louvain 社区/连通块。
 # 已实测 networkx 3.6.1 全部指标出数；Louvain 固定 seed=42 保证可复现。
+# 用到的 API（DiGraph / betweenness_centrality / pagerank / ego_graph /
+# connected_components / community.louvain_communities）全部是
+# networkx 2.x 就有的，因此在 3.8 上自动降级解析到的旧版本同样可用。
 networkx>=3.0
 
 # 可选：测试

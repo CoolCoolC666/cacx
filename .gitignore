@@ -203,6 +203,32 @@ _[a-z0-9]*.txt
 !（测试）/_t12_empty_probe.py
 !（测试）/_t13_multisite_check.py
 
+# Python 版本下限的证据链（2026-10-16，组员机器报「Python 3.10 or newer
+# is required」而起）：
+#   _pyfloor_probe.py —— 查「代码本身到底多新」：扫 match 语句 / 运行期 | 类型
+#     注解 / removeprefix 等 3.9+ 专有构造，再实查 PyPI 上每个依赖各版本的
+#     requires_python。结论：发布代码零 3.9/3.10 门槛。
+#   _resolve_floor.py —— 查「pip 到底解析不解析得动」：用 pip install --dry-run
+#     --python-version 对 3.8/3.9/3.10/3.13 各真跑一遍。
+#     结论：核心依赖四个版本全过；mcp 只在 3.10+ 过 —— 这就是把 mcp 拆成
+#     可选依赖的依据。⚠ 第一版加了 --only-binary=:all:，导致 jieba（历来只发
+#     sdist）在**所有**版本上都报"找不到"，看着像"3.8 根本装不上"；
+#     那是参数的问题不是版本的问题 —— 断言比现实更严会造出假警报。
+#   _probe_test.bat —— 启动器 :probe 子程序的六态测试（正常 PATH / 无 Python /
+#     只有 py 启动器 / 可选模块在 / 可选模块缺 / 缺了之后能否继续启动）。
+#     ⚠ 入库是因为这段 batch 语法真出过两个**只有跑起来才看得见**的 bug：
+#       ① `tokens=1-3` 没配 `delims=`，输出里没有空格 → 整行成一个 token →
+#          下一行 `if %FMJ% GTR 3` 变成 `if PV#3#13#C:\... GTR 3`，
+#          启动器在打印任何东西之前就死于 "8 was unexpected at this time."；
+#       ② 用 `->` 当分隔符存解释器路径，上层 echo 时 cmd 把它当 stdout 重定向 ——
+#          会去**截断 python.exe 本体**，且症状是整段静默无输出。
+#     _fix_bat_crlf.py 已为此加了第三条硬判据（set 值里不得有 > < | &）。
+!（测试）/_pyfloor_probe.py
+!（测试）/_resolve_floor.py
+!（测试）/_probe_test.bat
+!（测试）/_sync_pyfloor_docs.py
+!（测试）/_fix_demo_depcount.py
+
 # ---- 开发归档目录（测试脚本 + 开发期产物）----
 # 测试脚本本身要入库；日志与截图不入库。
 （测试）/_logs/

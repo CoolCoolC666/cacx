@@ -1,0 +1,30 @@
+# 可选依赖：MCP Server —— 需要 Python >= 3.10
+#
+# 为什么单独一份文件，而不是在 requirements.txt 里加个注释跳过：
+#   mcp 2.x 官方 SDK 的 Requires-Python 就是 >=3.10（已查 PyPI 元数据：
+#   2.3.0 / 2.2.0 / 2.1.1 / 2.0.0 / 1.30.0 全部 >=3.10）。
+#   放在核心列表里，Python 3.8/3.9 的机器上 `pip install -r requirements.txt`
+#   会直接**解析失败**，整个网站都起不来 —— 就为了一个大多数组员不会
+#   现场演示的功能，把主功能陪葬掉。不划算。
+#
+# 不装会怎样：
+#   · 网站全部功能正常（检索 / 分面 / 图谱 / 面板 / 同步 / AI 摘要）
+#   · 唯一缺失：`python -m cacx.mcp_server` 报 ModuleNotFoundError
+#   · start-cacx.bat 会在启动时打一行说明，不视为错误
+#
+# 想装（仅限 Python >= 3.10）：
+#   python -m pip install -r requirements-mcp.txt
+#
+# 装完把 MCP 接到客户端（Claude Desktop / Cursor 等）：
+#   {
+#     "mcpServers": {
+#       "cacx": {
+#         "command": "python",
+#         "args": ["-m", "cacx.mcp_server"],
+#         "cwd": "<解压出来的 cacx 目录绝对路径>"
+#       }
+#     }
+#   }
+#   cwd 必须是项目根的绝对路径；Windows 反斜杠在 JSON 里要双写。
+
+mcp>=2.3

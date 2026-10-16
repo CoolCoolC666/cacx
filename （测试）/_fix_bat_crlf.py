@@ -18,6 +18,7 @@ r"""把 .bat 规整成「纯 ASCII + 全 CRLF」，并按字节自检。
 用法：py -3 -X utf8 （测试）\_fix_bat_crlf.py start-cacx.bat [--write]
 不带 --write 只检查并报告，不改文件。
 """
+import re
 import sys
 from pathlib import Path
 
@@ -38,6 +39,50 @@ def check(p: Path):
         "crlf": crlf,
         "ends_nl": ends_nl,
     }
+
+
+# --------------------------------------------------------------------------
+# 第三条检查：echo / set 里的 cmd 重定向符注入
+# --------------------------------------------------------------------------
+# 实测踩过：探测子程序把解释器路径存进 PYDESC，用 "->" 当分隔符，
+# 上层 `echo Using %PYDESC%` 一执行，cmd 就把 "-> C:\...\python.exe"
+# 解析成 stdout 重定向 —— 直接去**截断解释器本体**。
+# 症状极怪：case 1 整段没有任何输出，别的 case 正常，
+# 而真正的错误（"文件被写坏了"）一个字都没打。
+#
+# 机制：cmd.exe 在 echo 生效**之前**就做重定向解析，
+# 所以只要展开后的文本里出现 > < | &，就已经晚了。
+# 引号保护不了 —— 变量展开发生在解析之后。
+# 结论：这类字符只能靠"根本不写进去"来防。
+#
+# 分两级，避免把闸门写得过严（过严会造假警报，然后逼人去改本来正确的东西）：
+#   FAIL  set "VAR=..." 的值里含 > < | &  —— 引号赋值却带重定向符，
+#         基本只可能是 bug，没有 legit 用法
+#   WARN  echo 行里同时出现 变量 与 未转义重定向符 —— 可能是故意的重定向，
+#         所以只提醒不判死
+SPECIAL = re.compile(r"[<>|&]")
+VAR = re.compile(r"%[^%]*%")
+
+
+def check_injection(p: Path):
+    """返回 (hard_hits, soft_wits)。hard_hits 非空即 FAIL。"""
+    text = p.read_bytes().decode("utf-8-sig", errors="replace")
+    hard, soft = [], []
+    for i, raw_line in enumerate(text.splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.lower().startswith("rem "):
+            continue
+        # 去掉 caret 转义后再判断：^> 是作者故意的转义，不算注入
+        probe = re.sub(r"\^[<>&|]", "", line)
+        # 引号赋值
+        m = re.match(r'set\s+"([^=]+)=(.*)"$', probe, re.I)
+        if m and SPECIAL.search(m.group(2)):
+            hard.append((i, line))
+            continue
+        if line.lower().startswith("echo ") and SPECIAL.search(probe[5:]) \
+                and VAR.search(probe[5:]):
+            soft.append((i, line))
+    return hard, soft
 
 
 def fix(p: Path):
@@ -75,6 +120,12 @@ def main(argv):
             detail += f"  非 ASCII {len(r['non_ascii'])} 处: {pos}"
         if r["bare_lf"]:
             detail += f"  裸 LF {len(r['bare_lf'])} 处: {r['bare_lf'][:5]}"
+        hard, soft = check_injection(p)
+        for i, ln in hard:
+            detail += f"\n         重定向符注入 FAIL line {i}: {ln}"
+        for i, ln in soft:
+            detail += f"\n         重定向符 WARN line {i}: {ln}"
+        ok = ok and not hard
         if not r["ends_nl"]:
             detail += "  （末行无换行符，cmd.exe 正常，informational）"
         print(f"  {'PASS' if ok else 'FAIL'}  {p.name}   "
@@ -82,8 +133,9 @@ def main(argv):
         if not ok:
             rc = 1
     print()
-    print("硬判据只有两条：非 ASCII = 0、裸 LF = 0。中文进 .bat 正文会让 "
-          "`python -m cacx serve` 静默不执行。")
+    print("硬判据三条：非 ASCII = 0、裸 LF = 0、set 值里无 > < | &。"
+          "中文进 .bat 正文会让 `python -m cacx serve` 静默不执行；"
+          "而 > 出现在会被 echo 的变量里，会被 cmd 当成重定向去写文件。")
     sys.exit(rc)
 
 
