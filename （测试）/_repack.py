@@ -23,22 +23,61 @@ DEST = SRC.parent / "网站程序"
 NAME = f"cacx-分发版-{datetime.now():%Y%m%d}"
 
 # 排除「任何层级同名」——只写顶层规则会漏掉 cacx/ai/__pycache__
-DIR_EXCLUDE = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache",
-               ".git", ".venv", "venv", "node_modules", "data",
-               "config/sites.d",
-               # ⚠ 「（测试）」必须整目录排除 —— 里面的 tests_*.py
-               #   不带下划线，走不到「单下划线排除」那条规则，
-               #   于是 34 个测试文件 + 9 张截图会跟着进分发包。
-               #   分发包是给组员用的，不该带我们的测试。
-               "（测试）"}
+#
+# ⚠⚠ 但"按名字排除"对**第三方包内容**是危险的，必须拆成两类。
+#   加入随包运行时后，runtime\Lib\site-packages\ 下有上万文件，
+#   而 venv / data / lib / node_modules 这些名字在第三方包里**真的会以
+#   目录形式出现**：
+#     jedi/third_party/typeshed/stdlib/venv/__init__.pyi     <- venv
+#     jedi/third_party/typeshed/stubs/convertdate/convertdate/data/  <- data
+#   实测按名字排除一次性连坐掉 482 个 jedi 类型存根文件。
+#   这与代码里早就记着的 config/sites.d 是同一类错误
+#   （"把带斜杠的路径项当目录名去比 name，永远匹配不上"），
+#   只不过这次反过来了：名字项**匹配得太宽**。
+#
+# 所以规矩是：**只有在源码树里才可能出现的名字，才允许按名字排除。**
+DIR_EXCLUDE_BY_NAME = {
+    # 这些名字在任何 Python 包里都不可能作为独立目录出现，
+    # 出现了也一定是运行产物。
+    "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".git",
+}
+# 这些必须按「相对项目根的路径」判：它们在第三方包里会同名出现。
+DIR_EXCLUDE_BY_PATH = {
+    "data", "venv", ".venv", "node_modules", "lib", "_cache",
+    # 「（测试）」必须整目录排除 —— 里面的 tests_*.py 不带下划线，
+    # 走不到「单下划线排除」那条规则，于是 34 个测试文件 + 9 张截图
+    # 会跟着进分发包。分发包是给组员用的，不该带我们的测试。
+    "（测试）",
+    "config/sites.d",
+}
+DIR_EXCLUDE = DIR_EXCLUDE_BY_NAME | DIR_EXCLUDE_BY_PATH
+PATTERNS = ("_*.py", "_*.js", "_*.txt", "_*.log", "_*.csv", "_*.jsonl", "*.err")
+
+# ⚠⚠ runtime/ 下的内容是**第三方包 + 官方运行时**，必须逐字节带走。
+#
+#   这条前缀豁免以前只写在注释里、**从没在代码里实现过** ——
+#   结果打包时 runtime/ 里的文件照样走通用排除规则：
+#     numpy/_expired_attrs_2_0.py        被 _*.py 排掉
+#     IPython/core/_dunder_ops.py        同上
+#     IPython/utils/_process_common.py   同上
+#   实测一次少 636 个文件，包内 numpy 一 import 就炸：
+#     numpy/__init__.py:104  ModuleNotFoundError: numpy._expired_attrs_2_0
+#   而 48 项打包闸全绿 —— 因为没有一道闸在包内真跑过 numpy。
+#
+#   排除规则的本意是挡**我们自己**的一次性脚本（_probe_*.py 之类），
+#   那个判断对 site-packages 内部一律不成立：
+#   第三方包本来就有大量 `_xxx.py`（带前导单下划线的模块），
+#   它们是包的一部分，缺一个就是 ImportError。
+VERBATIM_PREFIXES = ("runtime/",)
+
+# 文件级排除。settings.json / .env 是本机态（含真实路径、密钥、账号），
+# 跟着走就等于把组员机器的路径也"种"进去；带进去还会让服务读到别人机器的旧配置。
 FILE_EXCLUDE = {
     "config/settings.json", ".env",
-    # 自动演示：**进 git 但不进分发包**（组员演示用的是手动版脚本，
-    # 全自动脚本依赖本机 Playwright + chromium，跟着走只会让人装不上）
+    # 自动演示：**进 git 但不进分发包**
     "autodemo.py",
     "run-demo.bat",
 }
-PATTERNS = ("_*.py", "_*.js", "_*.txt", "_*.log", "_*.csv", "_*.jsonl", "*.err")
 
 ok = fail = 0
 
@@ -62,10 +101,24 @@ def skip(name, rel=""):
     实测发现：包内出现了 config/sites.d/zjwx-api.json。
     （内容经查证不含密钥，只是选择器与分页参数，但按既定口径也不该带。）
     """
-    if name in DIR_EXCLUDE:
+    # ⚠⚠ runtime/ 下的第三方内容**逐字节带走**，不走任何通用排除规则
+    #   （唯一例外：运行产物 __pycache__ / .pyc —— 那些是我们自己跑出来的，
+    #     构建运行时时就该没有，带进去只会让 48 项里的"无 __pycache__"闸假红）。
+    #   见文件顶部 VERBATIM_PREFIXES 那段注释。
+    if rel.startswith(VERBATIM_PREFIXES):
+        return name.endswith(".pyc") or name in DIR_EXCLUDE_BY_NAME
+    if name in DIR_EXCLUDE_BY_NAME:
         return True
-    # 按路径前缀排除 —— 这是 DIR_EXCLUDE 里带斜杠那几项的判据
-    if any(rel == d or rel.startswith(d + "/") for d in DIR_EXCLUDE if "/" in d):
+    # ⚠ 这些必须按「相对项目根的路径」判，不能按本名判。
+    #   见上面 venv/data 那段注释：第三方包里真的有同名目录，
+    #   按名字判会连坐掉 jedi 的 482 个类型存根文件。
+    if any(rel == d or rel.startswith(d + "/")
+           for d in DIR_EXCLUDE_BY_PATH if "/" in d):
+        return True
+    # 顶层同名项（data / venv / （测试） 等）：只有**恰好在项目根**才排除。
+    # 判据取 rel 的第一段，而不是 name —— 否则 site-packages 里任何一层
+    # 叫 data 的目录都会被砍。
+    if rel and rel.split("/")[0] in DIR_EXCLUDE_BY_PATH:
         return True
     if rel in FILE_EXCLUDE or name in FILE_EXCLUDE:
         return True
@@ -73,6 +126,14 @@ def skip(name, rel=""):
         return True
     # 单下划线 = 本地自用脚本；**双下划线是 Python 语法，必须保留**
     # （上次就因为没区分，把 5 个 __init__.py 全排掉了）
+    #
+    # ⚠⚠ 但这条规则**不能作用于 runtime\ 下的第三方包内容**。
+    #   实测踩中：numpy/_expired_attrs_2_0.py 被当成"本地一次性脚本"排掉了，
+    #   那是 numpy 构建时生成的模块，缺了它
+    #     numpy/__init__.py:104  ModuleNotFoundError: numpy._expired_attrs_2_0
+    #   包内服务连启动都失败（rc=1）。
+    #   而 49 项打包闸**全绿** —— 因为没有一道闸真的在包内跑过 numpy。
+    #   这条规则的本意是挡我们自己的脚本，第三方包内部文件一律逐字节带走。
     if name.startswith("_") and not name.startswith("__"):
         return any(Path(name).match(p) for p in PATTERNS)
     return False
@@ -173,11 +234,26 @@ print("=" * 66)
 n = 0
 for root, dirs, files in os.walk(SRC):
     for dn in list(dirs):
-        if dn in DIR_EXCLUDE:
+        # ⚠ 剪枝也必须**按路径**判，不能只比本名。
+        #   `data` / `venv` / `lib` 在 site-packages 里真的存在
+        #   （jedi/third_party/typeshed/stdlib/venv/…），
+        #   只比本名会连坐掉 482 个 jedi 类型存根。
+        drel = (Path(root) / dn).relative_to(SRC).as_posix()
+        drop = (dn in DIR_EXCLUDE_BY_NAME
+                or drel.split("/")[0] in DIR_EXCLUDE_BY_PATH
+                or any(drel == d or drel.startswith(d + "/")
+                       for d in DIR_EXCLUDE_BY_PATH if "/" in d))
+        if drop:
             dirs.remove(dn)
     for fn in files:
         rel = (Path(root) / fn).relative_to(SRC)
-        if skip(fn) or skip(fn, rel.as_posix()):
+        # ⚠⚠ 必须**只带 rel 调一次**。
+        #   原来是 `skip(fn) or skip(fn, rel.as_posix())` —— 两次调用。
+        #   第一次 `skip(fn)` 的 rel 是空串，于是 VERBATIM_PREFIXES
+        #   （runtime/）永远匹配不上，第三方包内部文件照旧被当成本地脚本排掉：
+        #   实测少了 1117 个，含 numpy/_expired_attrs_2_0.py 与 anyio/_core/*，
+        #   包内服务根本起不来。**短路 or 让 rel 那次调用根本没机会执行。**
+        if skip(fn, rel.as_posix()):
             continue
         d = stage / rel
         d.parent.mkdir(parents=True, exist_ok=True)
@@ -190,7 +266,93 @@ print("=" * 66)
 print("3  三道闸")
 print("=" * 66)
 inits = list(stage.rglob("__init__.py"))
-check(f"__init__.py 齐全（{len(inits)} 个）", len(inits) == 5)
+# ⚠ 口径变了：加入随包便携运行时后，stage 里会有**几百个** __init__.py
+#   （site-packages 里每个包都有一个）。原来那句 `len(inits) == 5`
+#   会直接判红，而它想验的其实是"cacx 自己的包没被排除规则误伤"。
+#   所以改成分别验两件不同的事：
+#     ① cacx 自己的 5 个 __init__.py 齐全（原有的误伤防护）
+#     ② 运行时里抽查几个关键包仍然带着 __init__.py
+#        —— 排除规则 `_*.py` **是匹配 __init__.py 的**，
+#           skip() 里为它开了口子；一旦哪天这个口子丢了，
+#           运行时里的包会集体变成"命名空间包"，
+#           症状是 import 报一堆看不懂的 AttributeError。
+proj_inits = sorted(str(p.relative_to(stage)) for p in stage.glob("cacx/**/__init__.py"))
+check("cacx 自己的 __init__.py 齐全（5 个）",
+      len(proj_inits) == 5, f"{len(proj_inits)} 个")
+RT = stage / "runtime"
+RT_SP = RT / "Lib" / "site-packages"
+for pkg in ("fastapi", "uvicorn", "requests", "bs4", "pyvis",
+            "jieba", "networkx"):
+    check(f"运行时里 {pkg}/__init__.py 在",
+          (RT_SP / pkg / "__init__.py").exists())
+check("runtime/ python.exe 在", (RT / "python.exe").exists())
+check("runtime/ cacert.pem 在（冗余保险，不是修复）",
+      (RT / "cacert.pem").exists())
+_pth = sorted(RT.glob("python3*._pth"))
+check("runtime/ 的 ._pth 在", bool(_pth), f"{[p.name for p in _pth]}")
+if _pth:
+    _t = _pth[0].read_text(encoding="ascii").replace("\r\n", "\n")
+    # 见 _build_portable_runtime.py：少任何一行都会让组员机器直接起不来。
+    check("._pth 打开了 import site", "import site" in _t)
+    check("._pth 含 Lib\\site-packages", "Lib\\site-packages" in _t)
+    check("._pth 含 .. （项目根，cacx 包在这里）",
+          "\n..\n" in "\n" + _t)
+# ABI：装错解释器的轮子会让 .pyd 加载不了，而报错完全不提 ABI。
+_stray = [p.name for p in RT_SP.rglob("*")
+          if p.is_file() and "cp313" in p.name] if RT_SP.exists() else []
+check("运行时里没有 cp313 的二进制", not _stray, f"{len(_stray)} 个：{_stray[:3]}")
+_312 = [p.name for p in RT_SP.glob("*/**/*.pyd") if "cp312" in p.name] \
+    if RT_SP.exists() else []
+check("运行时确实是 cp312 二进制", bool(_312), f"{len(_312)} 个 .pyd")
+
+# ⚠⚠ 最强的一道：**用暂存目录里那个解释器真跑一次小图 analyze()**。
+#   前面的检查全是"文件在不在、对不对"，可 numpy/_expired_attrs_2_0.py
+#   那种缺失，静态检查一道都抓不住 —— 49 项全绿而服务起不来。
+#   真跑一次 1 秒级，比事后在组员机器上炸划算得多。
+import subprocess as _sp
+import shutil as _sh
+if (RT / "python.exe").exists():
+    # ⚠ 不要把冒烟脚本拷进暂存目录再删 —— 一来一回都是多余的磁盘写入，
+    #   而 _smoke_analyze.py 自己认 CACX_SMOKE_ROOT，
+    #   直接跑源码那份、把根指向 stage 即可，import 到的自然是**包内**的 cacx。
+    _r = _sp.run([str(RT / "python.exe"),
+                  str(SRC / "（测试）" / "_smoke_analyze.py")],
+                 cwd=str(stage), capture_output=True, text=True,
+                 encoding="utf-8", errors="replace",
+                 env={**os.environ, "CACX_SMOKE_ROOT": str(stage),
+                      "PYTHONIOENCODING": "utf-8",
+                      # ⚠ 不许写字节码：我这一步 import 了 numpy / networkx / cacx，
+                      #   会在暂存目录里生成 290 个 .pyc 和 27 个 __pycache__，
+                      #   然后把紧随其后的「全包无 .pyc」和「无 __pycache__」两道
+                      #   闸门**自己判红**。闸门污染了被闸的对象 ——
+                      #   那两道闸本意是查"源码树有没有残留运行产物"，
+                      #   结果被我自己刚跑出来的产物顶了。
+                      #   这里禁掉字节码，比事后去删干净、也比放宽那两道闸都对。
+                      "PYTHONDONTWRITEBYTECODE": "1"})
+    _out = _r.stdout or ""
+    _mark = [x for x in (_out + (_r.stderr or "")).strip().splitlines()
+             if "SMOKE-" in x]
+    check("暂存目录的运行时能真跑 analyze()",
+          "SMOKE-OK" in _out, _mark[-1] if _mark else "无 SMOKE 行")
+    if "SMOKE-OK" not in _out:
+        for _x in (_out + (_r.stderr or "")).strip().splitlines()[-6:]:
+            print("        " + _x)
+
+# ⚠ 运行时必须**逐字节原样**进包。除了 __pycache__ / .pyc（可再生，
+#   且上面的闸要求它们为零），源里有多少个文件，包里就得有多少个。
+def _rt_files(base: Path):
+    return {str(p.relative_to(base).as_posix())
+            for p in base.rglob("*")
+            if p.is_file() and "__pycache__" not in p.parts
+            and not p.name.endswith(".pyc")}
+
+
+if (SRC / "runtime").is_dir() and (RT).is_dir():
+    _a, _b = _rt_files(SRC / "runtime"), _rt_files(RT)
+    _missing = sorted(_a - _b)
+    check("运行时文件一个不少（打包规则没误伤第三方包内部文件）",
+          not _missing, f"源 {len(_a)} / 包 {len(_b)}，少了 {len(_missing)} 个："
+                         f"{_missing[:5]}")
 check("无 __pycache__", not list(stage.rglob("__pycache__")))
 check("无 settings.json", not (stage / "config" / "settings.json").exists())
 check("有 settings.example.json",

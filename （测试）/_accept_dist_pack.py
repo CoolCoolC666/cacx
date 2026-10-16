@@ -23,6 +23,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -217,10 +218,52 @@ chk("候选清单联合列 == 窄口径(联合|印发|会同)重算", mis == 0, 
 
 # ---------------------------------------------------------------- 5 真跑
 print("\n--- 启动包内服务（端口 8791，不碰开发用的 8770）---")
+# ⚠⚠ 解释器必须选**包内那个**，不是 sys.executable。
+#   上一版写死 sys.executable，于是验收跑的是开发机的 Python ——
+#   而开发机碰巧装了 scipy，networkx 的 pagerank 能跑；
+#   包里那份 requirements.txt 少了 scipy 这件事就永远测不出来，
+#   48 项全绿、图谱面板在组员机器上却是坏的。
+#   「在自己机器上绿」不等于「在收件人机器上绿」——
+#   尤其这台机器的环境比交付目标环境**更完整**。
+_pack_py = stage / "runtime" / "python.exe"
+if _pack_py.exists():
+    PY_EXE = str(_pack_py)
+    print("用包内便携运行时: runtime\\python.exe")
+else:
+    PY_EXE = sys.executable
+    print("⚠ 包内没有 runtime\\python.exe，退回开发机解释器 —— "
+          "这次验收**不代表组员机器**的真实环境")
+chk("包内自带便携运行时", _pack_py.exists(), f"{(stage / 'runtime').exists()}")
+
+# ⚠ 小图冒烟：必须用**包内解释器 + 包内 cacx** 跑。
+#   networkx>=3.6 的 pagerank() 无条件要 scipy，而 networkx 不声明它；
+#   `import cacx` / `import networkx` 永远成功，只有真调 analyze() 才炸。
+#   真跑全图要 278 秒，这张小图毫秒级。
+#   这一道已经真抓出过两个 bug：scipy 漏声明，以及打包排除规则
+#   把 numpy/_expired_attrs_2_0.py 当"本地脚本"排掉（包内服务直接起不来）。
+#   不拷脚本进解压目录 —— _smoke_analyze.py 自己认 CACX_SMOKE_ROOT。
+_s = subprocess.run([PY_EXE, str(pathlib.Path(__file__).resolve().parent
+                                 / "_smoke_analyze.py")],
+                    cwd=str(stage),
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace",
+                    env={**os.environ, "CACX_SMOKE_ROOT": str(stage),
+                         "PYTHONIOENCODING": "utf-8",
+                         # 同样别让它在解压目录里撒 .pyc / __pycache__：
+                         # 后面还有「全包无运行产物」那一类检查。
+                         "PYTHONDONTWRITEBYTECODE": "1"})
+_sout = (_s.stdout or "") + (_s.stderr or "")
+_sline = [x for x in _sout.strip().splitlines() if "SMOKE-" in x]
+chk("包内解释器小图 analyze() 出数（scipy 到位）",
+    "SMOKE-OK" in (_s.stdout or ""), _sline[-1] if _sline else "无 SMOKE 行")
+if "SMOKE-OK" not in (_s.stdout or ""):
+    for x in _sout.strip().splitlines()[-8:]:
+        print("        " + x)
+
 # ⚠ 必须基于 os.environ 复制：只传 PYTHONIOENCODING 会把 PATH 抹掉，
 #   子进程起不来的症状会被误读成"分发包坏了"
 env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "cacx", "serve",
+proc = subprocess.Popen([PY_EXE, "-X", "utf8", "-m", "cacx", "serve",
                          "--host", "127.0.0.1", "--port", str(PORT), "--no-browser"],
                         cwd=str(stage), stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT, text=True,

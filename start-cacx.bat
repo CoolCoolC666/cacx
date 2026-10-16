@@ -41,7 +41,50 @@ rem stub owns the `python` name, only py can still find a real one.
 set "PY="
 set "PYDESC="
 set "PYSEEN="
+set "PYBUNDLED="
 
+rem ---- 0. first choice: the portable Python shipped inside this package ----
+rem Why it goes FIRST, before anything on this machine:
+rem   - it is the exact combination we tested, so every classmate gets the
+rem     same behaviour instead of "whatever Python they happened to have";
+rem   - it needs no install, no admin rights, no PATH change, and no network
+rem     -- which also means the very first run cannot fail on "pip install
+rem     needs the internet" in a classroom with no wifi.
+rem Only if this folder is missing do we fall back to hunting for a system
+rem Python -- and at that point a missing runtime\ almost certainly means
+rem the 429 MB zip was not extracted completely.
+if exist "runtime\python.exe" call :probe_bundle
+if defined PY goto :python_ok
+
+rem ---- 1. otherwise look for a usable Python on this machine ----
+rem The floor is 3.8, and that number is measured, not guessed:
+rem   _pyfloor_probe.py  -> the shipped code has no 3.9/3.10-only construct
+rem                         (no match statement, no runtime | annotations,
+rem                         no removeprefix and friends)
+rem   _resolve_floor.py  -> pip really resolves requirements.txt on 3.8
+rem                         (dry-run with --python-version, all four pass)
+rem The only package that ever demanded 3.10 was mcp, and it now lives in
+rem requirements-mcp.txt as an OPTIONAL extra. Nothing about the website
+rem needs 3.10, so nothing about the website should demand it.
+rem
+rem Two DIFFERENT mistakes hide behind "python not found":
+rem   1. there is no python at all
+rem   2. python exists but is 3.6 / 3.7
+rem The old launcher only asked `where python`, so case 2 slipped
+rem through, `pip install` then died, and the message we printed was
+rem "install failed, try the same command manually" -- which fails
+rem identically. A dead end pointing the wrong way.
+rem
+rem `python` on PATH is also not the only entry point:
+rem   - the Windows `py` launcher knows about interpreters that are
+rem     NOT on PATH, which is the commonest "but I already installed
+rem     Python" case;
+rem   - the `python` that `where` finds may be the Microsoft Store
+rem     placeholder stub in ...\AppData\Local\Microsoft\WindowsApps\,
+rem     which is not an interpreter at all.
+rem So: probe several entry points, keep the first one >= 3.8.
+rem Candidate order puts `py -3` first on purpose -- when the Store
+rem stub owns the `python` name, only py can still find a real one.
 call :probe "py -3"
 if not defined PY call :probe "python"
 if not defined PY call :probe "python3"
@@ -56,30 +99,41 @@ if defined PY goto :python_ok
 goto :python_bad
 
 :python_bad
-echo [ERROR] Python 3.8 or newer is required, and no usable one was found.
+echo [ERROR] No usable Python, AND this package's bundled runtime is missing.
 echo.
-echo   Looked for : py -3, python, python3, py -3.13 ... py -3.8
+echo   Looked for : runtime\python.exe, py -3, python, python3, py -3.13 ... py -3.8
 if defined PYSEEN echo   Found    : %PYSEEN%
 if not defined PYSEEN echo   Found    : nothing runnable. Either no Python is installed,
 if not defined PYSEEN echo               or the only "python" on PATH is the Microsoft Store
 if not defined PYSEEN echo               placeholder under AppData\Local\Microsoft\WindowsApps.
 echo.
-echo   What to do:
-echo     1. List every Python already on this PC:   py -0
-echo     2. If a 3.8+ shows up there but was not picked up above, close this
-echo        window and open a NEW one. PATH is read when the window starts.
-echo     3. If there is no usable Python at all, install 3.12 from
-echo        https://www.python.org/downloads/
-echo        and tick "Add python.exe to PATH" during setup.
+echo   This package ships its own Python in the runtime\ folder, so a machine
+echo   with nothing installed should still work. That folder being absent means
+echo   the zip was almost certainly not extracted completely.
 echo.
-echo   3.8 and 3.9 run everything except the optional MCP server.
+echo   What to do:
+echo     1. Re-extract the WHOLE zip to a short path, e.g. D:\cacx
+echo        It is over 400 MB; a partial extract silently loses folders.
+echo     2. Check that D:\cacx\runtime\python.exe exists.
+echo     3. If runtime\ IS there but still not found, this copy is damaged --
+echo        ask for a fresh one.
+echo     4. If you are deliberately not using the bundled runtime, install
+echo        Python 3.8+ from https://www.python.org/downloads/ and tick
+echo        "Add python.exe to PATH".
+echo.
 pause
 exit /b 1
-
 :python_ok
 echo Using %PYDESC%
+if defined PYBUNDLED (
+    echo   Nothing to install, nothing to configure, no network needed.
+    echo   Optional MCP server, if you want it ^(needs Python 3.10+^):
+    echo     %PY% -m pip install -r requirements-mcp.txt
+) else (
+    echo   Tip: this package also ships a portable Python under runtime\.
+    echo        With that folder present there is nothing to install at all.
+)
 echo.
-
 rem ---- install deps on first run ----
 rem The graph page also needs pyvis (inlines vis-network) / networkx (analysis)
 rem / jieba (tokenizer + org mining). Checking only fastapi+uvicorn would skip
@@ -226,6 +280,33 @@ rem PYSEEN, so the failure message can report facts instead of
 rem just saying "your python is too old" -- an error that does not
 rem tell the reader what was actually found leaves the next step
 rem (and the screenshot they send back) useless.
+rem ---- probe the bundled portable runtime ----
+:probe_bundle
+set "CAND=runtime\python.exe"
+%CAND% -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>nul
+if errorlevel 1 goto :eof
+set "PYBUNDLED=1"
+set "PY=%CAND%"
+set "PYDESC=bundled portable runtime ^(%CAND%^)"
+rem Belt-and-braces only -- read this before "simplifying" it away:
+rem   I originally claimed the embeddable build ships no certificate root
+rem   and that https fetching would therefore fail. **That was wrong**, and
+rem   measuring it is why:
+rem     - Windows embeddable Python, given no CA file, enumerates the
+rem       WINDOWS root store (ssl -> EnumCertificates). Measured on the
+rem       bundled 3.12.10: create_default_context() loads 91 CA certs, and
+rem       urllib over https completes the TLS handshake fine.
+rem       (The 403 from a government site afterwards is UA rejection,
+rem       not a certificate problem.)
+rem     - requests does not consult the system store at all -- it ships
+rem       certifi inside site-packages and uses that.
+rem   So these two lines fix nothing today. They stay because they cost
+rem   nothing and cover the one case where a machine has no readable
+rem   Windows root store, but do not believe the comment above about a
+rem   bug they are not fixing.
+set "SSL_CERT_FILE=%CD%\runtime\cacert.pem"
+set "REQUESTS_CA_BUNDLE=%CD%\runtime\cacert.pem"
+goto :eof
 :probe
 set "CAND=%~1"
 set "FMJ="

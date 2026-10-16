@@ -25,6 +25,10 @@ dependencies = [
     "jieba>=0.42",
     "pyvis>=0.3.2",
     "networkx>=3.0",
+    # scipy 是硬依赖：networkx>=3.6 的 pagerank() 无条件走 _pagerank_scipy，
+    # 而 networkx 自己不声明 numpy/scipy。漏了它，图谱面板一调就炸。
+    # 见 requirements.txt 里那段带实测记录的注释。
+    "scipy>=1.10",
 ]
 
 [project.optional-dependencies]

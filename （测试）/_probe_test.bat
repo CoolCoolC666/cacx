@@ -5,6 +5,9 @@ rem instead of on a classmate's machine. Test only -- never shipped.
 rem Run it from a cmd window (the full path contains non-ASCII characters,
 rem so do NOT put that path inside this file -- pass it on the command line).
 rem ASCII only; see the note above.
+rem cd to the project root: case 7 needs to find runtime\python.exe,
+rem which sits one level up from this file.
+cd /d "%~dp0.."
 setlocal
 
 echo ==== case 1: normal PATH (expect a usable PY) ====
@@ -32,6 +35,37 @@ echo ==== case 6: after a missing optional module, can we still continue? ====
 if errorlevel 1 (echo   FAIL interpreter unusable) else (echo   OK   launcher would carry on and start the server)
 echo.
 
+echo ==== case 7: bundled portable runtime (must win over system python) ====
+call :t7
+echo.
+
+goto :eof
+
+:t7
+set "PY="
+set "PYDESC="
+set "PYSEEN="
+set "PYBUNDLED="
+if exist "runtime\python.exe" call :probe_bundle
+if defined PY (echo   OK   bundled runtime wins: PY=[%PY%]  BUNDLED=[%PYBUNDLED%]) else (echo   note  no runtime\ here, launcher would fall back to a system Python)
+if defined PYBUNDLED (
+    echo   SSL_CERT_FILE    =[%SSL_CERT_FILE%]
+    echo   CA bundle        =[%REQUESTS_CA_BUNDLE%]
+    if not exist "runtime\cacert.pem" (echo   FAIL cacert.pem missing) else (echo   OK   cacert.pem present)
+) else (
+    echo   SKIP  no bundled runtime in this checkout
+)
+goto :eof
+
+:probe_bundle
+set "CAND=runtime\python.exe"
+%CAND% -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>nul
+if errorlevel 1 goto :eof
+set "PYBUNDLED=1"
+set "PY=%CAND%"
+set "PYDESC=bundled portable runtime ^(%CAND%^)"
+set "SSL_CERT_FILE=%CD%\runtime\cacert.pem"
+set "REQUESTS_CA_BUNDLE=%CD%\runtime\cacert.pem"
 goto :eof
 
 :mcp_branch

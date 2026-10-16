@@ -37,5 +37,27 @@ pyvis>=0.3.2
 # networkx 2.x 就有的，因此在 3.8 上自动降级解析到的旧版本同样可用。
 networkx>=3.0
 
+# ⚠⚠ scipy 是**硬依赖，不是可选加速**，别当优化删掉。
+#
+# networkx>=3.6 的 pagerank() 无条件派发到 _pagerank_scipy
+# （networkx/algorithms/link_analysis/pagerank_alg.py 第 110 行，
+#  没有任何 if —— 纯 Python 的 _pagerank_python 只剩私有函数），
+# 而 networkx 自己**不声明** numpy/scipy 依赖（它们对 networkx 是可选的）。
+# 于是只装 networkx>=3.0 会得到一个"装得上、pagerank 一调就炸"的环境：
+#     ModuleNotFoundError: No module named 'numpy'
+#   —— 而报错完全不提 networkx，也不提 scipy，很难往依赖上想。
+#
+# 这不是便携运行时带来的新问题，是**一直就少声明**：
+# 开发机碰巧装了 scipy 才没暴露，验收闸又只测 /api/health 和首页、
+# 从没调过 /api/graph/analysis，于是 48 项全绿也漏掉了它。
+# 也就是说：图谱面板在组员机器上是坏的，而图谱是演示的第四个主题。
+#
+# 闸门：`_smoke_analyze.py` 用一张 6 节点小图真调 analyze()，
+#       毫秒级就能抓住这类错（真跑全图要 348 秒）。改依赖后必须跑它。
+# 体积：cp312/win_amd64 下 scipy 36.7 MB + numpy 12.6 MB（压缩后）。
+# 下限写 1.10 而不是 1.11：scipy 1.11 起要求 Python>=3.9，
+# 写 1.10 才能让 3.8 那条路也解析得到东西。
+scipy>=1.10
+
 # 可选：测试
 # pytest>=8.0
