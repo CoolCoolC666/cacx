@@ -33,23 +33,81 @@ def _load_repack_skip():
 
     这样本闸的排除口径**按定义等于**打包脚本的口径 ——
     打包规则改了（哪怕只是把某个 `__` 开头的特判删掉），本闸自动跟着变。
+
+    ⚠ 这里曾经连栽两次，都是"抽常量"这一步本身太脆：
+      ① 硬编码只抽 3 个名字。拆分 DIR_EXCLUDE 之后 skip() 多引用了
+         DIR_EXCLUDE_BY_NAME / DIR_EXCLUDE_BY_PATH / VERBATIM_PREFIXES，
+         literal_eval 过去之后 exec 照样 NameError ——
+         也就是说，改打包规则会让**这个闸自己**先崩，而不是给出结论。
+      ② 无脑 literal_eval，遇到 `DIR_EXCLUDE = A | B` 这种集合并集
+         （ast.BinOp）直接 ValueError: malformed node。
+    所以改成：先抽字面量，再解引用式常量（只认「已知名字的集合并集」），
+    最后**检查 skip() 的自由变量是否齐全**，缺一个就在这里报清楚，
+    而不是等到 exec 里炸一句看不懂的 NameError。
     """
     tree = ast.parse(REPACK.read_text(encoding="utf-8"))
     ns = {"Path": Path}
-    want = ("DIR_EXCLUDE", "FILE_EXCLUDE", "PATTERNS")
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
+    assigns = [n for n in tree.body if isinstance(n, ast.Assign)]
+
+    # 第一轮：纯字面量
+    for node in assigns:
+        for t in node.targets:
+            if getattr(t, "id", None) is None:
+                continue
+            try:
+                ns[t.id] = ast.literal_eval(node.value)
+            except (ValueError, SyntaxError):
+                pass
+
+    # 第二轮：`X = A | B` 这种只由已知名字组成的集合并集
+    # 最多迭代若干轮，容忍定义顺序（PATTERNS 在 FILE_EXCLUDE 后面等）
+    for _ in range(len(assigns) + 1):
+        progressed = False
+        for node in assigns:
             for t in node.targets:
-                if getattr(t, "id", None) in want:
-                    ns[t.id] = ast.literal_eval(node.value)
-        if isinstance(node, ast.FunctionDef) and node.name == "skip":
-            mod = ast.Module(body=[node], type_ignores=[])
-            exec(compile(ast.fix_missing_locations(mod), str(REPACK), "exec"), ns)
-    missing = [k for k in want if k not in ns]
-    if missing or "skip" not in ns:
-        raise SystemExit(f"🔴 从 {REPACK.name} 里抽不出 {missing or ['skip']}，"
-                         f"打包规则改名了 —— 本闸必须跟着改")
-    return ns["skip"], set(ns["DIR_EXCLUDE"])
+                name = getattr(t, "id", None)
+                if name is None or name in ns:
+                    continue
+                if not isinstance(node.value, ast.BinOp):
+                    continue
+                try:
+                    ns[name] = eval(compile(ast.Expression(node.value), "<c>", "eval"),
+                                    {"__builtins__": {}}, dict(ns))
+                    progressed = True
+                except Exception:
+                    continue
+        if not progressed:
+            break
+
+    skip_node = next((n for n in tree.body
+                      if isinstance(n, ast.FunctionDef) and n.name == "skip"), None)
+    if skip_node is None:
+        raise SystemExit(f"🔴 {REPACK.name} 里找不到 skip()，本闸必须跟着改")
+
+    # skip() 里引用了哪些**真正的外部名字**？
+    #   ⚠ 必须把参数名和局部绑定排除掉，否则 d/name/p/rel 这些
+    #     参数与推导式变量会被误判成缺失常量，闸门对着一堆假警报拒绝跑。
+    import builtins
+    a = skip_node.args
+    locals_ = {x.arg for x in (a.args + a.posonlyargs + a.kwonlyargs)}
+    if a.vararg:
+        locals_.add(a.vararg.arg)
+    if a.kwarg:
+        locals_.add(a.kwarg.arg)
+    locals_ |= {n.id for n in ast.walk(skip_node)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    refs = {n.id for n in ast.walk(skip_node)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    missing = sorted(refs - locals_ - set(ns) - set(dir(builtins)))
+    if missing:
+        raise SystemExit(
+            f"🔴 skip() 引用了这几个名字，但没从 {REPACK.name} 里抽到：{missing}\n"
+            f"   闸门必须与打包规则同口径 —— 缺常量就不能继续比，"
+            f"否则本闸会拿一套**过时的**排除规则去核对包，报出假结论。")
+
+    mod = ast.Module(body=[skip_node], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(mod), str(REPACK), "exec"), ns)
+    return ns["skip"], set(ns.get("DIR_EXCLUDE", ()))
 
 
 skip, _DIR_EXCLUDE = _load_repack_skip()

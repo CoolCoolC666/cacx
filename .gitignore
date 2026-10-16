@@ -59,6 +59,13 @@ _[a-z0-9]*.txt
 #   _repack.py：发布打包入口，docs/对接说明/05-R4 把它和 _accept_dist_pack.py
 #   并列写成发版命令；漏掉 = 组员/同伴照文档做，第二步就找不到文件。
 !_repack.py
+#   _probe_verbatim.py：验「runtime/ 下第三方文件逐字节带走」这条豁免。
+#   ⚠ 这条豁免以前只写在 _repack.py 的注释里、代码里从没实现过，
+#     于是 runtime/ 里 636 个第三方文件（numpy/_expired_attrs_2_0.py 等）
+#     被当成本地临时脚本排掉，包内 numpy import 直接炸，而 48 项打包闸全绿。
+#     重打包要 20 多分钟且依赖 8770 在线，所以先用这个离线探针把
+#     「非 .pyc 被误排数」打到 0，再去跑完整流程 —— 探针本身就是工程证据。
+!_probe_verbatim.py
 
 # ---- 测试临时库落点（不该入库，且泄漏时要一眼看得见）----
 # 临时库统一落这里而不是 %TEMP%：C 盘不涨，且泄漏能直接 dir 出来。
@@ -228,6 +235,45 @@ _[a-z0-9]*.txt
 !（测试）/_probe_test.bat
 !（测试）/_sync_pyfloor_docs.py
 !（测试）/_fix_demo_depcount.py
+
+# 便携 Python 运行时（方案 A，2026-10-16）：
+#   让组员零安装就能跑 —— 不需要管理员权限、不需要改 PATH、不需要联网。
+#   本体是 python.org 的 embeddable 包（10.6 MB），加上用
+#   `--python-version 3.12 --platform win_amd64` 解析出来的依赖，约 160 MB。
+# ⚠ **产物不入库，只有 _build_portable_runtime.py 入库**。
+#   二进制 + 一万多个文件进 git 仓库毫无意义，而且它由脚本完全可重建。
+#   同 _export_pack.py 的原则：能重建交付物的脚本入库，产物不入库。
+runtime/
+
+# 运行时体量的取证脚本（算「随包携带运行时」到底要付多少 MB）。
+#   结论：embeddable 本体 10.6 MB + 核心依赖 65.4 MB ≈ 76 MB（不含传递依赖）；
+#   真正打包时是 160 MB，因为 pyvis 会拖进 ipython 等传递依赖 ——
+#   **只按 requirements.txt 里那几个顶层包估体积会低估一倍**。
+!（测试）/_build_portable_runtime.py
+!（测试）/_measure_portable_size.py
+
+# 「依赖声明了但代码用不了」这一类 bug 的取证与闸门（2026-10-16）：
+#   起因是真打 /api/graph/analysis 才炸出
+#     ModuleNotFoundError: No module named 'numpy'
+#   —— networkx>=3.6 的 pagerank() 无条件走 _pagerank_scipy，
+#   而 networkx 自己不声明 numpy/scipy（对它是可选加速）。
+#   于是只写 networkx>=3.0 就会装出一个"装得上、pagerank 一调就炸"的环境。
+#   开发机碰巧装了 scipy 所以隐身，48 项验收闸也因为只测 health 和首页、
+#   从没调过 analysis 而全绿漏掉。**图谱面板在组员机器上一直是坏的。**
+#   _smoke_analyze.py 是修好后的闸，也是这类 bug 的通用防线：
+#     用 6 节点小图**真调** analyze()，毫秒级；
+#     真跑全图要 348 秒。断言还检查"真的出数了"，不只是"没抛异常"。
+#   _nx_pagerank_probe.py —— 查各 networkx 版本的 pagerank 后端，
+#     用来排除"降版本能不能绕过"这个想当然的修法（不能：
+#     3.4.2/3.5/3.6.1 的 pagerank() 全都是无条件派发到 scipy）。
+#   _scipy_cost.py —— 拿真实 wheel 大小算代价，不靠估算。
+#   _analysis_trace.py —— 直接调 _graph_payload 拿 traceback；
+#     服务端 stderr 是 0 字节（500 被异常处理吞了），只打 HTTP 只有一个 500，
+#     没有任何定位价值。
+!（测试）/_smoke_analyze.py
+!（测试）/_nx_pagerank_probe.py
+!（测试）/_scipy_cost.py
+!（测试）/_analysis_trace.py
 
 # ---- 开发归档目录（测试脚本 + 开发期产物）----
 # 测试脚本本身要入库；日志与截图不入库。
