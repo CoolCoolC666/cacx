@@ -197,8 +197,25 @@ check("有 settings.example.json",
       (stage / "config" / "settings.example.json").exists())
 for must in ("README.md", "LICENSE", "CONDUCT.md", "cacx/__main__.py",
              "cacx/web/static/index.html", "requirements.txt",
+             "requirements-mcp.txt",
              "start-cacx.bat"):
     check(f"含 {must}", (stage / must).exists())
+# ⚠ 防回归：mcp 一旦又混回核心依赖，Python 3.8/3.9 的机器会在
+#   `pip install -r requirements.txt` 阶段直接解析失败，
+#   整个网站起不来 —— 而这正是本次拆分要消除的那道门槛。
+#   清单里「含 requirements-mcp.txt」只证明它存在，证明不了它没混进核心那份。
+_req = (stage / "requirements.txt").read_text(encoding="utf-8")
+_req_lines = [ln.strip() for ln in _req.splitlines()
+              if ln.strip() and not ln.strip().startswith("#")]
+check("核心 requirements.txt 里没有 mcp",
+      not any(ln.lower().startswith("mcp") for ln in _req_lines),
+      f"实际声明 {len(_req_lines)} 个包")
+# ⚠ 我第一版还多写了一条 `"mcp" not in 全文`，当场就报 FAIL。
+#   原因是 requirements.txt 的**注释里**提到了 mcp
+#   （"唯一要求 3.10 的是 mcp，已拆到 requirements-mcp.txt"）——
+#   全文匹配把说明文字当成了声明。**断言比现实更严会造出假警报**，
+#   而假警报的真正代价是让人去"修"本来正确的东西。
+#   只认 _req_lines（已剥注释）这一条即可，注释写什么都不该判红。
 check("LICENSE 是纯 MIT",
       (stage / "LICENSE").read_text(encoding="utf-8")
       .rstrip().endswith("DEALINGS IN THE\nSOFTWARE."))
