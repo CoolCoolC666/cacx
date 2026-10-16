@@ -2422,26 +2422,44 @@ class Database:
           （关系/实体表自己没存站点和日期，得 JOIN articles）。
           边列表必须与画布（/api/graph/analysis）同一套口径：
           画布筛了、边列表不筛，两个数字打架。
-          site 空串 = 不筛站点（SQL 里 `? = '' OR a.site = ?` 短路）。
+
+        ⚠⚠ site **支持逗号分隔多站**，与筛选栏的多选一致
+          （同 list_relations 的写法）。
+          这里原先只有 `(? = '' OR a.site = ?)` 单站比较，而前端
+          gpQuery() 把勾选的站点 join(',') 传进来。站点复选框默认
+          **全勾**，于是首屏默认就是 site="cac,zjwx" —— SQL 拿它去比
+          `a.site = 'cac,zjwx'`，永远匹配不到任何行，返回 0 节点 0 边。
+          而画布走 /api/graph/analysis（那边支持多站）照常出图，
+          于是页面就成了「画布有 300 节点/1482 边、边列表却写着
+          没有关系数据」，且两个接口都返回 200、不报任何错。
+          site 空串 = 不筛站点。
         """
+        # 逗号分隔的多站拆成 IN (...)；空串表示不筛
+        ss = [s.strip() for s in str(site or "").split(",") if s.strip()]
+        if ss:
+            site_sql = "a.site IN (%s)" % ",".join("?" * len(ss))
+            site_args = list(ss)
+        else:
+            site_sql = "1=1"
+            site_args = []
         with self._lock:
             nodes = [dict(r) for r in self.conn.execute(
                 "SELECT r.type, r.name, COUNT(*) n "
                 "FROM entities r JOIN articles a ON a.id = r.article_id "
-                "WHERE (? = '' OR a.site = ?) "
+                "WHERE " + site_sql + " "
                 "AND a.pub_day >= ? AND a.pub_day <= ? "
                 "GROUP BY r.type, r.name ORDER BY n DESC LIMIT ?",
-                (site, site, date_from, date_to, int(limit)))]
+                tuple(site_args + [date_from, date_to, int(limit)]))]
             edges = [dict(r) for r in self.conn.execute(
                 "SELECT r.src_name, r.dst_name, r.rel_type, COUNT(*) n, "
                 "GROUP_CONCAT(r.article_id) article_ids, "
                 "SUM(r.weight) weight "
                 "FROM relations r JOIN articles a ON a.id = r.article_id "
-                "WHERE (? = '' OR a.site = ?) "
+                "WHERE " + site_sql + " "
                 "AND a.pub_day >= ? AND a.pub_day <= ? "
                 "GROUP BY r.src_name, r.dst_name, r.rel_type "
                 "ORDER BY n DESC LIMIT ?",
-                (site, site, date_from, date_to, int(limit)))]
+                tuple(site_args + [date_from, date_to, int(limit)]))]
         for e in edges:
             e["article_ids"] = [int(x) for x in (e.get("article_ids") or "").split(",") if x]
         return {"nodes": nodes, "edges": edges}
