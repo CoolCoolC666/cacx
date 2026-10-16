@@ -638,9 +638,11 @@ GitHub: https://github.com/CoolCoolC666/cacx  （已开源，MIT）
      （路径含特殊字符会让 .bat 脚本出错，这是 Windows 的老毛病）
 
   2) 双击 启动cacx.bat（和 start-cacx.bat 效果相同）
-     自动装依赖 → 起服务 → 自动开浏览器
-     需要 Python 3.10+，安装时务必勾选 "Add Python to PATH"
+     **什么都不用装。** 它会先看你的机器：
+       · 本机有 Python 3.10+ 且能联网  → 用你的 Python，自动装依赖
+       · 否则                          → 用本包自带的 runtime\\，不联网也能跑
      关闭黑色命令行窗口 = 关闭服务
+     （想省事又不想装 Python：什么都不做，直接双击即可）
 
   3) 浏览器打开 http://127.0.0.1:8770/
 
@@ -726,6 +728,20 @@ GitHub: https://github.com/CoolCoolC666/cacx  （已开源，MIT）
   · 想保留原始数据做对照 → 先复制一份再改
   · 想从零开始 → 删掉 data/cacx.db，然后 python -m cacx sync
 """, encoding="utf-8")
+
+# ⚠ 这里也查一遍「说法」，而不是只在验收闸里查。
+#   本包的启动优先级改过一次：现在是「本机 Python 3.10+ 且能联网就用本机
+#   并装依赖，否则用自带 runtime」。README 若还写着「需要 Python 3.10+，
+#   安装时务必勾选 Add Python to PATH」，就是在教组员做一件**根本不需要做**
+#   的事，还会让人以为不装 Python 就跑不起来 —— 恰好是随包携带运行时要
+#   消灭的那个印象。数字哨兵盯不住说法，所以这条只能用子串匹配。
+# ⚠ 用的是**写完后读回来的文本**，不是 write_text 的返回值 ——
+#   write_text 返回的是写入的字符数(int)，直接拿去 `in` 一下就是
+#   "argument of type 'int' is not iterable"。
+_rt = (stage / "【组员请先看】README.txt").read_text(encoding="utf-8")
+for _claim in ("需要 Python 3.10+", 'Add Python to PATH"'):
+    check(f"README.txt 无过期说法「{_claim}」", _claim not in _rt)
+check("README.txt 说清了「不用装也能跑」", "什么都不用装" in _rt and "runtime" in _rt)
 
 print()
 print("=" * 66)
