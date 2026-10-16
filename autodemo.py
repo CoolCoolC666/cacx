@@ -33,6 +33,8 @@
 import argparse
 import ast
 import json
+import shutil
+import subprocess
 import sys
 import time
 import urllib.request
@@ -44,6 +46,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "（测试）" / "演示产物"
 SHOT = OUT / "截图"
+# ⚠ 录像单独一个文件夹，别跟截图/凭据混在一起：
+#   交付时要的是「一段视频」，混在演示产物根目录里容易被当成临时文件。
+VID = OUT / "录像"
 BASE = "http://127.0.0.1:8770/"
 
 # 字幕层样式：挂在页面**顶部**，不干扰任何既有元素
@@ -186,14 +191,17 @@ class Ledger:
         required = [
             ("服务健康", "服务起没起"),
             ("图已加载", "关系图谱画出来没有"),
-            ("备选一证据", "第一条边的证据条数"),
-            ("备选一有原文链接", "老师点名要看的原文链接"),
-            ("备选一含两端主体", "证据里两端机构名都在不在"),
-            ("备选二证据", "第二条边的证据条数"),
-            ("备选二有原文链接", "第二条边的原文链接"),
+            ("边①证据", "第一条边的证据条数"),
+            ("边①有原文链接", "老师点名要看的原文链接"),
+            ("边①含两端主体", "证据里两端机构名都在不在"),
+            ("边②证据", "第二条边的证据条数"),
+            ("边②有原文链接", "第二条边的原文链接"),
             ("字幕已渲染", "观众看不看得见讲稿"),
             ("字幕不遮挡证据", "字幕有没有把证据面板盖住"),
             ("时间轴已滚到位", "讲发现时屏幕上有没有图"),
+            ("发现①执法关系条数", "涉执法机关关系的条数"),
+            ("发现①执法关系全是联合发文", "是不是全为联合发文"),
+            ("发现①央地关系条数", "央地关系条数"),
             ("步数自洽", "字幕显示的第 N/M 步有没有越界"),
         ]
         bad = []
@@ -273,6 +281,8 @@ def run(args):
 
     OUT.mkdir(parents=True, exist_ok=True)
     SHOT.mkdir(parents=True, exist_ok=True)
+    if args.video:
+        VID.mkdir(parents=True, exist_ok=True)
     for old in SHOT.glob("*.png"):
         old.unlink()
     # ⚠ 凭据必须**开跑前就删掉**：否则上次跑成功留下的文件
@@ -289,7 +299,7 @@ def run(args):
         )
         ctx = br.new_context(
             viewport={"width": 1600, "height": 900},
-            record_video_dir=str(OUT) if args.video else None,
+            record_video_dir=str(VID) if args.video else None,
             locale="zh-CN",
         )
         pg = ctx.new_page()
@@ -397,13 +407,18 @@ def run(args):
             "不是全量。图谱页把口径直接写在图旁边，就是为了不让人误读。",
             hold=6)
 
-        # ---------------------------------------------------------- 3 备选①
-        e1 = evidence("中央网信办", "农业农村部")
+        # ---------------------------------------------------------- 3 边①
+        # 2026-10-16 改：边① 由「中央网信办↔农业农村部」换成
+        # **「中央网信办 ↔ 山西省委网信办」** —— 这是**中央与地方网信办**
+        # 的关系，正是重写后报告 §3.4 专节讲的那件事。
+        # 旧边（农业农村部）演示的是「部委之间的横向协作」，
+        # 撑不起新的报告主线；换边后讲稿、报告、结论是同一件事。
+        e1 = evidence("中央网信办", "山西省委网信办")
         n1 = len(e1)
-        book.mark("备选一证据", n1 > 0, f"{n1} 条")
-        say(f"    备选① 证据 {n1} 条")
+        book.mark("边①证据", n1 > 0, f"{n1} 条")
+        say(f"    边① 证据 {n1} 条")
 
-        call1 = ("showEdgeEvidence('中央网信办','农业农村部','joint_issue')")
+        call1 = "showEdgeEvidence('中央网信办','山西省委网信办','joint_issue')"
         pg.evaluate(call1)
         pg.wait_for_function(
             """() => /条原文证据/.test(
@@ -414,36 +429,37 @@ def run(args):
         # 记账而不是直接抛：先记下来，最后核账统一算总账。
         # 直接抛的问题是 —— 只要这一行被人改成 if False，
         # 整个保险就没了，而平时根本看不出来。
-        book.mark("备选一有原文链接", "打开原文" in det,
+        book.mark("边①有原文链接", "打开原文" in det,
                   "有" if "打开原文" in det else "缺 —— 老师点名要看这个")
-        book.mark("备选一含两端主体",
-                  "中央网信办" in det and "农业农村部" in det)
+        book.mark("边①含两端主体",
+                  "中央网信办" in det and "山西省委网信办" in det)
         focus_detail()
         # 「字幕不遮挡证据」已改为在 cap() 里**每一步**判字幕位置，
         # 这里不再重复判一次 —— 两处判据不一致时，
         # 就会出现「一处说不挡、另一处说挡」的矛盾结论。
-        shot("备选一_证据")
+        shot("边①_证据")
 
-        cap("点边 ①", "中央网信办 ↔ 农业农村部（联合发文）",
-            f"这条边有 <b>{n1} 条原文证据</b>。",
-            "看第一句原文——"
-            "「<b>中央网信办、农业农村部、工业和信息化部联合印发"
-            "《数字乡村高质量发展行动计划（2026—2030年）》</b>」。<br>"
-            "这条边<b>不是我们连线连出来的</b>，是原文里三个部委并列署名。"
-            "也就是说：<b>网信办在这个网络里是牵头协调方，"
-            "具体落地在农业农村部。</b><br>"
-            "下面每条证据都能点「打开原文」跳到 cac.gov.cn 原页面。", hold=11)
+        cap("点边 ①", "中央网信办 ↔ 山西省委网信办（联合发文）",
+            f"这条边的两端，一个是<b>中央网信办</b>，"
+            f"一个是<b>地方</b>的浙江省委网信办——"
+            f"就是我们报告里专门讲了一节的关系。",
+            f"它全部的 <b>{n1} 条原文证据</b>在这儿。看这一条——"
+            "「<b>本次活动由中央网信办、司法部共同指导，贵州、北京、河南、"
+            "甘肃、山西省委网信办和司法厅（局）联合主办</b>……」。<br>"
+            "请注意这条原文的性质：<b>是活动共同主办、共同指导，"
+            "不是两个网信办一起发一份文件。</b>", hold=12)
 
-        cap("点边 ①", "证据不止一条",
-            f"这 <b>{n1} 条</b>证据<b>跨 2024、2025、2026 三年</b>，"
-            "而且 cac 和 zjwx <b>两个站都转载过</b>。",
-            "意思是：<b>您把日期筛到哪一年，这条边都点得到。</b><br>"
-            "顺带一提，列表第二条就是那句"
-            "「<b>七部门</b>联合印发《促进数字化绿色化协同转型发展实施方案》」——"
-            "这句我们<b>没有</b>当成「七部门联合发文」写进报告，"
-            "只按同句共现记，因为<b>共现不等于联合发文</b>。", hold=11)
+        cap("点边 ①", "把这类关系全部数一遍",
+            "我把全库这样查了一遍：中央网信办和<b>任何一个省级网信办</b>"
+            "之间的这类关系，",
+            "2024 年以来<b>一共只有 14 条</b>，逐条看完——"
+            "<b>全部是活动或会议层面的共办，"
+            "没有一条是政策文件联合印发。</b><br>"
+            "所以中央和地方网信办之间<b>不是平行的横向协作</b>，"
+            "而是「<b>中央定规则、地方抓落实</b>」的纵向传导。"
+            "这条边就是那个结论的正面证据。", hold=13)
 
-        # ---------------------------------------------------------- 4 备选②
+        # ---------------------------------------------------------- 4 边②
         cap("点边 ②", "换一个关系类型",
             "刚才那条是「<b>谁和谁一起出现</b>」，"
             "这条是「<b>谁发的文</b>」——"
@@ -451,8 +467,10 @@ def run(args):
             "连着点两条，正好把「图上不止一种线」讲清楚，"
             "而不是两次都在演示同一件事。", hold=5)
 
-        call2 = ("showEdgeEvidence('国家网信办',"
-                 "'网络数据安全风险评估办法','issue')")
+        # 边② 选 `公安部 ↔ 个人信息保护法`：第 17 行、证据 26 条，
+        # 比旧的备选②（`国家网信办 ↔ 网络数据安全风险评估办法`，
+        # 只有 3 条证据且节点度 6，边列表里还排在取不到的位置）结实得多。
+        call2 = "showEdgeEvidence('公安部','个人信息保护法','issue')"
         pg.evaluate(call2)
         try:
             pg.wait_for_function(
@@ -460,6 +478,8 @@ def run(args):
                        document.getElementById('gp_detail')?.textContent||'')""",
                 timeout=25000)
         except Exception:
+            # 兜底边：工业和信息化部（日期框内 64 条、证据更多），
+            # 失败时自动切，不中断演示，也不在台上现场排查。
             call2b = ("showEdgeEvidence('中央网信办',"
                       "'工业和信息化部','joint_issue')")
             pg.evaluate(call2b)
@@ -469,32 +489,32 @@ def run(args):
                 timeout=60000)
             n2 = len(evidence("中央网信办", "工业和信息化部"))
             det_fb = pg.inner_text("#gp_detail")
-            book.mark("备选二证据", n2 > 0, f"兜底边 {n2} 条")
-            book.mark("备选二有原文链接", "打开原文" in det_fb)
+            book.mark("边②证据", n2 > 0, f"兜底边 {n2} 条")
+            book.mark("边②有原文链接", "打开原文" in det_fb)
             cap("点边 ②", "中央网信办 ↔ 工业和信息化部（兜底边）",
-                f"备选② 这次没打开，<b>自动切到兜底边</b>，"
+                f"边② 这次没打开，<b>自动切到兜底边</b>，"
                 f"这条有 <b>{n2} 条证据</b>。",
                 "现场就是这样：<b>主边失效要能立刻换</b>，"
                 "不要当着老师的面排查。", hold=8)
             focus_detail()
-            shot("备选二_兜底")
+            shot("边②_兜底")
             call2 = None
         else:
             det2 = pg.inner_text("#gp_detail")
             n2 = int(__import__("re").search(r"(\d+) 条原文证据", det2).group(1))
-            book.mark("备选二证据", n2 > 0, f"{n2} 条")
-            book.mark("备选二有原文链接", "打开原文" in det2)
-            cap("点边 ②", "国家网信办 ↔ 网络数据安全风险评估办法（发布）",
-                "原文在这儿——「<b>6月18日，国家网信办、工业和信息化部、公安部"
-                "联合公布《网络数据安全风险评估办法》（以下简称《办法》），"
-                "自2026年8月20日起施行</b>」。",
-                f"这条有 <b>{n2} 条证据</b>。"
-                "您注意最后那句——<b>还带施行日期</b>。<br>"
-                "这说明我们的关系不是停在图上，<b>能一路追回原文，"
-                "连时间线都对得上</b>。<br>"
-                "而且回溯是纯读操作，不扫正文，<b>点开是秒开的</b>。", hold=12)
+            book.mark("边②证据", n2 > 0, f"{n2} 条")
+            book.mark("边②有原文链接", "打开原文" in det2)
+            cap("点边 ②", "公安部 ↔ 个人信息保护法（发布）",
+                "原文在这儿——「<b>近日，国家网信办、公安部联合公布"
+                "《小型个人信息处理者个人信息保护简化措施规定》</b>……」。",
+                f"这条有 <b>{n2} 条证据</b>。请注意「<b>联合公布</b>」四个字——"
+                "这句正好接上我等下要讲的发现：<br>"
+                "<b>文本里从来没有一句「中央网信办查处了谁」，"
+                "它和执法机关的关系全部是「一起发文」。</b><br>"
+                "每条证据都能点「打开原文」跳回原页面，回溯是纯读操作、秒开。",
+                hold=12)
             focus_detail()
-            shot("备选二_证据")
+            shot("边②_证据")
 
         # ---------------------------------------------------------- 5 聚焦
         cap("聚焦", "换个口径看介数",
@@ -546,6 +566,80 @@ def run(args):
                    "nocontainer": "找不到时间轴容器"}[tl_vis])
         shot("时间轴")
 
+        # ---------------------------------------------------------- 6 发现
+        # 2026-10-16 改：发现由「生成式 AI 迁移」换成
+        # **「中央网信办在文本里从不单独执法」** ——
+        # 与刚点过的两条边、报告 §3.3 严丝合缝。
+        # 生成式 AI 趋势降为下面的「发现 ②」备用段（老师问趋势才讲）。
+        #
+        # ⚠ 下面这些数**一律现取**，不写死：项目原则是
+        # 「结果永远一致、可当场重跑」。数据重抽一次，字幕自动跟着变。
+        _C = ("中央网信办", "国家互联网信息办公室", "国家网信办")
+        _W = "a.pub_date >= '2024-01-01'"
+
+        def _q(sql, *p):
+            import sqlite3
+            _db = sqlite3.connect("file:" + urllib.request.pathname2url(
+                str(ROOT / "data" / "cacx.db")) + "?mode=ro", uri=True)
+            try:
+                return _db.execute(sql, p).fetchone()[0]
+            finally:
+                _db.close()
+
+        _ph = ",".join("?" * len(_C))
+        _WR = ("relations r JOIN articles a ON a.id=r.article_id WHERE " + _W)
+        _enf = ("((r.src_name LIKE '%公安部%' OR r.dst_name LIKE '%公安部%') OR "
+                "(r.src_name LIKE '%市场监管%' OR r.dst_name LIKE '%市场监管%'))")
+        enf_all = _q("SELECT COUNT(*) FROM " + _WR +
+                     " AND (r.src_name IN (" + _ph + ") OR r.dst_name IN (" + _ph +
+                     ")) AND " + _enf, *_C, *_C)
+        enf_other = _q("SELECT COUNT(*) FROM " + _WR +
+                       " AND r.rel_type<>'joint_issue' "
+                       "AND (r.src_name IN (" + _ph + ") OR r.dst_name IN (" + _ph +
+                       ")) AND " + _enf, *_C, *_C)
+        prov = _q("SELECT COUNT(*) FROM " + _WR +
+                  " AND r.rel_type='joint_issue' "
+                  "AND (r.src_name IN (" + _ph + ") OR r.dst_name IN (" + _ph +
+                  ")) AND (r.src_name LIKE '%省委网信办%' "
+                  "OR r.dst_name LIKE '%省委网信办%' "
+                  "OR r.src_name LIKE '浙江省委%' OR r.dst_name LIKE '浙江省委%')",
+                  *_C, *_C)
+        c_issue = _q("SELECT COUNT(*) FROM " + _WR + " AND r.rel_type='issue' "
+                     "AND (r.src_name IN (" + _ph + ") OR r.dst_name IN (" + _ph +
+                     "))", *_C, *_C)
+        c_joint = _q("SELECT COUNT(*) FROM " + _WR +
+                     " AND r.rel_type='joint_issue' "
+                     "AND (r.src_name IN (" + _ph + ") OR r.dst_name IN (" + _ph +
+                     "))", *_C, *_C)
+
+        # 这条发现的全部说服力都在「两处都等于预期值」上：
+        # 只要执法机关那一侧混进一条非 joint_issue，发现就不成立。
+        book.mark("发现①执法关系条数", enf_all == 74, f"实测 {enf_all} 条")
+        book.mark("发现①执法关系全是联合发文", enf_other == 0,
+                  f"实测 {enf_other} 条非 joint_issue")
+        book.mark("发现①央地关系条数", prov == 14, f"实测 {prov} 条")
+
+        cap("发现 ①", "中央网信办在文本里从不单独执法",
+            "这是我讲的一个发现，是<b>用数据查出来的</b>。",
+            f"我把 2024 年以来<b>所有</b>涉及公安部、市场监管总局的关系都拉出来数，"
+            f"一共 <b>{enf_all} 条</b>，逐条看了关系类型——"
+            f"<b>{enf_all} 条全部是「联合发文」</b>；"
+            f"把查处、约谈、处罚这类动作<b>直接记在中央网信办名下的，"
+            f"是 {enf_other} 条</b>。<br>"
+            f"刚才点开那条边就是这个意思：原文写的是"
+            f"「<b>联合公布</b>」，不是「中央网信办查处了」。", hold=14)
+
+        cap("发现 ②", "跟地方网信办也是同一个道理",
+            "再往下一层，它和<b>地方</b>网信办也一样。",
+            f"中央网信办和任一省级网信办之间的联合类关系，"
+            f"2024 年以来一共只有 <b>{prov} 条</b>，"
+            f"而这 {prov} 条<b>全部是活动共办，没有一条是政策文件联合印发</b>。<br>"
+            f"所以它在协作网络里的角色是"
+            f"<b>规则制定者 + 议题召集者</b>："
+            f"自己发文件定规则（{c_issue} 条），"
+            f"联合发文召集部委协同（{c_joint} 条），"
+            f"<b>执行环节落在工业和信息化部、公安部这些主管部门手里</b>。", hold=14)
+
         tl = jget("/api/panel/timeline")
         yrs = {}
         for m in tl["months"]:
@@ -563,32 +657,13 @@ def run(args):
             return round(100 * c[k] / sum(c.values()), 1)
 
         g24, g25, g26 = pct("2024", "生成式AI"), pct("2025", "生成式AI"), pct("2026", "生成式AI")
-        firsts = []
-        for x in tl["themes"]:
-            c = x.get("problems") or {}
-            if c:
-                best = max(c.items(), key=lambda kv: kv[1])
-                if best[0] == "生成式AI":
-                    firsts.append(x["month"])
 
-        cap("发现 ①", "治理重点在往生成式 AI 迁移",
-            f"这是我讲的一个发现：<b>生成式 AI 相关议题的占比，"
-            f"连续三年往上走</b>。",
-            f"按年看：<b>2024 年 {g24}% → 2025 年 {g25}% → 2026 年 {g26}%</b>。<br>"
-            f"更有意思的是：在 <b>34 个月</b>的月度对比里，生成式 AI "
-            f"<b>只有 {len(firsts)} 个月</b>排到当月第一，"
-            f"而且这两次都在最近 14 个月内"
-            f"（{firsts[0] if firsts else '—'}、"
-            f"{firsts[1] if len(firsts) > 1 else '—'}）。<br>"
-            "同期个人信息保护已从 2025 年的高位回落，"
-            "说明议题结构正在<b>适度倾斜</b>。", hold=13)
-
-        cap("发现 ②", "但这个数是粗筛，讲的时候要带口径",
-            "这条曲线是<b>关键词粗筛</b>出来的。",
-            "⚠ <b>一篇可能命中多类</b>，所以每个月各主题相加会超过当月文章数。"
-            "<b>用来讲趋势可以，别当精确统计引用。</b><br>"
-            "图上把这个口径直接标出来了——我们宁可把限制写明白，"
-            "也不想让人拿一个漂亮的错数字去引用。", hold=9)
+        cap("备用", "如果老师问趋势（可跳过）",
+            f"顺带看时间轴：{yr_txt}，<b>每年 9 月是峰值月</b>。",
+            f"主题在换挡：生成式 AI 占比 <b>{g24}% → {g25}% → {g26}%</b>，"
+            f"三年连续上升。<br>"
+            "⚠ 这个数是<b>关键词粗筛</b>：分母是当年被关键词命中的文章数，"
+            "<b>一篇可能命中多类</b>，用来讲趋势可以，别当精确统计引用。", hold=10)
 
         # ---------------------------------------------------------- 7 零 CDN
         cap("切页", "零依赖导出",
@@ -611,23 +686,27 @@ def run(args):
         # ---------------------------------------------------------- 9 局限
         cap("收尾", "我们知道的局限",
             "最后说三条，<b>不藏着</b>。",
-            "<b>第一</b>，「同句共现」不等于「联合发文」——"
-            "七部门那句我们就没当成联合发文记。<br>"
+            "<b>第一</b>，<b>联合发文是设了触发词门槛的</b>"
+            "（联合印发/会同/联发），命中触发词不等于事实认定——"
+            "所以我们只说「文本里是这么写的」，<b>不下事实定论</b>。<br>"
             "<b>第二</b>，关系只覆盖 <b>4432 篇里的 1201 篇，27.1%</b>。"
             "所以我们的结论是「<b>在能被观测到协作的 27.1% 里，"
-            "网信办居中协调</b>」，不是「网信办居中协调」——"
+            "中央网信办居中协调</b>」，不是「中央网信办居中协调」——"
             "<b>分母不一样，结论强度差很多。</b><br>"
-            "<b>第三</b>，主题分类是关键词粗筛；AI 主题标注做成旁路，"
-            "<b>没跑完就不拿它的结果当结论</b>。", hold=15)
+            "<b>第三</b>，实体名<b>没有归一</b>：泛称「网信办」和"
+            "「中央网信办」并存，浙江站里地方本名只出现 35 次——"
+            "所以地方网信办在数据里<b>几乎无法被独立识别</b>，"
+            "我们的中央—地方结论是<b>定性判断，不是计数结论</b>。", hold=16)
 
         # ---------------------------------------------------------- 10 收
         cap("收尾", "结论",
-            "<b>在能被观测到协作的 27.1% 文本中，"
-            "网信办是「规则制定者 + 议题召集者」。</b>",
-            "它以牵头署名连接十余个部门，在聚焦子网中桥接能力远高于同侪，"
-            "但<b>不承担具体执行</b>——执行落在工信部、公安部等主管部门。<br><br>"
+            "<b>中央网信办是「规则制定者 + 议题召集者」："
+            "定规则、召集部委，不单独执法；"
+            "对地方是授权指导，不是平行联合发文。</b>",
+            "它以牵头署名连接十余个部门，在聚焦子网中桥接能力远高于同侪；"
+            "与执法机关、与地方网信办的关系<b>都是「一起做事」而非「我来做」</b>。<br><br>"
             "我们把每条关系、每个数字的口径和分母都摊开："
-            "<b>工具给的是候选与线索，判断权在使用者手里。</b>", hold=12)
+            "<b>工具给的是候选与线索，判断权在使用者手里。</b>", hold=13)
 
         # 最后一帧留久一点，方便录屏收尾
         time.sleep(3 * args.slow)
@@ -659,16 +738,59 @@ def run(args):
         ctx.close()
         br.close()
         if video:
-            vpath = Path(video.path())
+            vpath = finalize_video(Path(video.path()))
 
     return t0, vpath
+
+
+def finalize_video(raw: Path) -> Path:
+    """把 Playwright 吐出来的 page@<hash>.webm 收成可交付的录像。
+
+    为什么必须多这一步：Playwright 的原始文件名是 `page@<24位hash>.webm`，
+    带录像的人**分不清哪一段是哪一段**，交作业等于没交。
+    所以统一改名成 `cacx-演示-YYYYMMDD-HHMMSS.webm`。
+
+    有 ffmpeg 就再转一份 mp4（老师那边双击 mp4 比 webm 省事）；
+    没有就只给 webm —— 不能因为缺 ffmpeg 就判定演示失败。
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stem = f"cacx-演示-{stamp}"
+
+    webm = raw.with_name(stem + raw.suffix)
+    if webm != raw:
+        if webm.exists():
+            webm.unlink()
+        raw.replace(webm)
+
+    ff = shutil.which("ffmpeg")
+    if not ff:
+        print(f"   （未找到 ffmpeg，只保留 webm；要 mp4 可自备 ffmpeg 后"
+              f"执行：ffmpeg -i \"{webm.name}\" \"{stem}.mp4\"）")
+        return webm
+
+    mp4 = webm.with_suffix(".mp4")
+    # -y 覆盖；-hide_banner -loglevel error 只留报错，免得刷屏
+    p = subprocess.run(
+        [ff, "-y", "-hide_banner", "-loglevel", "error",
+         "-i", str(webm), "-c:v", "libx264", "-preset", "veryfast",
+         "-crf", "26", "-pix_fmt", "yuv420p", str(mp4)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if p.returncode == 0 and mp4.exists() and mp4.stat().st_size > 0:
+        webm.unlink()          # mp4 成了就别留两份，避免交错
+        return mp4
+    print(f"   ⚠ mp4 转换失败，仍用 webm：{(p.stderr or '').strip()[:200]}")
+    return webm
 
 
 def main():
     ap = argparse.ArgumentParser(description="cacx 全自动 5 分钟演示")
     ap.add_argument("--slow", type=float, default=1.0,
-                    help="每个字幕停留倍率（1.0=约 5 分钟；1.5=放慢讲解）")
-    ap.add_argument("--video", action="store_true", help="录屏，输出 webm")
+                    help="每个字幕停留倍率。实测 --slow 1.0 全程约 3 分钟；"
+                         "要凑满 5 分钟用 --slow 1.7（1.5=略慢讲解）")
+    ap.add_argument("--video", action="store_true",
+                    help="录屏 -> （测试）/演示产物/录像/cacx-演示-<时间戳>.webm"
+                         "（有 ffmpeg 则另存 mp4）")
     ap.add_argument("--headless", action="store_true",
                     help="后台跑不弹窗（默认弹出真实窗口，投屏用）")
     args = ap.parse_args()
@@ -676,6 +798,8 @@ def main():
     print("=" * 66)
     print("cacx · 全自动 5 分钟演示")
     print(f"  目标 {BASE}   截图 -> {SHOT}")
+    if args.video:
+        print(f"  录像 -> {VID}")
     print("=" * 66)
     check_health()
 
