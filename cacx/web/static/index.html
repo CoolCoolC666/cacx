@@ -2334,9 +2334,26 @@ async function loadGraph(){
     //   analysis 专用参数；/api/graph 路由只声明 site/date_from/date_to/limit，
     //   FastAPI 自动忽略未知参数，对边列表无害。gpQuery() 自带 limit=300
     //   （与 renderEdges 只渲前 300 行一致），这里不再单独拼 limit。
-    const g = await fetch('/api/graph?' + gpQuery()).then(x=>x.json());
-    GP_CACHE = g.edges || [];
-    renderEdges();
+    const gres = await fetch('/api/graph?' + gpQuery());
+    const g = await gres.json();
+    // ⚠⚠ 这里以前是 `.then(x=>x.json())` —— **不看 HTTP 状态码**。
+    //   /api/graph 一旦 4xx/5xx，返回体是 {"detail": [...]}，
+    //   g.edges 是 undefined → GP_CACHE=[] → renderEdges() 写下
+    //   「还没有关系数据」。而画布走的是**另一个请求**
+    //   (/api/graph/analysis)，它成功就照画 ——
+    //   于是症状正好是「图有 300 节点/1482 边、边列表却说没有数据」，
+    //   **页面上没有任何报错、控制台也是空的**，极难定位。
+    //   失败必须说出来，不能伪装成「本来就没数据」。
+    if(!gres.ok || !Array.isArray(g.edges)){
+      const why = g && g.detail
+        ? JSON.stringify(g.detail).slice(0,140) : '响应里没有 edges 字段';
+      GP_CACHE = [];
+      renderEdges(`边列表加载失败（HTTP ${gres.status}）：${why}　` +
+                  '<span style="opacity:.75">点上方「刷新」重试</span>');
+    }else{
+      GP_CACHE = g.edges;
+      renderEdges();
+    }
   }catch(e){
     $('gp_stat').innerHTML =
       `<span style="color:var(--warn)">${esc(e.message||e)}</span>`;
@@ -2791,10 +2808,14 @@ function showEdgeEvidence(src, dst, relType){
     });
 }
 
-function renderEdges(){
+function renderEdges(errMsg){
   if(!GP_CACHE.length){
-    $('gp_edges').innerHTML = '<div class="dim">还没有关系数据</div>';
     $('gp_cnt2').textContent = '';
+    // 区分「没数据」和「取数失败」：两者症状原本长得一模一样，
+    // 会把人引去查数据，而真实原因常常只是这一个请求挂了。
+    $('gp_edges').innerHTML = errMsg
+      ? `<div style="color:var(--err);font-size:12.5px;line-height:1.8">${errMsg}</div>`
+      : '<div class="dim">当前筛选条件下没有关系</div>';
     return;
   }
   const label = GP_REL_CN;
