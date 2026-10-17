@@ -735,7 +735,8 @@ def api_panel_ai_themes(req: ThemeReq):
         return {"error": "已有主题标注任务在跑", "state": dict(_AI_THEME_STATE)}
     try:
         cfg = _cfg()
-        if ai_build(cfg, task="theme") is None:
+        prov = ai_build(cfg, task="theme")
+        if prov is None:
             return {"error": "AI 未配置：请在设置里填好 API 后再试"}
         where, args = ["pub_day>=?", "pub_day<=?",
                        "COALESCE(content_empty,0)=0"], [dfrom, dto]
@@ -776,9 +777,18 @@ def api_panel_ai_themes(req: ThemeReq):
                         _AI_THEME_STATE["log"].append(
                             f"第{i//n+1}批 有 id 无法对齐，已跳过：{aid}")[:200]
                         continue
+                    # ⚠⚠ 原来这里写的是 `model=str(cfg.get("model", ""))` ——
+                    #   cfg 是**整个配置**（cfg["ai"] 才是 AI 那段），所以
+                    #   cfg.get("model") 永远是空，落库的 provider/model 两列全空。
+                    #   症状很隐蔽：标注**照常成功**、覆盖照常涨（实测就填了 1 篇），
+                    #   只是事后追溯「这批是哪家哪个模型标的」查不到 ——
+                    #   一批数据只要标错模型就再也说不清了。
+                    #   取 prov 的属性而不是回读配置：build 支持 task 级覆盖，
+                    #   prov 里的才是**实际生效**的那个模型。
                     d.save_annotation(real, "theme",
                                       json.dumps(themes, ensure_ascii=False),
-                                      model=str(cfg.get("model", "")))
+                                      provider=getattr(prov, "name", ""),
+                                      model=getattr(prov, "model", ""))
                     done += 1
                 dropped += res.get("dropped", 0) if isinstance(res, dict) else 0
             except Exception as e:      # 单批失败不拖垮整轮
