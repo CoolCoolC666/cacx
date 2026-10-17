@@ -284,7 +284,21 @@ if defined OLD_PID (
     if errorlevel 2 (
         echo Opening browser for the running service.
         start "" "http://127.0.0.1:8770/"
-        timeout /t 3 >nul
+        echo.
+        echo   cacx is ALREADY RUNNING as PID %OLD_PID%. Nothing was started
+        echo   and nothing was stopped. The page above is the live site.
+        echo.
+        echo   Leave this window alone -- closing it does NOT stop that
+        echo   service. To stop it for real, close the window that is
+        echo   running it, or run:  taskkill /f /pid %OLD_PID%
+        echo.
+        rem No 'timeout' here on purpose: 'timeout' reads stdin
+        rem and fails with "Input redirection is not supported" the moment
+        rem this bat runs with stdin redirected -- which is how it gets run
+        rem when a human pipes a keypress in. 'pause' already gives the
+        rem browser time to come up AND holds the window, so the timeout was
+        rem a second mechanism doing the same job with the worse failure.
+        pause
         exit /b 0
     )
     taskkill /f /pid %OLD_PID% >nul 2>nul
