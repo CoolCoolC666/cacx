@@ -12,9 +12,23 @@
     「网信办度数第一」只能说明它出现最多，
     **介数**才能说明它在部门协作中居中协调 —— 而这才是权责边界的论据。
 """
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 LOUVAIN_SEED = 42  # 锁死随机性，否则同数据两次跑社区划分不一致
+
+#: analyze() 的阶段名 -> 给界面看的中文说明 + 大致占比权重。
+#: ⚠ 权重是**按全库口径实测**估的，不是 networkx 给的进度 ——
+#:   它压根没有进度回调。betweenness 独占绝大部分，所以界面上
+#:   「介数中心性」那一步会停很久，这是正常的，不是卡死。
+#:   权重只用来让界面显示一个粗略的「大概到第几步」，
+#:   **不能当成精确百分比对外承诺**，所以前端文案写「约」。
+STAGE_LABELS = {
+    "degree":       ("读图与度数",     1),
+    "betweenness":  ("介数中心性",    88),   # 最慢的一步，占绝大部分时间
+    "pagerank":     ("PageRank",       6),
+    "components":   ("连通块",         2),
+    "communities":  ("社区划分（Louvain）", 3),
+}
 
 
 def _nx():
@@ -190,7 +204,8 @@ def blocked_names(entities: Iterable[Dict[str, Any]],
 
 
 def analyze(G, types: Optional[Dict] = None,
-            topn: int = 20) -> Dict[str, Any]:
+            topn: int = 20,
+            on_stage: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
     """
     → {degree, strength, betweenness, pagerank, communities,
        components, summary, by_type}
@@ -198,7 +213,25 @@ def analyze(G, types: Optional[Dict] = None,
     ⚠ topn 强制转 int：FastAPI 的 `Query(20, ge=1)` 传进来的是
     「参数对象」而不是数字，直接拿去切片会报
     slice indices must be integers。在模块边界就转掉，别指望调用方记得。
+
+    ⚠ on_stage 是**可选**的阶段回调，默认 None 时一次都不会调用 ——
+      所以既有调用方（测试、演示脚本、CLI）完全不受影响，行为逐字节一致。
+      传了就每进入一个新阶段回调一次，参数是阶段名（见 _STAGES）。
+      为什么需要它：这一步是整站最贵的地方（全库实测 460 秒），
+      而 networkx 的这些算法**不给进度回调**，调用方唯一能拿到的信息
+      是「现在卡在哪一步、已经等了多久」。没有它，界面上就只能是一个
+      不知道在干什么的转圈。
+      ⚠ 回调必须**极轻**（改个字典里的字符串），任何耗时操作都会
+        拖慢本函数；它是在被观测的代码路径上跑的。
     """
+    def _stage(name: str) -> None:
+        if on_stage is not None:
+            try:
+                on_stage(name)
+            except Exception:
+                # 观测代码永远不许弄坏被观测的代码。
+                pass
+
     topn = max(1, int(topn))
     nx = _nx()
     if G.number_of_nodes() == 0:
@@ -207,12 +240,17 @@ def analyze(G, types: Optional[Dict] = None,
                 "pagerank": [], "communities": [], "components": 0,
                 "summary": "没有关系数据", "by_type": []}
 
+    _stage("degree")
     deg = dict(G.degree())
     strength = dict(G.degree(weight="weight"))
+    _stage("betweenness")
     btw = nx.betweenness_centrality(G, weight=None)
+    _stage("pagerank")
     pr = nx.pagerank(G)
+    _stage("components")
     comps = sorted(nx.connected_components(G), key=len, reverse=True)
 
+    _stage("communities")
     # 社区划分：锁 seed 保证可复现
     try:
         comms = nx.community.louvain_communities(G, seed=LOUVAIN_SEED)

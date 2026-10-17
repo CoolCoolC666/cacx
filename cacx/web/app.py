@@ -49,8 +49,8 @@ from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import (FileResponse, HTMLResponse, RedirectResponse,
-                               Response)
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               RedirectResponse, Response)
 from pydantic import BaseModel, Field
 
 from .. import config as C
@@ -64,6 +64,7 @@ from ..ai import diagnose as ai_diagnose
 from ..ai import summarize as ai_summarize
 from ..ai import status as ai_status
 from ..ai import THEME_LABELS
+from ..ai import build as ai_build, theme_many as ai_theme_many
 from ..ai.base import AIError
 from ..ai.tasks import review_new_words as ai_review
 
@@ -734,7 +735,7 @@ def api_panel_ai_themes(req: ThemeReq):
         return {"error": "已有主题标注任务在跑", "state": dict(_AI_THEME_STATE)}
     try:
         cfg = _cfg()
-        if AI.build(cfg, task="theme") is None:
+        if ai_build(cfg, task="theme") is None:
             return {"error": "AI 未配置：请在设置里填好 API 后再试"}
         where, args = ["pub_day>=?", "pub_day<=?",
                        "COALESCE(content_empty,0)=0"], [dfrom, dto]
@@ -758,7 +759,7 @@ def api_panel_ai_themes(req: ThemeReq):
         for i in range(0, len(arts), n):
             chunk = arts[i:i + n]
             try:
-                res = AI.theme_many(cfg, chunk, dry_run=False, per_call=n)
+                res = ai_theme_many(cfg, chunk, dry_run=False, per_call=n)
                 rows = res.get("rows", []) if isinstance(res, dict) else []
                 # ⚠ id 对齐必须验：模型可能回批内序号也可能回文章 id。
                 #   对不上就**整批跳过并记日志**，绝不能按顺序硬塞 ——
@@ -2139,7 +2140,7 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
                    keyword: str = "", focus: str = "", hop: int = 1,
                    site: str = "", date_from: str = "", date_to: str = "",
                    node_types: str = "", find: str = "", hl: str = "",
-                   mode: str = ""
+                   mode: str = "", on_stage: Any = None
                    ) -> Dict[str, Any]:
     """
     关联分析的**内部实现**（路由和 pyvis 产物都调它）。
@@ -2149,6 +2150,10 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
       走 HTTP 时框架会替换掉，走内部调用时不会 —— int() 直接炸
       （TypeError: int() argument must be ... not 'Query'）。
       把 Query 对象的取值逻辑留在路由边界，函数内部只收纯数字。
+
+    ⚠ on_stage 是**可选**的阶段回调，默认 None 时一次都不调用 ——
+      所以既有调用方（to_pyvis 那条路、测试、CLI）行为逐字节不变。
+      异步预计算那条路会传进来，用它把「现在算到哪一步」报给界面。
     """
     d = _db()
     # ⚠ 站点/日期是**关系来源文章**的筛选，必须在建图之前做。
@@ -2238,14 +2243,14 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
                                     node_types=ntypes_map,
                                     want_types=want_nt or None)
     if sub.number_of_nodes():
-        r = GA.analyze(sub, types, topn=topn)
+        r = GA.analyze(sub, types, topn=topn, on_stage=on_stage)
     else:
         # 空子图（焦点查无此机构）：analyze 在空图上会退化，
         # 宁可把排名清空，也不能拿全图数字冒充子图数字
         # ⚠ 兜底才需要那张**全图**分析结果，所以它放在这里现算。
         #   原来无条件在上面先算一次 —— 而介数在 1600 节点图上要 2.7 秒，
         #   等于每次打开图谱页（哪怕根本没填焦点）都白付一次钱。
-        r = dict(GA.analyze(G, types, topn=topn))
+        r = dict(GA.analyze(G, types, topn=topn, on_stage=on_stage))
         for k in ("degree", "strength", "betweenness", "pagerank"):
             r[k] = []
         # 映射与指纹也要清掉：这里是**全图**的分析结果，画的是空子图，
@@ -2355,6 +2360,209 @@ def _graph_payload(min_degree: int, limit: int, min_weight: float,
     return r
 
 
+# ---------------------------------------------------------------- 图谱预计算
+#
+# ⚠⚠ 为什么要有这一层：/api/graph/analysis 是**整站最贵的接口**，
+#   全库口径实测 460 秒。原来它是**同步算**的 —— 请求进来就一直占着
+#   uvicorn 的事件循环，那 460 秒里**整个服务不响应任何别的请求**，
+#   连 /api/health 都超时。实测就是这么发现的：算图期间探活直接
+#   "连接被拒绝"。用户看到的现象是「网页整个卡死，什么都点不动」。
+#
+#   做法：让最慢的那一步丢到后台线程算，请求立刻返回 202，
+#   前端轮询 /api/graph/analysis/status 看进度，算完后再取原请求即命中缓存。
+#
+# ⚠ **单线程，不是线程池**：同一时刻只允许一个图谱任务在跑。
+#   两个全库口径并发 = 两个 networkx 图同时驻留内存（实测单个 550 MB
+#   量级），直接吃到交换文件；而串行最多是「慢」不是「死」。
+#   要并行就得换进程（ProcessPool），但 networkx 图得先 pickle 过一道，
+#   1.1 万节点的图序列化成本可能比算本身还贵 —— 那是另一件事，不在这里做。
+#
+# ⚠ **这只是「不再完全阻塞」，不是「整站满速」**：
+#   networkx 是纯 Python，CPU 密集，跑在后台线程里照样占着 GIL，
+#   事件循环会被拖慢。所以算图期间别的接口是**变慢**而不是**完全无响应**。
+#   这一点如实写进启动说明，别当成「已经修好了卡死」。
+#
+_GRAPH_TASK_LOCK = threading.RLock()
+_GRAPH_TASKS: Dict[str, Dict[str, Any]] = {}
+_GRAPH_EXECUTOR: Any = None      # 懒建：只有真用到异步路径才起线程池
+_MAX_GRAPH_TASKS = 16            # 防止反复换筛选条件把任务表撑爆
+
+#: **重计算互斥**：同一时刻全服务只允许一个图谱分析在跑，
+#: 同步请求和后台任务**都**要过这把锁。
+#:
+#: ⚠⚠ 为什么执行器那个单线程还不够 —— 这是本轮实测撞出来的：
+#:   执行器只串行化**后台任务**。同步请求（wait=true）是在事件循环里
+#:   直接算的，**完全绕开执行器**。于是一个后台全库任务 + 一个脚本
+#:   同步调全库 = 两个 1.1 万节点的 networkx 图同时驻留内存
+#:   （单个 550 MB 量级），实测那段时间 /api/health **连续 6 次全部超时**，
+#:   而单纯跑后台任务时它是 1.2~2.5 秒正常响应。
+#:   所以「事件循环不再被占满」和「内存只有一份」是两件事，
+#:   两件都要管，只做前者等于把 OOM 风险换成了无响应。
+#:
+#: ⚠ 拿不到锁时**返回 409 而不是排队等**：排队 = 又回到"请求挂着"
+#:   那个老问题上，而调用方（脚本）拿到的还是一个它不认识的形状。
+#:   409 + 一句人话，至少能让人知道"等一下再试"。
+_GRAPH_HEAVY_LOCK = threading.Lock()
+
+#: 已经算完的任务：结果在 _RESP_CACHE 里，这里只留一份"已完成"的短期记录，
+#: 让前端拿到 status=done 之后知道可以去重发原请求了。
+#: 完成后再放一会儿是为了**覆盖前端"算完了但还没来得及重取"那个窗口** ——
+#: 立刻删掉的话，前端会看到"任务不存在"，然后不知道该重试还是报错。
+_DONE_TTL = 300.0
+
+
+def _graph_task_id(key) -> str:
+    """缓存键 -> 稳定的任务 id。同一个键永远同一个 id（幂等）。"""
+    import hashlib
+    return hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:16]
+
+
+def _graph_executor():
+    global _GRAPH_EXECUTOR
+    if _GRAPH_EXECUTOR is None:
+        from concurrent.futures import ThreadPoolExecutor
+        # ⚠ max_workers=1 的理由见上面那段注释，别看到"慢"就改成 4。
+        _GRAPH_EXECUTOR = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="cacx-graph")
+    return _GRAPH_EXECUTOR
+
+
+def _graph_task_status(tid: str) -> Dict[str, Any]:
+    """给前端的进度快照。**不泄漏**内部异常堆栈，只给一行原因。"""
+    with _GRAPH_TASK_LOCK:
+        t = _GRAPH_TASKS.get(tid)
+        if t is None:
+            return {"found": False, "status": "unknown"}
+        out = {k: t[k] for k in ("status", "stage", "stage_label",
+                                 "elapsed", "started_at", "error")}
+        out["found"] = True
+        out["task_id"] = tid
+        out["queued_ahead"] = t.get("queued_ahead", 0)
+        return out
+
+
+def _submit_graph_task(tid: str, key, params: Dict[str, Any],
+                       calc_with_stage) -> Dict[str, Any]:
+    """提交（或复用）一个后台图谱计算。
+
+    幂等：同一个 tid 已经在跑 / 已经完成，就**不重复提交**。
+    这一条很关键 —— 用户在界面上连点两次，或者轮询本身重发，
+    都不该排出两份 460 秒的计算。
+    """
+    now = time.time()
+    with _GRAPH_TASK_LOCK:
+        t = _GRAPH_TASKS.get(tid)
+        if t is not None and t["status"] in ("queued", "running"):
+            return t                                   # 已在跑，直接复用
+        # 已完成的旧记录：结果多半还在缓存里，真要重算让它重算，
+        # 但**不要**把正在轮询它的前端踢下线 —— 所以这里换个 key 排队。
+        db_tok = _db_token()
+        with _CACHE_LOCK:
+            cached = _RESP_CACHE.get(key)
+        if cached is not None and cached[0] == db_tok:
+            return {"status": "done", "stage": "done",
+                    "stage_label": "已完成（命中缓存）", "elapsed": 0.0,
+                    "started_at": "", "error": "", "queued_ahead": 0}
+
+        # 清理过期记录：只清已完成且早于 TTL 的，别动还在跑的。
+        for k in [k for k, v in _GRAPH_TASKS.items()
+                  if v["status"] in ("done", "error")
+                  and now - v.get("finished_ts", 0) > _DONE_TTL]:
+            _GRAPH_TASKS.pop(k, None)
+        while len(_GRAPH_TASKS) >= _MAX_GRAPH_TASKS:
+            old = next((k for k, v in _GRAPH_TASKS.items()
+                        if v["status"] in ("done", "error")), None)
+            if old is None:
+                break                                  # 全在跑就不清了
+            _GRAPH_TASKS.pop(old, None)
+
+        nt = {"status": "queued", "stage": "queued",
+              "stage_label": "排队中", "elapsed": 0.0,
+              "started_at": "", "error": "", "queued_ahead": 0,
+              "finished_ts": 0.0, "key": key, "params": params}
+        _GRAPH_TASKS[tid] = nt
+
+    def _report(stage: str) -> None:
+        with _GRAPH_TASK_LOCK:
+            cur = _GRAPH_TASKS.get(tid)
+            if cur is None:
+                return
+            cur["status"] = "running"
+            cur["stage"] = stage
+            cur["stage_label"] = GA.STAGE_LABELS.get(stage, (stage, 0))[0]
+
+    def _work() -> None:
+        t0 = time.time()
+        # ⚠ 先抢重计算锁再报状态：抢不到就说明有同步请求正在算，
+        #   这时候必须如实说"排队"，而不是装作已经开跑。
+        if not _GRAPH_HEAVY_LOCK.acquire(blocking=True):
+            return                                     # 理论不可达，留着兜底
+        try:
+            _run_heavy()
+        finally:
+            _GRAPH_HEAVY_LOCK.release()
+
+    def _run_heavy() -> None:
+        t0 = time.time()
+        with _GRAPH_TASK_LOCK:
+            cur = _GRAPH_TASKS.get(tid)
+            if cur is not None:
+                cur["status"] = "running"
+                cur["stage"] = "degree"
+                cur["stage_label"] = GA.STAGE_LABELS["degree"][0]
+                cur["started_at"] = time.strftime("%H:%M:%S")
+        try:
+            val = calc_with_stage(_report)
+            # 结果照旧进 _RESP_CACHE —— 于是前端算完后重发原请求即命中，
+            # **不需要**为异步单开一条"取结果"的通路，也不会出现
+            # 「异步算的和同步算的走了两条不同的写缓存路径」。
+            tok = _db_token()
+            if isinstance(val, dict) and "error" not in val:
+                with _CACHE_LOCK:
+                    _RESP_CACHE[key] = (tok, copy.deepcopy(val))
+                    _RESP_CACHE.move_to_end(key)
+                    _CACHE_STATS["put"] += 1
+                    while len(_RESP_CACHE) > _CACHE_CAP:
+                        _RESP_CACHE.popitem(last=False)
+                        _CACHE_STATS["evict"] += 1
+            with _GRAPH_TASK_LOCK:
+                cur = _GRAPH_TASKS.get(tid)
+                if cur is not None:
+                    cur["status"] = "done"
+                    cur["stage"] = "done"
+                    cur["stage_label"] = "已完成"
+                    cur["elapsed"] = round(time.time() - t0, 1)
+                    cur["finished_ts"] = time.time()
+                    cur["error"] = ""
+        except Exception as e:                          # noqa: BLE001
+            with _GRAPH_TASK_LOCK:
+                cur = _GRAPH_TASKS.get(tid)
+                if cur is not None:
+                    cur["status"] = "error"
+                    cur["stage"] = "error"
+                    cur["stage_label"] = "出错"
+                    cur["elapsed"] = round(time.time() - t0, 1)
+                    cur["finished_ts"] = time.time()
+                    cur["error"] = f"{type(e).__name__}: {e}"
+
+    _graph_executor().submit(_work)
+    return _GRAPH_TASKS.get(tid, nt)
+
+
+@app.get("/api/graph/analysis/status")
+def api_graph_analysis_status(task: str = Query(..., min_length=4,
+                                                max_length=64)):
+    """轮询一个后台图谱计算跑到哪了。
+
+    ⚠ 返回的 status 只有四种：queued / running / done / error。
+      **done 不带结果体** —— 结果在 _RESP_CACHE 里，前端拿 done 之后
+      重发原请求（同样的 URL）即命中，那才是唯一一份结果。
+      不在这里复制一份结果，是刻意的：两份结果一旦有缓存版本差
+      （_CACHE_VER 自增），就会出现「界面显示的是旧那一份」。
+    """
+    return _graph_task_status(task)
+
+
 @app.get("/api/graph/analysis")
 def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
                        limit: int = Query(300, ge=1, le=1000),
@@ -2369,7 +2577,7 @@ def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
                        date_from: str = "",
                        date_to: str = "",
                        node_types: str = "", find: str = "", hl: str = "",
-                       mode: str = ""):
+                       mode: str = "", wait: bool = Query(True)):
     """
     关联指标（networkx）：度/加权度/介数/PageRank/Louvain 社区。
 
@@ -2399,20 +2607,68 @@ def api_graph_analysis(min_degree: int = Query(1, ge=1, le=50),
     ⚠ 走结果缓存：这是最贵的一个（全区间单次实测几分钟），**十五个筛选
       参数全部进键**。find/hl 看着像「只标不改图」，但它们改了响应内容，
       所以照样进键 —— 少一个就是两个画面共用一份数据。
+
+    ⚠⚠ wait（默认 true）决定这个接口**会不会把整个服务卡住**：
+      · wait=true  —— 老行为：同步算，算完才返回。**默认不变**，
+        因为验收脚本、演示脚本、文档里给的 curl 都走这条，
+        改了它们就全断了。
+      · wait=false —— 丢后台线程算，立刻回 202 + {task_id, status}，
+        前端拿 task_id 去轮询 /api/graph/analysis/status。
+        这是**浏览器里那一条路**才用的，因为它要等人。
+    ⚠ 别把 wait 默认改成 false：那样脚本调用方会突然收不到结果体，
+      而它们都不会去轮询 —— 那是最难查的一类回归
+      （接口"成功"了，返回的却不是要的东西）。
     """
-    return _cached(
-        "graph.analysis",
-        {"min_degree": min_degree, "limit": limit, "min_weight": min_weight,
-         "topn": topn, "max_degree": max_degree, "rel_types": rel_types,
-         "keyword": keyword, "focus": focus, "hop": hop, "site": site,
-         "date_from": date_from, "date_to": date_to,
-         "node_types": node_types, "find": find, "hl": hl, "mode": mode},
-        lambda: _graph_payload(int(min_degree), int(limit), float(min_weight),
-                               int(topn), int(max_degree), rel_types,
-                               keyword, focus, int(hop),
-                               site, date_from, date_to,
-                               node_types=node_types, find=find, hl=hl,
-                               mode=mode))
+    params = {"min_degree": min_degree, "limit": limit,
+              "min_weight": min_weight,
+              "topn": topn, "max_degree": max_degree, "rel_types": rel_types,
+              "keyword": keyword, "focus": focus, "hop": hop, "site": site,
+              "date_from": date_from, "date_to": date_to,
+              "node_types": node_types, "find": find, "hl": hl, "mode": mode}
+
+    def _calc(on_stage=None) -> Dict[str, Any]:
+        return _graph_payload(int(min_degree), int(limit), float(min_weight),
+                              int(topn), int(max_degree), rel_types,
+                              keyword, focus, int(hop),
+                              site, date_from, date_to,
+                              node_types=node_types, find=find, hl=hl,
+                              mode=mode, on_stage=on_stage)
+
+    if wait:
+        # ⚠ 同步路径也要过重计算锁：它是在事件循环里直接算的，
+        #   绕开了后台执行器的串行化。不锁的话，一个脚本的同步全库调用
+        #   就能和网页的后台任务同时占两份大图（实测 health 连续 6 次超时）。
+        if not _GRAPH_HEAVY_LOCK.acquire(blocking=False):
+            raise HTTPException(
+                409, "另一个图谱计算正在进行中（可能是网页上正在算图）。"
+                     "请等它算完再试，通常几分钟；也可以给请求加 wait=false "
+                     "改成后台计算+轮询。")
+        try:
+            return _cached("graph.analysis", params, lambda: _calc())
+        finally:
+            _GRAPH_HEAVY_LOCK.release()
+
+    # ---- 异步：先看缓存，命中就直接给结果（不占用一次任务名额）----
+    key = _cache_key("graph.analysis", params, _CACHE_VER)
+    tok = _db_token()
+    with _CACHE_LOCK:
+        ent = _RESP_CACHE.get(key)
+        if ent is not None and ent[0] == tok:
+            _RESP_CACHE.move_to_end(key)
+            _CACHE_STATS["hit"] += 1
+            return copy.deepcopy(ent[1])
+
+    tid = _graph_task_id(key)
+    t = _submit_graph_task(tid, key, params, _calc)
+    return JSONResponse(
+        status_code=202,
+        content={"pending": True, "task_id": tid,
+                 "status": t.get("status", "queued"),
+                 "stage": t.get("stage", ""),
+                 "stage_label": t.get("stage_label", ""),
+                 "poll": f"/api/graph/analysis/status?task={tid}",
+                 "note": "算完后重发本请求（URL 不变）即命中缓存取结果"},
+    )
 
 
 @app.get("/api/graph/facets")

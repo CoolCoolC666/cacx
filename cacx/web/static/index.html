@@ -2305,6 +2305,61 @@ function gpRenderScope(an){
   box.innerHTML = bits.join('　·　') + warn + refNote;
 }
 
+// ---- 图谱预计算：边等边报进度 ----
+// ⚠ 为什么非有它不可：/api/graph/analysis 全库口径实测要 **460 秒**，
+//   而它以前是**同步等**的 —— 那 460 秒里整个服务被这一次计算占住，
+//   连 /api/health 都超时，症状是「网页整个卡死，什么都点不动」。
+//   现在传 wait=false：立刻拿到 202 + task_id，这里轮询 status 显示
+//   「算到哪一步、已经等了多久」，算完再取结果。
+//
+// ⚠ **只报「阶段 + 已耗时」，故意不报百分比。**
+//   networkx 的介数中心性没有进度回调，阶段权重是按实测估的；
+//   把一个估算值画成进度条，是在骗用户「还剩三分之一」这种它给不出的承诺。
+//   用户真正需要知道的是"没卡死、现在在干嘛、还要等"，
+//   这三样阶段信息全给得出。
+//
+// ⚠ 秒数由**前端自己算**，不用服务端的 elapsed：那个字段只在任务完成
+//   时才写入真值，计算过程中一直是 0 —— 直接显示会永远显示「已等待 0 秒」。
+async function gpFetchAnalysisWithProgress(q, stat){
+  const qs = new URLSearchParams(q);
+  qs.set('wait','false');
+  const url = '/api/graph/analysis?'+qs.toString();
+  let res  = await fetch(url);
+  let body = await res.json();
+  if(res.status !== 202 || !body.pending) return body;   // 200 = 命中缓存
+  const t0 = Date.now();
+  const secs = () => Math.round((Date.now()-t0)/1000);
+  for(;;){
+    // 每 1 秒一次。算图期间服务端照样占着 CPU（networkx 是纯 Python，
+    // 跑在后台线程里也占 GIL），轮询本身可能被拖慢一点，但不会失联。
+    await new Promise(r=>setTimeout(r,1000));
+    const s = await fetch(body.poll).then(x=>x.json()).catch(()=>null);
+    if(s === null){
+      stat.innerHTML = '正在计算…（进度查询暂时没响应，请稍候）';
+      continue;
+    }
+    if(s.found === false){
+      // 任务记录只保留 5 分钟。走到这说明异常了，**必须说出来** ——
+      // 死循环等一个永远不会回来的任务是这类界面最常见的假死。
+      stat.innerHTML = '<span style="color:var(--warn)">计算任务已丢失，'
+        + '请重新点一次「应用」重算。</span>';
+      return null;
+    }
+    if(s.status === 'error'){
+      stat.innerHTML = '<span style="color:var(--warn)">计算出错：'
+        + (s.error||'未知原因') + '</span>';
+      return null;
+    }
+    if(s.status === 'done') break;
+    stat.innerHTML = '正在计算：<b>'+(s.stage_label||'…')
+      + '</b> · 已等待 <b>'+secs()+'</b> 秒'
+      + '（这一步最慢，请别连点刷新）';
+  }
+  stat.innerHTML = '计算完成（'+secs()+' 秒），正在取结果…';
+  res = await fetch(url);                 // 同一个 URL：这次命中缓存，毫秒级
+  return res.json();
+}
+
 async function loadGraph(){
   const stat = $('gp_stat');
   if(!stat) return;                 // 图谱区已被隐藏/卸载，别往下走
@@ -2316,15 +2371,16 @@ async function loadGraph(){
   //   极难定位。所以：先把统计/指标/边列表渲染出来（这部分不依赖图库），
   //   图库在后面单独加载，失败也只影响画布那一块。
   try{
-    const [st, an] = await Promise.all([
-      fetch('/api/graph/stats').then(x=>x.json()).catch(()=>null),
-      fetch('/api/graph/analysis?'+q.toString())
-        .then(x=>x.json()).catch(()=>null),
-    ]);
+    // ⚠ 这两个请求**不再 Promise.all** —— analysis 走后台任务，命中缓存时是
+    //   毫秒级、没命中时要等几百秒，并行等它等于把 stats 也拖住了。
+    //   顺序改成：先渲染永远很快的 stats，再去管那个慢的。
+    const st = await fetch('/api/graph/stats').then(x=>x.json()).catch(()=>null);
     if(st) $('gp_stat').innerHTML = (
       `实体 <b>${st.entity_total}</b>（机构 ${st.entity_orgs}）· `+
       `关系 <b>${st.relation_total}</b> 条 / ${st.rel_pairs} 对 · `+
       `无原文证据 <b style="color:${st.no_evidence?'#c98':'var(--dim)'}">${st.no_evidence}</b>`);
+    const an = await gpFetchAnalysisWithProgress(q, $('gp_stat'));
+    if(an === null) return;               // 出错/丢任务：上面已经写出原因了
     GP_ANA = an;
     gpRenderScope(an);
     renderMetrics(an);
