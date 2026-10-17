@@ -4066,6 +4066,53 @@ def index():
     return HTMLResponse("<h1>cacx</h1><p>前端文件缺失。</p>", status_code=200)
 
 
+def _open_browser_when_listening(url: str, host: str, port: int,
+                                 timeout: float = 90.0) -> None:
+    """等端口**真的能连上**了，再打开浏览器。
+
+    ⚠⚠ 原来这里是 `webbrowser.open(url)` 直接排在 `uvicorn.run(...)`
+      **之前** —— 也就是浏览器打开的那一刻，端口还没有任何人监听。
+      实测这个窗口在本机是 **0.92 秒**（`_measure_bind_race.py` 量出来的），
+      浏览器在这段时间里拿到的是「连接被拒绝」，用户看到的是一个打不开的
+      页面；而外面还套着 `except: pass`，任何失败都被吞掉，窗口里只留下一句
+      "一切正常" 的输出。**这个顺序错了，而且错了还不吭声。**
+
+      数据库越大、磁盘越慢、杀软越积极，这个窗口越长。
+      所以这里改成：起一个守护线程轮询端口，一连上就开浏览器。
+      开不了也要**说出来**，而不是让用户对着一个没反应的窗口猜。
+    """
+    import socket
+
+    probe_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+
+    def _wait_and_open() -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            s = socket.socket()
+            s.settimeout(0.4)
+            try:
+                ready = s.connect_ex((probe_host, port)) == 0
+            except OSError:
+                ready = False
+            finally:
+                s.close()
+            if ready:
+                break
+            time.sleep(0.15)
+        else:
+            print(f"  [提示] 服务在 {timeout:.0f} 秒内没就绪，"
+                  f"浏览器未自动打开 —— 请手动访问上面的地址。")
+            return
+        try:
+            webbrowser.open(url)
+        except Exception as e:          # noqa: BLE001
+            # 吞异常不等于不吭声：至少要告诉用户网址是多少。
+            print(f"  [提示] 自动打开浏览器失败（{type(e).__name__}: {e}）"
+                  f" —— 请手动访问：{url}")
+
+    threading.Thread(target=_wait_and_open, daemon=True).start()
+
+
 def run(cfg: Dict, host: str = "127.0.0.1", port: int = 8770,
         open_browser: Optional[bool] = None):
     import uvicorn
@@ -4080,8 +4127,5 @@ def run(cfg: Dict, host: str = "127.0.0.1", port: int = 8770,
     print("  Ctrl+C 停止")
     print("=" * 60)
     if open_browser:
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+        _open_browser_when_listening(url, host, port)
     uvicorn.run(app, host=host, port=port, log_level="warning")

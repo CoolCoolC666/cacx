@@ -247,6 +247,19 @@ _[a-z0-9]*.txt
 !（测试）/_sync_pyfloor_docs.py
 !（测试）/_fix_demo_depcount.py
 
+# 浏览器自动打开的竞态（2026-10-17，「网站不自动打开」那一条）：
+#   起因是 run() 里 webbrowser.open(url) 排在 uvicorn.run() **之前** ——
+#   实测端口从 open 到监听之间有 0.92 秒窗口，而外面还套着 `except: pass`
+#   把失败整个吞掉，所以症状是「双击了、没反应、也没报错」。
+#   修法是 _open_browser_when_listening()：守护线程轮询端口，连上才开浏览器。
+#   ⚠ 这类 bug 不能只靠肉眼看 —— 0.92 秒窗口在人工操作里几乎必现，
+#     但「第一次没弹出来、重开一次就好了」很容易被当成偶发。
+#   _measure_bind_race.py  把窗口量出来（这是发现 bug 的证据本身）
+#   _test_browser_open_timing.py 守住修复：没等端口就开 → 红；
+#     开不了浏览器要打印「请手动访问 URL」 → 再红（原先被 except 吞掉）。
+!（测试）/_measure_bind_race.py
+!（测试）/_test_browser_open_timing.py
+
 # 便携 Python 运行时（方案 A，2026-10-16）：
 #   让组员零安装就能跑 —— 不需要管理员权限、不需要改 PATH、不需要联网。
 #   本体是 python.org 的 embeddable 包（10.6 MB），加上用
