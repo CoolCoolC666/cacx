@@ -117,7 +117,26 @@ cands = sorted(p for p in (ROOT.parent / "网站程序").glob("cacx-分发版-*"
 if not cands:
     print("🔴 网站程序/ 下找不到分发包目录")
     sys.exit(1)
-PACK = Path(sys.argv[1]) if len(sys.argv) > 1 else cands[-1]
+
+# ⚠ 现在有两种形态的目录并存（完整包 / `-slim`），不能靠 sorted()[-1] 挑。
+#   按名字排下来 `-slim` 永远在最后，于是**每次都比的是瘦身包**，
+#   而人以为在比完整包 —— 报告里还不会写这件事，它只会报「一致」。
+#   形态必须由调用方显式指定，且找不到就报错，不静默换一个。
+SLIM = "--slim" in sys.argv
+_pool = [p for p in cands if p.stem.endswith("-slim")] if SLIM \
+    else [p for p in cands if not p.stem.endswith("-slim")]
+if not _pool:
+    print(f"🔴 找不到 {'瘦身' if SLIM else '完整'}包目录（--slim 指定了形态，"
+          f"但磁盘上没有对应的）")
+    sys.exit(1)
+# ⚠ 位置参数必须跳过开关。原式是 `Path(sys.argv[1]) if len(sys.argv) > 1`，
+#   而 `... --slim` 的 argv[1] 恰恰就是 "--slim" —— 于是 PACK 变成
+#   一个叫 "--slim" 的**不存在的目录**，比对对着空气跑，得出
+#   「127 个源码文件没进包」这种看着像真问题的假结论。
+#   教训：加了命令行开关之后，位置参数不能再靠下标取。
+_pos = [a for a in sys.argv[1:] if not a.startswith("-")]
+PACK = Path(_pos[0]) if _pos else _pool[-1]
+print(f"比对对象：{PACK.name}（{'瘦身包' if SLIM else '完整包'}）")
 
 
 def sha(p):
@@ -146,6 +165,11 @@ def excluded(rel):
       第一版就这么漏的，于是 .git 里 243 个文件全被报成「源码有而包里没有」。
     """
     if skip(rel.name, str(rel).replace("\\", "/")):
+        return True
+    # 瘦身包不带 runtime\，这一整棵在"源码有而包里没有"那侧是**预期**的，
+    # 不排掉就会报出 1 万多条假差异。这里同样不能塞进 skip()：
+    # 那个函数被 AST 抽出来复用，而 SLIM 是打包脚本的全局量。
+    if SLIM and rel.parts[0] == "runtime":
         return True
     return any(anc.name in _DIR_EXCLUDE for anc in rel.parents
                if anc.name and anc != Path("."))
