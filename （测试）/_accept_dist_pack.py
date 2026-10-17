@@ -40,6 +40,9 @@ DEST = ROOT.parent / "网站程序"
 PORT = 8791
 BASE = f"http://127.0.0.1:{PORT}"
 KEEP = "--keep" in sys.argv
+# 两种形态要分别验，判据方向相反：完整包**必须**带 runtime\，
+# 瘦身包**必须不带**（它小是因为砍掉了兜底，不是漏了）。
+SLIM = "--slim" in sys.argv
 # --full-graph：额外跑「README 里的数 == 包内服务真值」的慢检。
 #   默认不开，因为它要在**刚起的冷服务**上算全图介数（12162 节点，O(V·E)），
 #   实测十分钟量级；日常验收没必要每次都付这个代价。
@@ -78,10 +81,28 @@ def to_recycle(p: pathlib.Path) -> bool:
 
 
 def newest_zip() -> pathlib.Path:
-    """按名字里的日期取最新那个分发包，别写死 20261013。"""
-    cands = sorted(DEST.glob("cacx-分发版-*.zip"),
-                   key=lambda p: re.findall(r"\d+", p.stem)[-1] if re.findall(r"\d+", p.stem) else "")
-    return cands[-1] if cands else None
+    """按名字里的日期取最新那个分发包，别写死 20261013。
+
+    ⚠ 现在磁盘上会有**两种**形态（完整包 / `-slim`），必须显式挑。
+      原来只按日期排序，而 `cacx-分发版-20261016-slim` 里最后一个数字组
+      仍然是 20261016 —— 两个包**日期相同、排序并列**，`sorted()[-1]`
+      挑哪个全看文件系统返回顺序。这不是"可能偶尔挑错"，是
+      **验的根本不知道自己在验哪个包**，而报告里并不会写出来。
+      现在按调用方显式指定形态挑，挑不到就报错，不静默换一个。
+    """
+    pat = "cacx-分发版-*-slim.zip" if SLIM else "cacx-分发版-*.zip"
+    # ⚠ 这个"排除 -slim"的过滤**只能用在非瘦身分支上**。
+    #   我第一版把它写成对所有候选都生效，于是 `--slim` 分支找到了
+    #   `cacx-分发版-20261016-slim.zip`、又立刻被自己滤掉，最后报
+    #   「找不到包，先跑 _repack.py」—— 而包明明就在那儿。
+    #   症状极具误导性：它看上去像"忘了打包"，实际是筛选条件写错了。
+    cands = [p for p in DEST.glob(pat) if SLIM or not p.stem.endswith("-slim")]
+    cands = sorted(cands, key=lambda p: re.findall(r"\d+", p.stem)[-1]
+                   if re.findall(r"\d+", p.stem) else "")
+    if not cands:
+        print(f"  🔴 找不到 {pat} —— 先跑 _repack.py{'' if SLIM else ' --slim'}")
+        raise SystemExit(2)
+    return cands[-1]
 
 
 ZP = newest_zip()
@@ -231,9 +252,19 @@ if _pack_py.exists():
     print("用包内便携运行时: runtime\\python.exe")
 else:
     PY_EXE = sys.executable
-    print("⚠ 包内没有 runtime\\python.exe，退回开发机解释器 —— "
-          "这次验收**不代表组员机器**的真实环境")
-chk("包内自带便携运行时", _pack_py.exists(), f"{(stage / 'runtime').exists()}")
+if SLIM:
+    # 瘦身包用本机解释器不是"验收降级"，而是**它本来的契约**：
+    # 它要求收件人自己有 Python 3.10+。所以这里要验的是它**确实没有**兜底，
+    # 而不是把"没兜底"当缺陷报出去。
+    chk("瘦身包确实不含 runtime\\", not (stage / "runtime").exists())
+    chk("本机解释器 >= 3.10（瘦身包的前提）",
+        sys.version_info >= (3, 10), f"{sys.version_info[0]}.{sys.version_info[1]}")
+    print("用本机解释器: " + PY_EXE + "  （瘦身包本来的契约，组员也是这台机器跑）")
+else:
+    if not _pack_py.exists():
+        print("⚠ 包内没有 runtime\\python.exe，退回开发机解释器 —— "
+              "这次验收**不代表组员机器**的真实环境")
+    chk("包内自带便携运行时", _pack_py.exists(), f"{(stage / 'runtime').exists()}")
 
 # ⚠ 小图冒烟：必须用**包内解释器 + 包内 cacx** 跑。
 #   networkx>=3.6 的 pagerank() 无条件要 scipy，而 networkx 不声明它；
@@ -339,18 +370,24 @@ if health:
     for stale in ("1759", "4154", "1449", "28900", "1633", "3921"):
         chk(f"README.txt 无旧口径 {stale}", stale not in rt)
 
-    # ⚠ 数字哨兵盯不住**说法**的过期。加派这一条，是因为本包的启动逻辑
-    #   改过一次优先级：现在是「本机 Python 3.10+ 且有网就用本机并装依赖，
-    #   否则用自带 runtime」。README 一旦还写着「需要 Python 3.10+，
-    #   安装时务必勾选 Add Python to PATH」，就等于在教组员做一件
-    #   **根本不需要做的事**，而且会让人以为不装 Python 就跑不起来 ——
-    #   这正是当初随包携带运行时要消灭的那个印象。
-    #   说法型哨兵只能用子串匹配，因为数字哨兵对它无能为力。
-    for stale_claim in ("需要 Python 3.10+",
-                        'Add Python to PATH"'):
-        chk(f"README.txt 无过期说法「{stale_claim}」", stale_claim not in rt)
-    chk("README.txt 说清了「不用装也能跑」",
-        "什么都不用装" in rt and "runtime" in rt)
+    if SLIM:
+        chk("瘦身包把更严的要求写在了最前面",
+            "不含自带运行时" in rt and "完整包" in rt)
+        chk("瘦身包没自称自带 runtime（那会误导）",
+            "自带的 runtime\\，不联网也能跑" not in rt)
+    else:
+        # 数字哨兵盯不住**说法**的过期。加派这一条，是因为本包的启动逻辑
+        # 改过一次优先级：现在是「本机 Python 3.10+ 且有网就用本机并装依赖，
+        # 否则用自带 runtime」。README 一旦还写着「需要 Python 3.10+，
+        # 安装时务必勾选 Add Python to PATH」，就等于在教组员做一件
+        # **根本不需要做的事**，而且会让人以为不装 Python 就跑不起来 ——
+        # 这正是当初随包携带运行时要消灭的那个印象。
+        # 说法型哨兵只能用子串匹配，因为数字哨兵对它无能为力。
+        for stale_claim in ("需要 Python 3.10+",
+                            'Add Python to PATH"'):
+            chk(f"README.txt 无过期说法「{stale_claim}」", stale_claim not in rt)
+        chk("README.txt 说清了「不用装也能跑」",
+            "什么都不用装" in rt and "runtime" in rt)
 
     if FULL_GRAPH:
         def _get_graph():

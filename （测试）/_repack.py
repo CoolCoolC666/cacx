@@ -20,7 +20,25 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 SRC = Path(__file__).resolve().parent.parent
 DEST = SRC.parent / "网站程序"
-NAME = f"cacx-分发版-{datetime.now():%Y%m%d}"
+
+# ---- 两种形态：完整包 / 瘦身包 ----------------------------------------
+#
+# 完整包（默认）：含 runtime\，两类机器都能零安装跑 ——
+#   本机 Python >= 3.10 且能联网走本机，否则走自带 runtime。
+#
+# 瘦身包（--slim）：不含 runtime\，小约 348 MB，给已经有 Python 3.10+
+#   且能联网的人。**它没有兜底**：本机不合格时启动器只能报错停下。
+#   代价必须写在包里（README + 验收闸），否则等于发一个"看着一样、
+#   其实要求更严"的包出去。
+#
+# ⚠ 命名带 `-slim` 后缀而不是共用一个名字，是为了三件事不打架：
+#   ① 验收闸/一致性闸都按 `cacx-分发版-*` 通配找目录，共用名字会让它们
+#      在磁盘上同时存在两个包时挑错那一个；
+#   ② 回收旧包只回收同名的那一个，两种形态互不误伤；
+#   ③ 组员拿到手能一眼看出这是哪个。
+SLIM = "--slim" in sys.argv
+NAME = f"cacx-分发版-{datetime.now():%Y%m%d}" + ("-slim" if SLIM else "")
+MODE = "瘦身包（不含自带运行时）" if SLIM else "完整包（含自带运行时）"
 
 # 排除「任何层级同名」——只写顶层规则会漏掉 cacx/ai/__pycache__
 #
@@ -241,12 +259,19 @@ for root, dirs, files in os.walk(SRC):
         drel = (Path(root) / dn).relative_to(SRC).as_posix()
         drop = (dn in DIR_EXCLUDE_BY_NAME
                 or drel.split("/")[0] in DIR_EXCLUDE_BY_PATH
+                or (SLIM and drel.split("/")[0] == "runtime")
                 or any(drel == d or drel.startswith(d + "/")
                        for d in DIR_EXCLUDE_BY_PATH if "/" in d))
         if drop:
             dirs.remove(dn)
     for fn in files:
         rel = (Path(root) / fn).relative_to(SRC)
+        # 瘦身包不带 runtime\。**刻意不写进 skip()**：skip() 会被
+        # _verify_pack_matches_src.py 按 AST 抽出去复用，而 SLIM 是本脚本的
+        # 全局量 —— 塞进 skip() 会让那个闸在 exec 时直接 NameError，
+        # 也就是"改打包规则先把闸门自己弄崩"，本轮已经栽过一次。
+        if SLIM and rel.parts[0] == "runtime":
+            continue
         # ⚠⚠ 必须**只带 rel 调一次**。
         #   原来是 `skip(fn) or skip(fn, rel.as_posix())` —— 两次调用。
         #   第一次 `skip(fn)` 的 rel 是空串，于是 VERBATIM_PREFIXES
@@ -279,80 +304,178 @@ inits = list(stage.rglob("__init__.py"))
 proj_inits = sorted(str(p.relative_to(stage)) for p in stage.glob("cacx/**/__init__.py"))
 check("cacx 自己的 __init__.py 齐全（5 个）",
       len(proj_inits) == 5, f"{len(proj_inits)} 个")
-RT = stage / "runtime"
-RT_SP = RT / "Lib" / "site-packages"
-for pkg in ("fastapi", "uvicorn", "requests", "bs4", "pyvis",
-            "jieba", "networkx"):
-    check(f"运行时里 {pkg}/__init__.py 在",
-          (RT_SP / pkg / "__init__.py").exists())
-check("runtime/ python.exe 在", (RT / "python.exe").exists())
-check("runtime/ cacert.pem 在（冗余保险，不是修复）",
-      (RT / "cacert.pem").exists())
-_pth = sorted(RT.glob("python3*._pth"))
-check("runtime/ 的 ._pth 在", bool(_pth), f"{[p.name for p in _pth]}")
-if _pth:
-    _t = _pth[0].read_text(encoding="ascii").replace("\r\n", "\n")
-    # 见 _build_portable_runtime.py：少任何一行都会让组员机器直接起不来。
-    check("._pth 打开了 import site", "import site" in _t)
-    check("._pth 含 Lib\\site-packages", "Lib\\site-packages" in _t)
-    check("._pth 含 .. （项目根，cacx 包在这里）",
-          "\n..\n" in "\n" + _t)
-# ABI：装错解释器的轮子会让 .pyd 加载不了，而报错完全不提 ABI。
-_stray = [p.name for p in RT_SP.rglob("*")
-          if p.is_file() and "cp313" in p.name] if RT_SP.exists() else []
-check("运行时里没有 cp313 的二进制", not _stray, f"{len(_stray)} 个：{_stray[:3]}")
-_312 = [p.name for p in RT_SP.glob("*/**/*.pyd") if "cp312" in p.name] \
-    if RT_SP.exists() else []
-check("运行时确实是 cp312 二进制", bool(_312), f"{len(_312)} 个 .pyd")
-
-# ⚠⚠ 最强的一道：**用暂存目录里那个解释器真跑一次小图 analyze()**。
-#   前面的检查全是"文件在不在、对不对"，可 numpy/_expired_attrs_2_0.py
-#   那种缺失，静态检查一道都抓不住 —— 49 项全绿而服务起不来。
-#   真跑一次 1 秒级，比事后在组员机器上炸划算得多。
+# ⚠ 这两个必须放在 SLIM 分支**之前**：瘦身包那一支也要用 _sp 跑冒烟
+#   （它没有包内运行时，只能用本机解释器验）。
+#   放在 else 分支里的话，完整包一切正常、瘦身包一进分支就 NameError ——
+#   而这条分支本轮之前根本不存在，所以没人会发现。
 import subprocess as _sp
 import shutil as _sh
-if (RT / "python.exe").exists():
-    # ⚠ 不要把冒烟脚本拷进暂存目录再删 —— 一来一回都是多余的磁盘写入，
-    #   而 _smoke_analyze.py 自己认 CACX_SMOKE_ROOT，
-    #   直接跑源码那份、把根指向 stage 即可，import 到的自然是**包内**的 cacx。
-    _r = _sp.run([str(RT / "python.exe"),
-                  str(SRC / "（测试）" / "_smoke_analyze.py")],
+
+RT = stage / "runtime"
+if SLIM:
+    # 瘦身包：**不该有** runtime\，而且必须把"要求更严"这件事写进包里。
+    # 判据方向和完整包正好相反 —— 不是"运行时在不在"，而是
+    # "运行时确实不在，且要求已经写明"。只把完整包那几道闸删掉是不够的：
+    # 那等于瘦身包少了几道检查却没人看得出来。
+    check("瘦身包里不该有 runtime\\", not RT.exists())
+    check("本机 Python >= 3.10（瘦身包的前提）",
+          sys.version_info >= (3, 10), f"{sys.version_info[0]}.{sys.version_info[1]}")
+    _r = _sp.run([sys.executable, str(SRC / "（测试）" / "_smoke_analyze.py")],
                  cwd=str(stage), capture_output=True, text=True,
                  encoding="utf-8", errors="replace",
                  env={**os.environ, "CACX_SMOKE_ROOT": str(stage),
                       "PYTHONIOENCODING": "utf-8",
-                      # ⚠ 不许写字节码：我这一步 import 了 numpy / networkx / cacx，
-                      #   会在暂存目录里生成 290 个 .pyc 和 27 个 __pycache__，
-                      #   然后把紧随其后的「全包无 .pyc」和「无 __pycache__」两道
-                      #   闸门**自己判红**。闸门污染了被闸的对象 ——
-                      #   那两道闸本意是查"源码树有没有残留运行产物"，
-                      #   结果被我自己刚跑出来的产物顶了。
-                      #   这里禁掉字节码，比事后去删干净、也比放宽那两道闸都对。
                       "PYTHONDONTWRITEBYTECODE": "1"})
     _out = _r.stdout or ""
     _mark = [x for x in (_out + (_r.stderr or "")).strip().splitlines()
              if "SMOKE-" in x]
-    check("暂存目录的运行时能真跑 analyze()",
-          "SMOKE-OK" in _out, _mark[-1] if _mark else "无 SMOKE 行")
-    if "SMOKE-OK" not in _out:
-        for _x in (_out + (_r.stderr or "")).strip().splitlines()[-6:]:
-            print("        " + _x)
+    check("本机解释器能真跑 analyze()", "SMOKE-OK" in _out,
+          _mark[-1] if _mark else "无 SMOKE 行")
+else:
+    RT = stage / "runtime"
 
-# ⚠ 运行时必须**逐字节原样**进包。除了 __pycache__ / .pyc（可再生，
-#   且上面的闸要求它们为零），源里有多少个文件，包里就得有多少个。
-def _rt_files(base: Path):
-    return {str(p.relative_to(base).as_posix())
-            for p in base.rglob("*")
-            if p.is_file() and "__pycache__" not in p.parts
-            and not p.name.endswith(".pyc")}
+    RT_SP = RT / "Lib" / "site-packages"
+
+    for pkg in ("fastapi", "uvicorn", "requests", "bs4", "pyvis",
+
+                "jieba", "networkx"):
+
+        check(f"运行时里 {pkg}/__init__.py 在",
+
+              (RT_SP / pkg / "__init__.py").exists())
+
+    check("runtime/ python.exe 在", (RT / "python.exe").exists())
+
+    check("runtime/ cacert.pem 在（冗余保险，不是修复）",
+
+          (RT / "cacert.pem").exists())
+
+    _pth = sorted(RT.glob("python3*._pth"))
+
+    check("runtime/ 的 ._pth 在", bool(_pth), f"{[p.name for p in _pth]}")
+
+    if _pth:
+
+        _t = _pth[0].read_text(encoding="ascii").replace("\r\n", "\n")
+
+        # 见 _build_portable_runtime.py：少任何一行都会让组员机器直接起不来。
+
+        check("._pth 打开了 import site", "import site" in _t)
+
+        check("._pth 含 Lib\\site-packages", "Lib\\site-packages" in _t)
+
+        check("._pth 含 .. （项目根，cacx 包在这里）",
+
+              "\n..\n" in "\n" + _t)
+
+    # ABI：装错解释器的轮子会让 .pyd 加载不了，而报错完全不提 ABI。
+
+    _stray = [p.name for p in RT_SP.rglob("*")
+
+              if p.is_file() and "cp313" in p.name] if RT_SP.exists() else []
+
+    check("运行时里没有 cp313 的二进制", not _stray, f"{len(_stray)} 个：{_stray[:3]}")
+
+    _312 = [p.name for p in RT_SP.glob("*/**/*.pyd") if "cp312" in p.name] \
+        if RT_SP.exists() else []
+
+    check("运行时确实是 cp312 二进制", bool(_312), f"{len(_312)} 个 .pyd")
 
 
-if (SRC / "runtime").is_dir() and (RT).is_dir():
-    _a, _b = _rt_files(SRC / "runtime"), _rt_files(RT)
-    _missing = sorted(_a - _b)
-    check("运行时文件一个不少（打包规则没误伤第三方包内部文件）",
-          not _missing, f"源 {len(_a)} / 包 {len(_b)}，少了 {len(_missing)} 个："
-                         f"{_missing[:5]}")
+
+    # ⚠⚠ 最强的一道：**用暂存目录里那个解释器真跑一次小图 analyze()**。
+
+    #   前面的检查全是"文件在不在、对不对"，可 numpy/_expired_attrs_2_0.py
+
+    #   那种缺失，静态检查一道都抓不住 —— 49 项全绿而服务起不来。
+
+    #   真跑一次 1 秒级，比事后在组员机器上炸划算得多。
+
+    if (RT / "python.exe").exists():
+
+        # ⚠ 不要把冒烟脚本拷进暂存目录再删 —— 一来一回都是多余的磁盘写入，
+
+        #   而 _smoke_analyze.py 自己认 CACX_SMOKE_ROOT，
+
+        #   直接跑源码那份、把根指向 stage 即可，import 到的自然是**包内**的 cacx。
+
+        _r = _sp.run([str(RT / "python.exe"),
+
+                      str(SRC / "（测试）" / "_smoke_analyze.py")],
+
+                     cwd=str(stage), capture_output=True, text=True,
+
+                     encoding="utf-8", errors="replace",
+
+                     env={**os.environ, "CACX_SMOKE_ROOT": str(stage),
+
+                          "PYTHONIOENCODING": "utf-8",
+
+                          # ⚠ 不许写字节码：我这一步 import 了 numpy / networkx / cacx，
+
+                          #   会在暂存目录里生成 290 个 .pyc 和 27 个 __pycache__，
+
+                          #   然后把紧随其后的「全包无 .pyc」和「无 __pycache__」两道
+
+                          #   闸门**自己判红**。闸门污染了被闸的对象 ——
+
+                          #   那两道闸本意是查"源码树有没有残留运行产物"，
+
+                          #   结果被我自己刚跑出来的产物顶了。
+
+                          #   这里禁掉字节码，比事后去删干净、也比放宽那两道闸都对。
+
+                          "PYTHONDONTWRITEBYTECODE": "1"})
+
+        _out = _r.stdout or ""
+
+        _mark = [x for x in (_out + (_r.stderr or "")).strip().splitlines()
+
+                 if "SMOKE-" in x]
+
+        check("暂存目录的运行时能真跑 analyze()",
+
+              "SMOKE-OK" in _out, _mark[-1] if _mark else "无 SMOKE 行")
+
+        if "SMOKE-OK" not in _out:
+
+            for _x in (_out + (_r.stderr or "")).strip().splitlines()[-6:]:
+
+                print("        " + _x)
+
+
+
+    # ⚠ 运行时必须**逐字节原样**进包。除了 __pycache__ / .pyc（可再生，
+
+    #   且上面的闸要求它们为零），源里有多少个文件，包里就得有多少个。
+
+    def _rt_files(base: Path):
+
+        return {str(p.relative_to(base).as_posix())
+
+                for p in base.rglob("*")
+
+                if p.is_file() and "__pycache__" not in p.parts
+
+                and not p.name.endswith(".pyc")}
+
+
+
+
+
+    if (SRC / "runtime").is_dir() and (RT).is_dir():
+
+        _a, _b = _rt_files(SRC / "runtime"), _rt_files(RT)
+
+        _missing = sorted(_a - _b)
+
+        check("运行时文件一个不少（打包规则没误伤第三方包内部文件）",
+
+              not _missing, f"源 {len(_a)} / 包 {len(_b)}，少了 {len(_missing)} 个："
+
+                             f"{_missing[:5]}")
+
+
 check("无 __pycache__", not list(stage.rglob("__pycache__")))
 check("无 settings.json", not (stage / "config" / "settings.json").exists())
 check("有 settings.example.json",
@@ -603,6 +726,26 @@ except Exception as _e:
     print(f"  🔴 MCP 工具数取不到（{type(_e).__name__}: {_e}），退回硬编码 26 —— "
           f"这一版的工具数**未经验证**")
 
+# 瘦身包的启动说明必须**把更严的要求写在最前面**。它是另一个形态，
+# 不是"小一点的同一个"：完整包在没 Python / 没网时会自动改用自带运行时，
+# 瘦身包没有那个兜底，只能停下。把这点藏起来就是在发一个"看着一样、
+# 其实会卡住"的包 —— 组员多半以为解压坏了或以为工具有 bug。
+# （"关闭黑色命令行窗口 = 关闭服务"两种形态都一样，写在下面共用处。）
+SLIM_STEPS = (
+    "     ⚠ 这是【瘦身包】，**不含自带运行时**，体积小但要求更严：\n"
+    "       · 本机必须已装 Python 3.10 或更高\n"
+    "       · 首次启动需要联网装依赖（约 1-2 分钟，只装一次）\n"
+    "        这两条不满足时启动器会停下并说明原因。\n"
+    "        教室没网 / 机器没 Python 的，请向发包的人要【完整包】。\n"
+    "     启动器会把依赖装进你自己的 Python，然后起服务、开浏览器\n"
+    "     （可选的 MCP 功能同样需要 3.10+，不会自动安装）"
+) if SLIM else (
+    "     **什么都不用装。** 它会先看你的机器：\n"
+    "       · 本机有 Python 3.10+ 且能联网  → 用你的 Python，自动装依赖\n"
+    "       · 否则                          → 用本包自带的 runtime\\，不联网也能跑\n"
+    "     （想省事又不想装 Python：什么都不做，直接双击即可）"
+)
+
 (stage / "【组员请先看】README.txt").write_text(f"""cacx · 网信办公开语料库工具 —— 组员分发版
 生成时间：{datetime.now():%Y-%m-%d %H:%M:%S}
 GitHub: https://github.com/CoolCoolC666/cacx  （已开源，MIT）
@@ -638,11 +781,8 @@ GitHub: https://github.com/CoolCoolC666/cacx  （已开源，MIT）
      （路径含特殊字符会让 .bat 脚本出错，这是 Windows 的老毛病）
 
   2) 双击 启动cacx.bat（和 start-cacx.bat 效果相同）
-     **什么都不用装。** 它会先看你的机器：
-       · 本机有 Python 3.10+ 且能联网  → 用你的 Python，自动装依赖
-       · 否则                          → 用本包自带的 runtime\\，不联网也能跑
+{SLIM_STEPS}
      关闭黑色命令行窗口 = 关闭服务
-     （想省事又不想装 Python：什么都不做，直接双击即可）
 
   3) 浏览器打开 http://127.0.0.1:8770/
 
@@ -739,9 +879,33 @@ GitHub: https://github.com/CoolCoolC666/cacx  （已开源，MIT）
 #   write_text 返回的是写入的字符数(int)，直接拿去 `in` 一下就是
 #   "argument of type 'int' is not iterable"。
 _rt = (stage / "【组员请先看】README.txt").read_text(encoding="utf-8")
-for _claim in ("需要 Python 3.10+", 'Add Python to PATH"'):
-    check(f"README.txt 无过期说法「{_claim}」", _claim not in _rt)
-check("README.txt 说清了「不用装也能跑」", "什么都不用装" in _rt and "runtime" in _rt)
+if SLIM:
+    # 瘦身包里"需要 Python 3.10"是**合法且必须出现**的要求，不能当成
+    # 过期说法剔除 —— 同一个字符串，在完整包里是错的，在瘦身包里是对的。
+    # 判据必须跟着形态走，否则要么放过完整包的错话，要么误杀瘦身包。
+    check("瘦身包把更严的要求写在了最前面",
+          "不含自带运行时" in _rt and "完整包" in _rt)
+    check("瘦身包说清了「要完整包去找发包的人」", "发包的人" in _rt)
+    check("瘦身包没自称自带 runtime（那会误导）",
+          "自带的 runtime\\，不联网也能跑" not in _rt)
+else:
+    for _claim in ("需要 Python 3.10+", 'Add Python to PATH"'):
+        check(f"README.txt 无过期说法「{_claim}」", _claim not in _rt)
+    check("README.txt 说清了「不用装也能跑」",
+          "什么都不用装" in _rt and "runtime" in _rt)
+
+# ⚠⚠ 「活口径不许钉死在文档里」—— 这条守的是**一类**错误，不是某个数字。
+#   实测踩过：README 写「2024 年起 4411 篇已生成 AI 摘要」，写的那天是对的。
+#   后来我们录测试视频、顺手点了几次「AI 摘要」，这个数变成了 4432 ——
+#   它**不是历史数字，它会自己往上跑**，钉死之后就一直是错的，而且没人会发现。
+#   包内 README.txt 里那个数是打包时现算的（cs 来自 SQLite backup 后的快照），
+#   所以它永远为真；仓库里的 README.md 就不该再抄一份。
+#   判据用「同一行里出现摘要的字样 + 当前活口径真值」，而不是列一张禁用数字表 ——
+#   数字变了就失效的表，等于没有。
+_rm = (SRC / "README.md").read_text(encoding="utf-8")
+_bad = [ln.strip() for ln in _rm.splitlines()
+        if "摘要" in ln and str(cs["ai_annotations"]) in ln]
+check("README.md 没把活口径（AI 摘要条数）钉死", not _bad, f"{_bad[:1]}")
 
 print()
 print("=" * 66)
