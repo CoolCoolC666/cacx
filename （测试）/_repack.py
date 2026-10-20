@@ -35,7 +35,7 @@ DEST = SRC.parent / "网站程序"
 #   ① 验收闸/一致性闸都按 `cacx-分发版-*` 通配找目录，共用名字会让它们
 #      在磁盘上同时存在两个包时挑错那一个；
 #   ② 回收旧包只回收同名的那一个，两种形态互不误伤；
-#   ③ 组员拿到手能一眼看出这是哪个。
+#   ③ 使用者拿到手能一眼看出这是哪个。
 SLIM = "--slim" in sys.argv
 NAME = f"cacx-分发版-{datetime.now():%Y%m%d}" + ("-slim" if SLIM else "")
 MODE = "瘦身包（不含自带运行时）" if SLIM else "完整包（含自带运行时）"
@@ -64,7 +64,7 @@ DIR_EXCLUDE_BY_PATH = {
     "data", "venv", ".venv", "node_modules", "lib", "_cache",
     # 「（测试）」必须整目录排除 —— 里面的 tests_*.py 不带下划线，
     # 走不到「单下划线排除」那条规则，于是 34 个测试文件 + 9 张截图
-    # 会跟着进分发包。分发包是给组员用的，不该带我们的测试。
+    # 会跟着进分发包。分发包是给使用者用的，不该带我们的测试。
     "（测试）",
     "config/sites.d",
 }
@@ -89,7 +89,7 @@ PATTERNS = ("_*.py", "_*.js", "_*.txt", "_*.log", "_*.csv", "_*.jsonl", "*.err")
 VERBATIM_PREFIXES = ("runtime/",)
 
 # 文件级排除。settings.json / .env 是本机态（含真实路径、密钥、账号），
-# 跟着走就等于把组员机器的路径也"种"进去；带进去还会让服务读到别人机器的旧配置。
+# 跟着走就等于把使用者机器的路径也"种"进去；带进去还会让服务读到别人机器的旧配置。
 FILE_EXCLUDE = {
     "config/settings.json", ".env",
     # 自动演示：**进 git 但不进分发包**
@@ -199,7 +199,7 @@ if stage.exists():
 
 
 def to_recycle_file(p: Path):
-    """旧 zip 也必须进回收站 —— 组员的删除口径是「一切可恢复」。"""
+    """旧 zip 也必须进回收站 —— 使用者的删除口径是「一切可恢复」。"""
     ps = ("Add-Type -AssemblyName Microsoft.VisualBasic;"
           "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
           f"'{p}', 'OnlyErrorDialogs', 'SendToRecycleBin')")
@@ -358,7 +358,7 @@ else:
 
         _t = _pth[0].read_text(encoding="ascii").replace("\r\n", "\n")
 
-        # 见 _build_portable_runtime.py：少任何一行都会让组员机器直接起不来。
+        # 见 _build_portable_runtime.py：少任何一行都会让使用者机器直接起不来。
 
         check("._pth 打开了 import site", "import site" in _t)
 
@@ -389,7 +389,7 @@ else:
 
     #   那种缺失，静态检查一道都抓不住 —— 49 项全绿而服务起不来。
 
-    #   真跑一次 1 秒级，比事后在组员机器上炸划算得多。
+    #   真跑一次 1 秒级，比事后在使用者机器上炸划算得多。
 
     if (RT / "python.exe").exists():
 
@@ -582,11 +582,11 @@ check("全包无我的真实 key（逐字节比对）", not leak, str(leak))
 
 print()
 print("=" * 66)
-print("4  组员说明")
+print("4  使用者说明")
 print("=" * 66)
 # ---- 说明里的每个数字都从**打包用的那份快照**现算，不再硬编码 ----
 # 上一版就是硬编码写死的：清理「一文多栏目发」之后语料从 4519 变成 4416，
-# 但 _repack.py 里的字还是 4519 —— 直接重打包就会把过期数字发给组员，
+# 但 _repack.py 里的字还是 4519 —— 直接重打包就会把过期数字发给使用者，
 # 而且**没有任何检查会报错**（它只是段字符串）。
 pd = sqlite3.connect(f"file:{db_dst.as_posix()}?mode=ro", uri=True)
 P = {}
@@ -613,8 +613,8 @@ G = {}
 BASE_GRAPH = "http://127.0.0.1:8770/api/graph/analysis"
 # ⚠ 必须显式带 node_types，而且必须与前端 `gpDefaultTypes()` 一样是**全勾**。
 #   不带的话后端按「不放行」算（measure 被 confidence 门槛挡着），
-#   拿到的 1633/3921 是组员在网页上**根本看不到**的旧口径 —— README 会
-#   印出跟页面对不上的数，组员照着念当场自相矛盾。
+#   拿到的 1633/3921 是使用者在网页上**根本看不到**的旧口径 —— README 会
+#   印出跟页面对不上的数，使用者照着念当场自相矛盾。
 #   这里不写死关系类型名，只写实体类型（measure 是 4 类里唯一被门槛挡的）。
 import urllib.parse as _upg
 _BASE_T = _upg.urlencode({"min_degree": 2, "node_types":
@@ -653,7 +653,7 @@ try:
                                          _a["components"])
     # 网页画布上那行「N 节点 / M 边」读的是 **an['graph'] 里的数组长度**，
     # 不是顶层计数 —— 顶层是分析口径，画布默认只画权重前 300 个点。
-    # 这两个数差很多，组员照着念会当场自相矛盾，所以必须分别现算。
+    # 这两个数差很多，使用者照着念会当场自相矛盾，所以必须分别现算。
     _g = _a.get("graph") or {}
     G["rnodes"] = len(_g.get("nodes") or [])
     G["redges"] = len(_g.get("edges") or [])
@@ -684,7 +684,7 @@ try:
 except Exception as _e:
     # ⚠⚠ 这里**不能**再退回一组写死的数。
     #   实测过的教训：写死的那组 1759/4154/126 是「措施类默认勾选」**之前**的
-    #   口径，而线上早已是 12162/29069/886。带着它出包，组员照着念的数字
+    #   口径，而线上早已是 12162/29069/886。带着它出包，使用者照着念的数字
     #   和页面上看到的不一样，而且**全程 31 项验收全过、没有任何报错** ——
     #   比直接失败危险得多。
     #   所以现在宁可停：先起服务，再重跑打包。
@@ -692,7 +692,7 @@ except Exception as _e:
     print("  已重试 4 次仍失败，**中止打包**。")
     print("  请确认 http://127.0.0.1:8770 服务在跑（双击 启动cacx.bat），")
     print("  或等磁盘空闲后重跑。之所以不退回写死的数：")
-    print("  那组数来自旧口径，发出去会让组员念的数字和页面对不上，")
+    print("  那组数来自旧口径，发出去会让使用者念的数字和页面对不上，")
     print("  而验收环节查不出来 —— 悄悄发错比发不出去糟糕得多。")
     raise SystemExit(2)
 
@@ -729,7 +729,7 @@ except Exception as _e:
 # 瘦身包的启动说明必须**把更严的要求写在最前面**。它是另一个形态，
 # 不是"小一点的同一个"：完整包在没 Python / 没网时会自动改用自带运行时，
 # 瘦身包没有那个兜底，只能停下。把这点藏起来就是在发一个"看着一样、
-# 其实会卡住"的包 —— 组员多半以为解压坏了或以为工具有 bug。
+# 其实会卡住"的包 —— 使用者多半以为解压坏了或以为工具有 bug。
 # （"关闭黑色命令行窗口 = 关闭服务"两种形态都一样，写在下面共用处。）
 SLIM_STEPS = (
     "     ⚠ 这是【瘦身包】，**不含自带运行时**，体积小但要求更严：\n"
@@ -746,11 +746,11 @@ SLIM_STEPS = (
     "     （想省事又不想装 Python：什么都不做，直接双击即可）"
 )
 
-(stage / "【组员请先看】README.txt").write_text(f"""cacx · 网信办公开语料库工具 —— 组员分发版
+(stage / "【使用前必看】README.txt").write_text(f"""cacx · 网信办公开语料库工具 —— 分发版
 生成时间：{datetime.now():%Y-%m-%d %H:%M:%S}
 GitHub: https://github.com/CoolCoolC666/cacx  （已开源，MIT）
 
-⚠ 本项目仅供学习研究与课程作业用途。采集内容均来自政府网站公开发布
+⚠ 本项目仅供学习研究与技术研究用途。采集内容均来自政府网站公开发布
    页面，著作权归原作者及原发布网站。详见 CONDUCT.md。
 
 【本包内容】
@@ -762,13 +762,13 @@ GitHub: https://github.com/CoolCoolC666/cacx  （已开源，MIT）
                         另 {P['n24'] - P['body']} 篇是空正文，抽取与检索都按 {P['body']} 口径。
                         ⚠ 同一篇文章发在多个栏目时 URL 不同、正文相同，
                         这类重复**在 2024 年以来范围内已按正文指纹去掉**；
-                        2024 年以前的老文章没清理（不在作业分析范围内），
+                        2024 年以前的老文章没清理（不在分析范围内），
                         要按全站算篇数时记得这一点）
   README.md            完整说明（先看这个，里面有常见问题）
   CONDUCT.md           语料使用声明
   日志/ docs/          开发留痕与工程文档
-  组员对接/            各角色的任务提示词（00~05 + 总方案）——照着干活
-  组员数据包/          轻量数据集（小库+CSV，网站跑不动时的兜底）
+  任务指引/            分析任务提示词（00~05 + 总览）——照着干活
+  数据包/              轻量数据集（小库+CSV，网站跑不动时的兜底）
 
 【本包不含什么】
   X config/settings.json   打包方的密钥配置，**故意没放**
@@ -793,7 +793,7 @@ GitHub: https://github.com/CoolCoolC666/cacx  （已开源，MIT）
   · 数据面板：**七张图两组**——检索行为 4 张（按年/按月/栏目Top12/行为）
     + 权责边界 3 张（治理问题分布/高频机构/联合发文月度趋势）。
     每张右上角 ⬇图(PNG·2倍分辨率) / ⬇数据(CSV)，顶部筛选栏联动；
-    面板区右上「⬇ 面板 HTML」导出**断网双击即开**的作业版。
+    面板区右上「⬇ 面板 HTML」导出**断网双击即开**的离线版。
     ⚠ 权责边界三张是**关键词粗筛**（图上标了口径），做核对用，别当精确统计引用。
   · 关系图谱：点一条关系 → 列出支撑它的原文句子和可点链接（演示就演这两条）。
     ⚠ 本包已含图谱数据（去重实体 {P['ents']} / 关系 {P['rels']}），**开箱即用**，不用等谁合并。
@@ -839,12 +839,12 @@ GitHub: https://github.com/CoolCoolC666/cacx  （已开源，MIT）
   连上后共 {N_TOOLS} 个工具：取样/分词检索/机构候选挖掘归并/实体关系写入与查询/图谱统计，
   以及新词相关的 4 个（cacx_newwords_discover / cacx_newwords_review /
   cacx_newwords_adopt / cacx_list_userdict）。
-  具体按「组员对接」里你那份提示词说的一步来。
+  具体按「任务指引」里你那份提示词说的一步来。
   ⚠ cacx_newwords_adopt 会**往你的用户词典追加词**，默认 confirm=false，
     必须显式传 confirm=true 才真正写入 —— 别指望它自己动手。
 
-【交作业回传（5 人小组的规矩）】
-  你写入的是**你自己这份包的本地库**，协调人的主库看不到。
+【交付回传（5 人团队的规矩）】
+  你写入的是**你自己这份包的本地库**，维护者的主库看不到。
   所以成果一律以 **CSV 为准**：R1 用 cacx_list_entities()/cacx_list_relations()
   导出（或用站点接口导出），R3/R4 交各自 CSV+图+README，R5 交报告 md。
   打包命名 姓名-编号-任务名.zip，**钉钉发回**；**不要发 data/cacx.db**
@@ -857,7 +857,7 @@ GitHub: https://github.com/CoolCoolC666/cacx  （已开源，MIT）
   ⚠ 生成摘要会消耗配额 —— 程序默认「只预览不执行」，先预览再生成。
   ⚠ 密钥别发群里、别贴进代码、别提交到仓库。
 
-【给组员共享服务】
+【给使用者共享服务】
   推荐每人跑自己的一份包（互不依赖）。要共用一台的话：
   同一台机器：其他人用 http://127.0.0.1:8770/ 访问即可
   不同电脑：设置页把 app.host 改成 0.0.0.0，同组用那台机器的局域网 IP 访问。
@@ -872,13 +872,13 @@ GitHub: https://github.com/CoolCoolC666/cacx  （已开源，MIT）
 # ⚠ 这里也查一遍「说法」，而不是只在验收闸里查。
 #   本包的启动优先级改过一次：现在是「本机 Python 3.10+ 且能联网就用本机
 #   并装依赖，否则用自带 runtime」。README 若还写着「需要 Python 3.10+，
-#   安装时务必勾选 Add Python to PATH」，就是在教组员做一件**根本不需要做**
+#   安装时务必勾选 Add Python to PATH」，就是在教使用者做一件**根本不需要做**
 #   的事，还会让人以为不装 Python 就跑不起来 —— 恰好是随包携带运行时要
 #   消灭的那个印象。数字哨兵盯不住说法，所以这条只能用子串匹配。
 # ⚠ 用的是**写完后读回来的文本**，不是 write_text 的返回值 ——
 #   write_text 返回的是写入的字符数(int)，直接拿去 `in` 一下就是
 #   "argument of type 'int' is not iterable"。
-_rt = (stage / "【组员请先看】README.txt").read_text(encoding="utf-8")
+_rt = (stage / "【使用前必看】README.txt").read_text(encoding="utf-8")
 if SLIM:
     # 瘦身包里"需要 Python 3.10"是**合法且必须出现**的要求，不能当成
     # 过期说法剔除 —— 同一个字符串，在完整包里是错的，在瘦身包里是对的。
@@ -955,6 +955,6 @@ with zp.open("rb") as fh:
         h.update(blk)
 print(f"  SHA256: {h.hexdigest()}")
 print(f"  路径  : {zp}")
-print(f"  散装  : {stage}   （保留，方便组员直接拷贝文件夹）")
+print(f"  散装  : {stage}   （保留，方便使用者直接拷贝文件夹）")
 print(f"\n通过 {ok} 项，失败 {fail} 项")
 sys.exit(1 if fail else 0)

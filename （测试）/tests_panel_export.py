@@ -258,7 +258,7 @@ class TestPanelExport(Base):
         self.assertTrue(r.content.startswith(b"\xef\xbb\xbf"),
                         "Excel 打开无 BOM 的 UTF-8 CSV 会乱码")
 
-    # -------------------------------------- 三张作业相关的图
+    # -------------------------------------- 三张分析用的图
     def test_problems_导出可用(self):
         """治理问题分布。这张图服务的是报告主题「角色画像」，
         而旁边那张「检索行为」服务的是我们自己的操作 —— 两者不能混。"""

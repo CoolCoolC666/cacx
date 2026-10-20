@@ -182,7 +182,7 @@ def import_corpus(db, roots: Dict[str, Path], verbose: bool = True
 
 
 def project_root_of(roots: Dict[str, Path]) -> Path:
-    """从语料根反推作业根（用于定位日志目录）"""
+    """从语料根反推任务根（用于定位日志目录）"""
     for r in roots.values():
         return r.parent
     return cfgmod.PROJECT_ROOT

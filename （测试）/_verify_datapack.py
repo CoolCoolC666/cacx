@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""组员数据包 · 交付前核对闸
+"""数据包 · 交付前核对闸
 
 为什么单独有这道闸
   ================================================================
-  数据包是**给组员的最终交付物**，而它由 _export_pack.py 现算生成。
+  数据包是**给使用者的最终交付物**，而它由 _export_pack.py 现算生成。
   生成脚本对了不等于产物对了：上一版就出现过
     · 「疑似联合机关」整列是 `部` 这种残缺词和大量空值
     · 字段说明.md 写着 4416，实际库还是 4515 —— **文档与数据各说各话**
@@ -20,11 +20,11 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8")
 # ⚠ 本文件在 （测试）/ 里，所以是 parent.parent。
-#   写成 parent 会指到 （测试）/ 上去，那儿没有 组员数据包/ ——
+#   写成 parent 会指到 （测试）/ 上去，那儿没有 数据包/ ——
 #   而 sqlite 的 file: URI 模式会直接报 unable to open database file，
 #   不会给你一个"看起来像空库"的假象，这一点比 Database() 好。
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PACK = ROOT / "组员数据包"
+PACK = ROOT / "数据包"
 
 ok = bad = 0
 
@@ -40,11 +40,11 @@ def chk(label, cond, detail=""):
 
 
 print("=" * 70)
-print("组员数据包 · 交付前核对")
+print("数据包 · 交付前核对")
 print("=" * 70)
 
 # ---- db ----
-p = PACK / "cacx-作业数据集.db"
+p = PACK / "cacx-数据集.db"
 c = sqlite3.connect(f"file:{p.as_posix()}?mode=ro&immutable=1", uri=True)
 cols = [r[1] for r in c.execute("PRAGMA table_info(articles)")]
 chk("articles 有 body_hash 列（字段说明已写）", "body_hash" in cols, str(cols[-2:]))
@@ -124,7 +124,7 @@ chk("机关列不是成片空（旧版大量空值的问题）", noorg < len(cu)
 
 # ---- 两级口径：候选清单的联合列必须是**窄**口径 ----
 # 这条守的是一个我差点改坏的地方：旧包候选清单的联合列 (65/47) 比线索表 (73/51)
-# 少，我一度当成"旧包自相矛盾"想统一成宽口径 —— 那会让组员的投票文档
+# 少，我一度当成"旧包自相矛盾"想统一成宽口径 —— 那会让使用者的投票文档
 # 从 39/30 静默变成 47/34。穷举后确认是**有意的两级设计**，14/14 精确命中旧 CSV。
 NARROW = re.compile(r"(联合|印发|会同)")
 db2 = sqlite3.connect(f"file:{p.as_posix()}?mode=ro&immutable=1", uri=True)

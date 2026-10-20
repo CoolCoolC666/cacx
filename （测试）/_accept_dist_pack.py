@@ -6,9 +6,9 @@
   _repack.py 的三道闸只能证明「我按计划拷了文件、排除了密钥」。
   它证明不了这两件事：
     ① zip 本身完整（历史上真踩过：漏文件、把上一轮 __pycache__ 打进去）
-    ② 包内的库/说明/服务**互相自洽** —— 组员拿到后双击就能跑，
+    ② 包内的库/说明/服务**互相自洽** —— 使用者拿到后双击就能跑，
        而且 README 里念出的每个数字都跟他自己打开网页看到的对上
-  所以这里测的是**最终那个 .zip**，不是散装目录：组员收到的是 zip。
+  所以这里测的是**最终那个 .zip**，不是散装目录：使用者收到的是 zip。
 
 跑法：py -3 （测试）\_accept_dist_pack.py [--keep] [--full-graph]
   --keep        跑完不删临时解压目录（排查时用）
@@ -134,15 +134,15 @@ def in_zip(suffix):
 
 
 for need in ("cacx/web/static/index.html", "data/cacx.db", "README.md",
-             "start-cacx.bat", "【组员请先看】README.txt", "requirements.txt"):
+             "start-cacx.bat", "【使用前必看】README.txt", "requirements.txt"):
     chk(f"zip 内含 {need}", in_zip(need))
 for must_not in ("config/settings.json", "autodemo.py", "run-demo.bat",
                  "__pycache__/", ".git/config"):
     chk(f"zip 不含 {must_not}", not in_zip(must_not))
-# 组员数据包与日志要真在包里（丢了组员就没法选栏目 / 看不到留痕）
-chk("zip 内含 组员数据包/ 四个产物",
-    all(in_zip(f"组员数据包/{x}") for x in
-        ("cacx-作业数据集.db", "articles.csv", "栏目候选清单.csv", "联合发文线索.csv")))
+# 数据包与日志要真在包里（丢了使用者就没法选栏目 / 看不到留痕）
+chk("zip 内含 数据包/ 四个产物",
+    all(in_zip(f"数据包/{x}") for x in
+        ("cacx-数据集.db", "articles.csv", "栏目候选清单.csv", "联合发文线索.csv")))
 # ⚠ 这条上一版写的是 in_zip("日志/")，而 in_zip 是 endswith ——
 #   目录前缀永远匹配不上任何 .md 文件条目，于是闸门**对着有 13 份日志的包报了 FAIL**。
 #   报错方向是"检查脚本自己写错"，不是包有问题：这类 FAIL 必须先怀疑判据。
@@ -209,8 +209,8 @@ chk("包内 db integrity_check ok",
 c.close()
 
 # ---------------------------------------------------------------- 4 数据包
-print("\n--- 组员数据包 ---")
-pk = stage / "组员数据包"
+print("\n--- 数据包 ---")
+pk = stage / "数据包"
 d = (pk / "字段说明.md").read_text(encoding="utf-8") if (pk / "字段说明.md").exists() else ""
 # ⚠ 这里也**不写死** 4416：改成「字段说明自述的数 == 库真值」。
 chk("字段说明.md 的 2024+ 数 == 库真值", str(n24) in d, f"库里 {n24}")
@@ -226,7 +226,7 @@ chk("栏目清单 25 行且篇数合计 == 库里的 2024+",
     f"{len(cl)} 行 / 合计 {sum(int(r['2024+篇数']) for r in cl)} / 库 {n24}")
 # 窄口径重算：这一条守住「两级口径」，防止有人手滑统一成宽口径
 NARROW = re.compile(r"(联合|印发|会同)")
-c2 = sqlite3.connect(f"file:{(pk/'cacx-作业数据集.db').as_posix()}?mode=ro&immutable=1",
+c2 = sqlite3.connect(f"file:{(pk/'cacx-数据集.db').as_posix()}?mode=ro&immutable=1",
                      uri=True)
 mis = 0
 for r in cl:
@@ -243,7 +243,7 @@ print("\n--- 启动包内服务（端口 8791，不碰开发用的 8770）---")
 #   上一版写死 sys.executable，于是验收跑的是开发机的 Python ——
 #   而开发机碰巧装了 scipy，networkx 的 pagerank 能跑；
 #   包里那份 requirements.txt 少了 scipy 这件事就永远测不出来，
-#   48 项全绿、图谱面板在组员机器上却是坏的。
+#   48 项全绿、图谱面板在使用者机器上却是坏的。
 #   「在自己机器上绿」不等于「在收件人机器上绿」——
 #   尤其这台机器的环境比交付目标环境**更完整**。
 _pack_py = stage / "runtime" / "python.exe"
@@ -259,11 +259,11 @@ if SLIM:
     chk("瘦身包确实不含 runtime\\", not (stage / "runtime").exists())
     chk("本机解释器 >= 3.10（瘦身包的前提）",
         sys.version_info >= (3, 10), f"{sys.version_info[0]}.{sys.version_info[1]}")
-    print("用本机解释器: " + PY_EXE + "  （瘦身包本来的契约，组员也是这台机器跑）")
+    print("用本机解释器: " + PY_EXE + "  （瘦身包本来的契约，使用者也是这台机器跑）")
 else:
     if not _pack_py.exists():
         print("⚠ 包内没有 runtime\\python.exe，退回开发机解释器 —— "
-              "这次验收**不代表组员机器**的真实环境")
+              "这次验收**不代表使用者机器**的真实环境")
     chk("包内自带便携运行时", _pack_py.exists(), f"{(stage / 'runtime').exists()}")
 
 # ⚠ 小图冒烟：必须用**包内解释器 + 包内 cacx** 跑。
@@ -339,7 +339,7 @@ if health:
     #   子图 1633→12162、边 3921→29069、画布 1449→2995），这些常量就全废了，
     #   而写死的常量**不会自己报错**，只会让验收恒红或被绕过。
     #   真正的保证是：README 承诺的数 == 这个包自己起服务后报出的数。
-    #   这条永远不会过期，也正是「组员照着念不会被打脸」的唯一依据。
+    #   这条永远不会过期，也正是「使用者照着念不会被打脸」的唯一依据。
     _pack_db = stage / "data" / "cacx.db"
     _con = sqlite3.connect(f"file:{_pack_db.as_posix()}?mode=ro", uri=True)
     try:
@@ -351,7 +351,7 @@ if health:
         f"health={health.get('articles')} 包内库={_n_art}")
 
     # ⚠ 必须带 node_types（全勾），与前端 gpDefaultTypes() 同口径。
-    #   不带就是「不放行」，拿到组员在页面上看不到的另一套数。
+    #   不带就是「不放行」，拿到使用者在页面上看不到的另一套数。
     #
     #   ⚠⚠ 这一步默认**跳过**，要 --full-graph 才跑。
     #   原因不是图谱算不动，是它太贵：min_degree=2 下有 12162 个节点，
@@ -360,7 +360,7 @@ if health:
     #   「300/2995」**只有这个接口给得出来**（/api/graph 只回 300 条边）。
     #   把它塞进日常验收，结果就是每次验收都要等十分钟，且大概率中途超时。
     #   所以：默认跑快检，慢检显式开。
-    rt = (stage / "【组员请先看】README.txt").read_text(encoding="utf-8")
+    rt = (stage / "【使用前必看】README.txt").read_text(encoding="utf-8")
 
     # 静态口径检查（不需要服务，任何时候都能跑）：
     # 上一版口径的数字一个都不许出现在 README 里。
@@ -379,7 +379,7 @@ if health:
         # 数字哨兵盯不住**说法**的过期。加派这一条，是因为本包的启动逻辑
         # 改过一次优先级：现在是「本机 Python 3.10+ 且有网就用本机并装依赖，
         # 否则用自带 runtime」。README 一旦还写着「需要 Python 3.10+，
-        # 安装时务必勾选 Add Python to PATH」，就等于在教组员做一件
+        # 安装时务必勾选 Add Python to PATH」，就等于在教使用者做一件
         # **根本不需要做的事**，而且会让人以为不装 Python 就跑不起来 ——
         # 这正是当初随包携带运行时要消灭的那个印象。
         # 说法型哨兵只能用子串匹配，因为数字哨兵对它无能为力。
@@ -410,7 +410,7 @@ if health:
         gn, ge, gc = an["nodes"], an["edges"], an["components"]
         g = an.get("graph") or {}
         cn, ce = len(g.get("nodes") or []), len(g.get("edges") or [])
-        # README.txt 承诺的数必须与**服务真值**一致 —— 「组员照着念不会被
+        # README.txt 承诺的数必须与**服务真值**一致 —— 「使用者照着念不会被
         # 打脸」的唯一保证。这里断言的是 README↔服务，不写死任何常量，
         # 所以口径再变也不会过期。
         for label, val in (("分析口径节点", gn), ("分析口径边", ge),

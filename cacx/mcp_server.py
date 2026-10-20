@@ -668,7 +668,7 @@ def cacx_sample_options(date_from: str = "2024-01-01",
     """
     列出可配样本的栏目及各有多少篇（**第一步总是先调这个**）。
 
-    老师要「任选一个栏目，300-500 篇，2024 年以来」，但库里栏目从
+    评审要求「任选一个栏目，300-500 篇，2024 年以来」，但库里栏目从
     14 篇到 1600 多篇都有，光「选栏目」凑不出 300-500。所以规则是
     **时间窗给足 + 篇数用 limit 截**，任何一个栏目都能配出合规样本。
 
@@ -697,7 +697,7 @@ def cacx_sample(
     参数：
         site / column: 都可空；column 传栏目名（如「网信要闻」）。
         date_from / date_to: 闭区间。默认 2024 至今 —— **不要**收窄到
-            2025 或更晚，老师要「2024 年以来」的全貌。
+            2025 或更晚，评审要求「2024 年以来」的全貌。
         limit: 篇数上限（1~200000）。
         strategy: stratified（默认，按年份分层，保证每年都被抽到）
                   / recent（取最近 N 篇）
@@ -792,7 +792,7 @@ def cacx_mine_orgs(
 @mcp.tool()
 def cacx_put_entities(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    写入实体（**写操作**，作业 R1 的产物落库处）。
+    写入实体（**写操作**，任务 R1 的产物落库处）。
 
     rows 每项：
         name:       实体名，如「中央网信办」
@@ -803,8 +803,8 @@ def cacx_put_entities(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         extractor:  谁抽的，默认 "ai"
         confidence: 0~1
 
-    ⚠ 为什么 article_id 是硬要求：老师要求演示「点一条关系回溯原文」。
-       没有出处的关系在图谱上就是无法验证的孤证，答辩时一问就塌。
+    ⚠ 为什么 article_id 是硬要求：评审要求求演示「点一条关系回溯原文」。
+       没有出处的关系在图谱上就是无法验证的孤证，演示时一问就塌。
 
     幂等：同一篇的同一实体重复提交只更新证据，不产生重复行，
           所以 AI 重跑一遍不会把图谱撑成双倍。
@@ -821,7 +821,7 @@ def cacx_put_entities(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 @mcp.tool()
 def cacx_put_relations(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    写入关系（**写操作**，作业 R2 的产物落库处）。
+    写入关系（**写操作**，任务 R2 的产物落库处）。
 
     rows 每项：
         src_name:   起点实体名
@@ -883,7 +883,7 @@ def cacx_graph(limit: int = 300) -> Dict[str, Any]:
     n(跨几篇), weight, article_ids[]}]}
 
     edges 里刻意带 article_ids —— 前端拿到后即可实现「点一条关系
-    跳到支持它的原文」。这就是老师要的现场演示动作。
+    跳到支持它的原文」。这就是评审要求的现场演示动作。
     """
     try:
         with _db() as d:
@@ -898,7 +898,7 @@ def cacx_graph_stats() -> Dict[str, Any]:
     图谱概览（只读）：实体总数/机构数、关系条数/去重后边数、
     按类型分布、以及 **no_evidence**（没有原文证据的关系数）。
 
-    no_evidence 是答辩风险指标 —— 别让它停在高位。
+    no_evidence 是演示风险指标 —— 别让它停在高位。
     """
     try:
         with _db() as d:

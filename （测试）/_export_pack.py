@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""重建 组员数据包/ 的四个产物（给组员的轻量数据集）。
+r"""重建 数据包/ 的四个产物（给使用者的轻量数据集）。
 
 ⚠ 上一版生成脚本已被回收站清理，规则丢失。本脚本是**照着旧产物反推复原**的，
    反推过程有据可查，别再凭印象改口径：
@@ -10,7 +10,7 @@ r"""重建 组员数据包/ 的四个产物（给组员的轻量数据集）。
     · 2024单年篇数   = SUM(year='2024')
     · 覆盖月份数     = COUNT(DISTINCT month)
     · 落入300-500的窗口 = 24-25 窗口篇数落在 [300,500] 写 '2024-2025'，否则 '无'
-    · 推荐理由       = 达标时拼「【窗口】共N/M篇，符合老师300-500要求；
+    · 推荐理由       = 达标时拼「【窗口】共N/M篇，符合评审方300-500要求；
                         联合发文K篇，机构合作网络有真素材；跨X个月，时间轴够用」；
                        不达标时 月数>=20 写「跨X个月，时间轴够用」，
                        否则「篇数不达标，仅作参考」
@@ -26,12 +26,12 @@ r"""重建 组员数据包/ 的四个产物（给组员的轻量数据集）。
       cac/网信要闻 65·39    zjwx/网信要闻 47·30   cac/时政要闻 22·19
       cac/网信发布 11·10    zjwx/治理监管 4·3     cac/地方网信 1·1
       cac/互联网内容管理 2·1
-    所以两个口径**各自照原样保留** —— 组员的投票文档不会因为换了脚本而数字漂移。
+    所以两个口径**各自照原样保留** —— 使用者的投票文档不会因为换了脚本而数字漂移。
     搜索过程见 _tmp_brute_titles.py / _tmp_verify_narrow.py 的记录。
 
   ⚠ 唯一没能复原的是线索表的「疑似联合机关」那一列。原脚本用的是一套已丢失的
     粗糙正则，产出过 `部`、`部 / 中央网信办` 这种残缺词，还有大量空值。
-    改用 cacx.extract._org_mentions()，与主库抽取**同源**，组员可以自己复算。
+    改用 cacx.extract._org_mentions()，与主库抽取**同源**，使用者可以自己复算。
     代价：这一列的取值与旧版不同，字段说明.md 已注明口径。
 
 跑法：py -3 （测试）\_export_pack.py [--dry]
@@ -49,9 +49,9 @@ sys.path.insert(0, str(ROOT))
 
 from cacx.extract import _org_mentions   # noqa: E402
 
-PACK = ROOT / "组员数据包"
+PACK = ROOT / "数据包"
 SRC_DB = ROOT / "data" / "cacx.db"
-OUT_DB = PACK / "cacx-作业数据集.db"
+OUT_DB = PACK / "cacx-数据集.db"
 DRY = "--dry" in sys.argv
 
 # ── 两级口径，各自照旧，别合并（见模块 docstring 的 14/14 验证）──
@@ -59,13 +59,13 @@ DRY = "--dry" in sys.argv
 JOINT_WIDE = re.compile(r"(联合|印发|会同|联发|共同)")
 # 窄口径：算「栏目候选清单.csv」的 联合发文类 两列
 # ⚠ 上一版这里两个地方共用了一个宽口径，于是 A/B 的联合数从旧包的 39/30
-#   变成 47/34 —— 组员手上的投票文档会莫名其妙换数。窄口径才是旧包的真实规则。
+#   变成 47/34 —— 使用者手上的投票文档会莫名其妙换数。窄口径才是旧包的真实规则。
 JOINT_NARROW = re.compile(r"(联合|印发|会同)")
 ORG_SHOW = 3            # 疑似联合机关最多列几个
 
 
 def to_recycle(p: Path) -> bool:
-    """旧产物送回收站（组员的删除口径是「一切可恢复」），并确认它真消失了。"""
+    """旧产物送回收站（使用者的删除口径是「一切可恢复」），并确认它真消失了。"""
     if not p.exists():
         return True
     verb = "DeleteDirectory" if p.is_dir() else "DeleteFile"
@@ -85,7 +85,7 @@ def to_recycle(p: Path) -> bool:
 
 
 print("=" * 70)
-print("组员数据包 · 重建")
+print("数据包 · 重建")
 print("=" * 70)
 
 src = sqlite3.connect(f"file:{SRC_DB.as_posix()}?mode=ro", uri=True)
@@ -115,16 +115,16 @@ if DRY:
 # ---------------------------------------------------------------- 1 库
 print()
 print("=" * 70)
-print("1  cacx-作业数据集.db")
+print("1  cacx-数据集.db")
 print("=" * 70)
-# 用主库的真实 DDL，保证组员拿 cacx 代码能直接读；
+# 用主库的真实 DDL，保证使用者拿 cacx 代码能直接读；
 # 但只灌 2024+ 的文章，其余表留空壳（字段说明里写明了这一点）。
 ddl = src.execute("SELECT sql FROM sqlite_master WHERE type='table' "
                   "AND name='articles'").fetchone()[0]
 out = sqlite3.connect(str(OUT_DB))
 out.execute(ddl)
 # 索引：沿用旧包的 4 个（字段说明.md 里写明的那套），不跟着主库新增的走，
-# 因为组员只会按字段说明里那份清单去用。
+# 因为使用者只会按字段说明里那份清单去用。
 for ddl_idx in [
         "CREATE INDEX idx_articles_site_pubday ON articles(site, pub_day)",
         "CREATE INDEX idx_articles_column ON articles(column_name)",
@@ -139,7 +139,7 @@ src.commit()
 src.execute("DETACH DATABASE pack")
 n_out = out.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
 print(f"  articles 灌入 {n_out} 篇（源库 {n_2024}）")
-# 空表壳，方便组员 join 时不报「no such table」
+# 空表壳，方便使用者 join 时不报「no such table」
 for t in ("ai_annotations", "ai_failures", "events", "external_links", "sync_runs"):
     cols = {r[1] for r in src.execute(f"PRAGMA table_info({t})")}
     if cols:
@@ -200,7 +200,7 @@ for (site, sname, code, col), items in groups.items():
                     and (r["pub_day"] or "") <= "2025-12-31")
     win = "2024-2025" if 300 <= n2425 <= 500 else "无"
     if win != "无":
-        why = (f"【{win}】共{n2425}/{n24}篇，符合老师300-500要求；"
+        why = (f"【{win}】共{n2425}/{n24}篇，符合评审方300-500要求；"
                f"联合发文{joint2425}篇，机构合作网络有真素材；"
                f"跨{months}个月，时间轴够用")
     elif months >= 20:

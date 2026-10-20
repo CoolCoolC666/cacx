@@ -10,10 +10,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 EDITS = [
-    ("组员数据包/字段说明.md",
+    ("数据包/字段说明.md",
      "需要 Python 3.10+。原始库有",
      "需要 Python 3.8+（推荐 3.12；仅可选的 MCP 功能需要 3.10+）。原始库有"),
-    ("组员对接/README-任务拆分总方案.md",
+    ("任务指引/README-任务拆分总方案.md",
      '2. 装 Python 3.10+（安装时**务必勾选 "Add Python to PATH"**）',
      '2. 装 Python 3.8+（推荐 3.12 / 3.13；安装时**务必勾选 '
      '"Add Python to PATH"**。只有可选的 MCP 功能需要 3.10+，'

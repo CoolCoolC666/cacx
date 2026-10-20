@@ -533,7 +533,7 @@ def api_events(days: int = Query(30, ge=1, le=365), site: str = ""):
     return _db().event_stats(days, site=site)
 
 
-# --------------------------------------------- 面板：三张作业相关的图
+# --------------------------------------------- 面板：三张分析用的图
 # 这三张服务的是「网信办角色画像与权责边界」这个报告主题，
 # 与旁边那张「检索行为」（我们自己的操作记录）是两回事。
 _PANEL_D0 = "2024-01-01"
@@ -812,7 +812,7 @@ def api_panel_timeline(site: str = "", top: int = Query(_TL_TOP, ge=1, le=10),
                        date_from: str = "", date_to: str = "",
                        include_ai: bool = True,
                        months: int = Query(0, ge=0, le=120)):
-    """时间轴 —— 对应老师要求的「发文量/主题随时间的变化」。
+    """时间轴 —— 对应评审要求求的「发文量/主题随时间的变化」。
 
     months=0 表示不截断（给 CSV 导出用）；网页传面板的月份下拉值。
 
@@ -831,7 +831,7 @@ def api_panel_timeline(site: str = "", top: int = Query(_TL_TOP, ge=1, le=10),
 @app.get("/api/panel/problems")
 def api_panel_problems(site: str = "", date_from: str = "", date_to: str = ""):
     """
-    治理问题关键词分布 —— 直接对应老师要的「角色画像」。
+    治理问题关键词分布 —— 直接对应评审要求的「角色画像」。
 
     ⚠ 这是**关键词粗筛口径**，不是人工标注的分类。
     一个议题可能同时命中两类（既是网络暴力又涉及未成年人），
@@ -935,7 +935,7 @@ def api_panel_export(which: str, site: str = "",
     把面板上的图表数据导成 CSV。
 
     为什么单独开这个口而不是让前端拼：论文里要的是**能直接进表格/统计软件
-    的数据**，不是截���图片。而「界面看到的数字」与「导出的数字」必须是
+    的数据**，不是截图图片。而「界面看到的数字」与「导出的数字」必须是
     同一份 —— 前端拼 CSV 就必然有「改了筛选条件忘了同步」的隐患。
     这里直接复用面板那几个接口的取数逻辑，口径天然一致。
 
@@ -1296,8 +1296,8 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
     """
     把整个数据面板导出成一个**独立的 HTML 文件**。
 
-    为什么要有这个：老师要的「可运行的展示网站」我们已经有了，
-    但报告和作业里还需要一个**能直接交上去、能贴进文档、离线能开**的东西。
+    为什么要有这个：评审要求的「可运行的展示网站」我们已经有了，
+    但报告和任务里还需要一个**能直接归档、能贴进文档、离线能开**的东西。
     这个 HTML 双击就开、不断网、不需要 Python、不需要装任何东西。
 
     刻意不引任何图表库（同 _svg_bars 的理由），
@@ -1360,7 +1360,7 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
     if site and e.get("note"):
         note = f'<div class="note">{_esc(e["note"])}</div>'
 
-    # ---- 三张作业相关的图（与网页端同源，保证「看到的 = 交出去的」）----
+    # ---- 三张分析用的图（与网页端同源，保证「看到的 = 交出去的」）----
     prob = api_panel_problems(site=site, date_from=date_from, date_to=date_to)
     orgg = api_panel_orgs(site=site, limit=top,
                           date_from=date_from, date_to=date_to, mode=mode)
@@ -1503,7 +1503,7 @@ def api_panel_snapshot(site: str = "", months: int = Query(36, ge=6, le=120),
 </div>
 <div class="foot">
 数据来源：中央网信办（cac.gov.cn）、浙江网信网（zjwx.gov.cn）公开发布页面。<br>
-生成工具：cacx · 网络舆情分析与监测课程作业。仅供学习研究与课程作业用途，
+生成工具：cacx · 网络舆情分析与监测学习研究。仅供学习研究与学习研究用途，
 内容著作权归原作者及原发布网站，不得商用。
 </div>
 </div></body></html>"""
@@ -1538,13 +1538,13 @@ def api_sample(site: str = "", column: str = "",
     """
     抽一个分析样本。
 
-    老师要「任选一个栏目，300-500 篇，2024 年以来」——
+    评审要求「任选一个栏目，300-500 篇，2024 年以来」——
     但栏目规模从 14 篇到 1639 篇不等，光选栏目凑不出 300-500。
     所以规则是：**时间窗给足，篇数用 limit 截，抽样默认按年分层**。
 
     ⚠ 默认 stratified 而不是「取最近 N 篇」：
       后者只覆盖末段（实测 cac·网信要闻 取最近 500 篇，2024 年整年丢失），
-      而老师明确要求「发文量与主题随时间的变化」，时间轴不能只剩一年。
+      而评审方明确要求「发文量与主题随时间的变化」，时间轴不能只剩一年。
 
     ⚠ 走结果缓存：with_items 进键 —— 它决定 items 给全量还是只给 20 条
       预览，两个响应不一样大，混用会让「样本明细」和「样本预览」串位。
@@ -1697,7 +1697,7 @@ def api_graph(site: str = "", date_from: str = "", date_to: str = "",
 
 @app.get("/api/graph/stats")
 def api_graph_stats():
-    """图谱概览。no_evidence 是答辩风险指标：没有原文证据的关系越多越危险"""
+    """图谱概览。no_evidence 是演示风险指标：没有原文证据的关系越多越危险"""
     return _db().graph_stats()
 
 
@@ -1927,7 +1927,7 @@ EXTRACT_MODES = ("full", "incremental")
 @app.post("/api/extract/run")
 def api_extract_run(req: ExtractReq):
     """
-    规则抽取实体关系（老师追问「这个数怎么来的」时可当场重跑）。
+    规则抽取实体关系（评审方追问「这个数怎么来的」时可当场重跑）。
 
     ⚠ 默认 write=false 只返回结果不落库 —— 抽取要跑几十秒，
       误触就写库会污染主库。
@@ -2769,7 +2769,7 @@ def api_graph_facets(limit: int = Query(20, ge=1, le=60),
 @app.get("/api/graph/evidence")
 def api_graph_evidence(src: str, dst: str, rel_type: str = "",
                        limit: int = Query(50, ge=1, le=200)):
-    """点一条边 → 列出支撑它的原文句子与可点链接（老师要求的「点边看原文」）"""
+    """点一条边 → 列出支撑它的原文句子与可点链接（评审要求求的「点边看原文」）"""
     return {"items": _db().relation_evidence(src, dst, rel_type=rel_type,
                                              limit=limit)}
 

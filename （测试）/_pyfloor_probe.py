@@ -119,7 +119,7 @@ def main():
     print("=" * 70)
     hits = scan_syntax()
     # 发布产物（cacx/、*.py 顶层脚本）与 测试/工具 目录要分开算：
-    # 只有前者会被打包给组员，后者的门槛跟"组员能不能跑"无关。
+    # 只有前者会被打包给使用者，后者的门槛跟"使用者能不能跑"无关。
     shipped = [h for h in hits if not h[0].startswith("（测试）")]
     tooling = [h for h in hits if h[0].startswith("（测试）")]
     if not shipped:
@@ -128,7 +128,7 @@ def main():
         for path, ver, why in sorted(shipped, key=lambda x: (x[1], x[0])):
             print(f"  HIT   需要>={'.'.join(map(str, ver))}  {path}  {why}")
     if tooling:
-        print(f"  note  测试/工具目录另有 {len(tooling)} 处（不随包发布，不影响组员）")
+        print(f"  note  测试/工具目录另有 {len(tooling)} 处（不随包发布，不影响使用者）")
     print()
     print("=" * 70)
     print("2) networkx API 使用面（决定能不能降到 3.1）")

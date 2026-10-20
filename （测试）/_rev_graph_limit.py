@@ -54,7 +54,7 @@ def _replace_line(path, old, new):
     ⚠ 必须按行而不是多行串：cacx/graph_analysis.py 是 CRLF，
       用 "\n" 拼的多行串在那里永远匹配不上（第一版就栽在这，静默跳过）。
     ⚠ 每个变异都必须是**单行**，否则缩进回退的判断很容易连带吃掉
-      周围的正常代码，最后报的是 SyntaxError 而��是断言失败 ——
+      周围的正常代码，最后报的是 SyntaxError 而不是断言失败 ——
       那不算「测试抓住了」（测试抓不住 bug 等于没测）。
     """
     lines = io.open(path, encoding="utf-8").read().splitlines(keepends=True)

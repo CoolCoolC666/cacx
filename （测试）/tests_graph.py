@@ -133,7 +133,7 @@ class TestWriteEntities(unittest.TestCase):
         self.assertIn("市场监管总局", got)
 
     def test_带原文标题可回溯(self):
-        """答辩要「点实体回溯原文」，列表里必须带标题和 url"""
+        """演示要「点实体回溯原文」，列表里必须带标题和 url"""
         self.db.upsert_entities([
             {"name": "中央网信办", "type": "org", "article_id": 1}])
         e = self.db.list_entities()[0]
@@ -253,7 +253,7 @@ class TestGraph(unittest.TestCase):
         self.assertEqual(s["no_evidence"], 0)
 
     def test_无证据关系可被统计出来(self):
-        """答辩时无证据的关系是硬伤，必须能一眼看出有多少"""
+        """演示时无证据的关系是硬伤，必须能一眼看出有多少"""
         self.db.upsert_relations([
             {"src_name": "甲", "dst_name": "乙", "rel_type": "joint_issue",
              "article_id": 1}])

@@ -2,7 +2,7 @@
 """反向验证：把残留闸的三处守卫生意弄坏，tests_reltype_rename 必须变红。
 
   M1 库里塞回一行旧值 —— 只在**副本**上做，并用 CACX_TEST_DB 指过去
-  M2 从迁移表里删掉这次改名（组员那边就不会自动改名了）
+  M2 从迁移表里删掉这次改名（使用方就不会自动改名了）
   M3 前端映射表漏一个键（漏的那处图例会显示英文原名）
 """
 import hashlib
@@ -81,7 +81,7 @@ try:
     red = run()[0] != 0
     print("  %s  M2 迁移表被删空" % ("RED " if red else "!!! "))
     if not red:
-        bad.append("M2（迁移表删了仍全绿 = 组员那边不会自动改名）")
+        bad.append("M2（迁移表删了仍全绿 = 使用方不会自动改名）")
 finally:
     shutil.copy2(bak, DB)
     bak.unlink()
