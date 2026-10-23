@@ -204,6 +204,16 @@ _[a-z0-9]*.txt
 !（测试）/_audit_readme_counts.py
 !（测试）/_show_schema.py
 
+# AI 顾问快照核对（2026-10-23）：
+#   _verify_advisory_snapshot.py —— 复现「数据健康顾问」真正喂给模型的那段
+#     JSON，验两条：① 快照里**不能含已停用站点的历史批次**
+#     （2026-10-13 的 zjwx-api 开发残余源，sync_runs 里留着一行，
+#      模型会把它当成第三个站点）；② 批次字段**不能是裸英文**
+#     （listed/failed 要换成中文名，否则模型靠猜）。
+#   _probe_advisory_input.py —— 打印过滤前的原始批次，用于定位问题。
+!（测试）/_verify_advisory_snapshot.py
+!（测试）/_probe_advisory_input.py
+
 # 演示脚本取数（2026-10-16 丙方案）：
 #   _t10_demo_rows.py —— 一次算出演示要念的每个数：边列表行号、画布口径、
 #     两条演示边的证据首条。**行号尤其要靠它重算**：它随数据变，

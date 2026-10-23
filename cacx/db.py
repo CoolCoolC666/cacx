@@ -1200,7 +1200,8 @@ class Database:
             "by_task": by_task,
         }
 
-    def recent_sync_runs(self, n: int = 10) -> List[dict]:
+    def recent_sync_runs(self, n: int = 10,
+                          sites: Optional[List[str]] = None) -> List[dict]:
         """
         最近的同步批次。失败批次必须看得见 —— 不然用户不知道
         「上次同步有没有把东西抓漏」。
@@ -1208,8 +1209,23 @@ class Database:
         列名以表结构为准：sync_runs 里是 new_articles，不是 listed_new
         （SQL 的 INSERT 列名和 Python 参数名本来就允许不一致，
          这里曾照着参数名写查询，直接 500）。
+
+        ⚠ `sites` 传站点 code 列表时**只返回这些站点的批次**。
+          sync_runs 存的是**历史**，删掉/停用一个站点不会抹掉它过去的行；
+          而 AI 顾问会把这些批次原样喂给模型，于是「开发时临时加的验证源」
+          （2026-10-13 的 zjwx-api，只抓了 20 条）会被模型当成第三个站点解读。
+          过滤必须在 **SQL 里**做 —— 先 LIMIT 再筛会拿到不足 n 条。
         """
         with self._lock:
+            if sites is not None:
+                codes = [str(s) for s in sites]
+                if not codes:
+                    return []
+                q = ("SELECT site, mode, started_at, finished_at, listed, "
+                     "new_articles, failed, note FROM sync_runs "
+                     "WHERE site IN (%s) ORDER BY id DESC LIMIT ?" %
+                     ",".join("?" * len(codes)))
+                return [dict(r) for r in self.conn.execute(q, codes + [int(n)])]
             return [dict(r) for r in self.conn.execute(
                 "SELECT site, mode, started_at, finished_at, listed, "
                 "new_articles, failed, note "

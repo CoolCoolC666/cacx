@@ -172,7 +172,21 @@ SYS_DIAGNOSE = (
 
 SYS_ADVISORY = (
     "你是舆情数据研究助理。下面是一个政务网站语料库的采集与健康状况快照。"
-    "请评估数据质量、指出潜在风险、给出后续采集与分析建议。"
+    "请评估数据质量、指出潜在风险、给出后续采集与分析建议。\n"
+    "判据（按重要性排序）：\n"
+    "1. **只针对快照里出现的站点下结论**，不要推测未出现的来源；\n"
+    "2. 快照带 `_口径说明` 的字段，**严格按说明理解**，"
+    "不同口径的数（源站声称的总量 vs 实际入库数）不等是正常的，"
+    "**不要据此判定口径不一致**；\n"
+    "3. 「抓取失败条数」多为站外链接（微信公号等）导致的正文缺失，"
+    "是采集器的正常损耗，**不等于数据不可用**；\n"
+    "4. 评分给**数据可用于何种分析**的依据，不是给采集器的运维打分 —— "
+    "90 分表示「口径清楚、证据完整、可直接支撑引用性分析」，"
+    "而不是「抓取失败率为零」；\n"
+    "5. 「潜在风险」写**会影响分析结论可信度**的风险"
+    "（来源集中、样本偏斜、字段缺失、口径不可比）；"
+    "「后续建议」写**可执行**的下一步（补什么、怎么抽、怎么复核），"
+    "不要写「加强采集」这类空话。\n"
     "输出严格 JSON：{\"summary\": \"一段话结论\", \"quality_score\": 0到100的整数, "
     "\"data_quality\": [\"...\"], \"risks\": [\"...\"], \"suggestions\": [\"...\"], "
     "\"need_human\": true/false}。只输出 JSON。"
@@ -225,25 +239,17 @@ def diagnose(cfg: Dict, problems: List[Dict], db=None) -> Optional[Dict[str, Any
     }
 
 
-def advisory(cfg: Dict, db, reports: Optional[List[Dict]] = None,
-             recent_runs: Optional[List[Dict]] = None) -> Optional[Dict[str, Any]]:
+def advisory_snapshot(cfg: Dict, db, reports: Optional[List[Dict]] = None,
+                      recent_runs: Optional[List[Dict]] = None) -> Dict[str, Any]:
     """
-    数据健康顾问 —— 面向「一切正常」的场景。
+    构造「数据健康顾问」喂给模型的那份快照。
 
-    原先 diagnose 只在出问题时才跑，全绿时 AI 永远不出声，
-    于是「AI 辅助」实际上等于没有。现在补上这条正向链路：
-    即使接口全好，也会评估数据质量、给后续采集与分析建议。
+    **抽成独立函数是为了能测**：测试直接调它，不复制逻辑 ——
+    抄一份口径必然对不上（项目里 `_verify_pack_matches_src.py`
+    为此专门写过注释）。改这里，测试自动跟着变。
 
-    ⚠ 喂给模型的字段必须**重命名并加口径说明**，不能直接把采集器的
-    原始 dict 丢过去。两站原始字段名都不一样（CAC 叫 total_rec、
-    浙江叫 count），语义都是「源站声称的总量」。实测把原始字段喂进去后，
-    模型把 total_rec 理解成了「自检记录条数」，进而得出
-    「自检 2040 条 vs 库存 2956 篇，口径不一致」的结论 ——
-    那不是数据问题，是**我把字段名没说清楚**。
+    返回的 dict 直接 json.dumps 就是模型收到的输入。
     """
-    p = build(cfg, task="doctor")
-    if p is None:
-        return None
     f = db.facets()
 
     # 站点自检：把内部字段翻译成有口径说明的名字
@@ -261,13 +267,58 @@ def advisory(cfg: Dict, db, reports: Optional[List[Dict]] = None,
             "发现的问题": r.get("issues") or [],
         })
 
-    snap = {
+    # 最近同步批次：**只取启用中站点的**，并把英文字段名换成中文。
+    #
+    # ⚠ 为什么必须过滤：sync_runs 存的是历史，删掉/停用一个站点
+    #   不会抹掉它过去的行。2026-10-13 做通用采集器验证时临时加的
+    #   `zjwx-api`（只抓 20 条、2 个栏目）就是这种历史行 —— 它原样
+    #   喂给模型后，模型会把它当成**第三个站点**解读，进而得出
+    #   「来源构成失衡」之类的错误结论。判定依据见 app.py 的
+    #   `_warn_same_source`：只认同源多 code 且**都启用中**的站点。
+    # ⚠ 为什么必须重命名：与上面「站点接口自检」同一把尺子 ——
+    #   裸字段名 `listed` / `failed` 会让模型去猜语义。
+    from .. import sites as S
+    allsrc = S.all_sites(cfg) or {}
+    enabled_codes = [c for c, s in allsrc.items()
+                     if (s or {}).get("enabled", True)]
+    # 只认**库里有文章的站点**：分站点统计只覆盖它们，
+    # 一个没抓到东西的站进了快照，模型会以为它「一篇都没抓到」。
+    in_db = {s.get("site") for s in f.get("sites", []) if s.get("site")}
+    want = [c for c in enabled_codes if not in_db or c in in_db] or enabled_codes
+    try:
+        raw_runs = db.recent_sync_runs(5, sites=want)
+    except TypeError:
+        # 旧版 db 没接 sites 参数 —— 不因过滤失败而让整个顾问挂掉。
+        # ⚠ 兜底也**必须自己过滤**：直接用调用方传来的原始列表，
+        #   等于把 zjwx-api 那种残余行又放回去（那正是要修的 bug）。
+        keep = set(want)
+        raw_runs = [r for r in (recent_runs or []) if r.get("site") in keep][:5]
+
+    site_names = {c: (allsrc.get(c) or {}).get("name") or c
+                  for c in enabled_codes}
+    recent_batches = []
+    for r in raw_runs:
+        code = r.get("site") or ""
+        recent_batches.append({
+            "站点": site_names.get(code, code),
+            "站点代码": code,
+            "接口模式": "增量同步" if r.get("mode") == "incremental" else "全量重抓",
+            "开始时间": r.get("started_at"),
+            "结束时间": r.get("finished_at"),
+            "列表接口扫到条数": r.get("listed"),
+            "本次新增条数": r.get("new_articles"),
+            "抓取失败条数": r.get("failed"),
+        })
+
+    return {
         "_口径说明": {
             "源站声称的该栏目总条数": "站点列表接口自己报的 total，与本工具实际入库数无关；"
                                  "两者不等是正常的（收录范围不同、分页口径不同）",
             "本工具已入库该站点总数": "本工具 config 里设定的采集时间窗内，实际抓到的篇数",
-            "最近同步批次的 listed": "本次同步列表接口扫到的条数（含库里已有的）",
-            "最近同步批次的 failed": "抓不到正文因而未入库的条数，多为站外链接（微信公号等）",
+            "最近同步批次的列表接口扫到条数": "本次同步列表接口扫到的条数（含库里已有的）",
+            "最近同步批次的本次新增条数": "本次同步真正新抓进库的条数",
+            "最近同步批次的抓取失败条数": "抓不到正文因而未入库的条数，多为站外链接（微信公号等）",
+            "最近同步批次的接口模式": "incremental=增量同步，full=全量重抓",
         },
         "数据总量": {
             "文章数": f["total"], "总字数": f["chars"],
@@ -278,8 +329,34 @@ def advisory(cfg: Dict, db, reports: Optional[List[Dict]] = None,
                    for s in f.get("sites", [])],
         "分年份": {y["year"]: y["n"] for y in f.get("years", [])},
         "站点接口自检": site_reports,
-        "最近同步批次": (recent_runs or [])[:5],
+        "最近同步批次": recent_batches,
     }
+
+
+def advisory(cfg: Dict, db, reports: Optional[List[Dict]] = None,
+             recent_runs: Optional[List[Dict]] = None) -> Optional[Dict[str, Any]]:
+    """
+    数据健康顾问 —— 面向「一切正常」的场景。
+
+    原先 diagnose 只在出问题时才跑，全绿时 AI 永远不出声，
+    于是「AI 辅助」实际上等于没有。现在补上这条正向链路：
+    即使接口全好，也会评估数据质量、给后续采集与分析建议。
+
+    ⚠ 喂给模型的字段必须**重命名并加口径说明**，不能直接把采集器的
+    原始 dict 丢过去。两站原始字段名都不一样（CAC 叫 total_rec、
+    浙江叫 count），语义都是「源站声称的总量」。实测把原始字段喂进去后，
+    模型把 total_rec 理解成了「自检记录条数」，进而得出
+    「自检 2040 条 vs 库存 2956 篇，口径不一致」的结论 ——
+    那不是数据问题，是**我把字段名没说清楚**。
+
+    ⚠ `recent_runs` 参数现在只是**兜底**：快照构造（`advisory_snapshot`）
+    自己按「启用中站点」从库里查批次，因为调用方传过来的往往是**未过滤**的
+    原始列表，里面可能有已停用站点的历史行。
+    """
+    p = build(cfg, task="doctor")
+    if p is None:
+        return None
+    snap = advisory_snapshot(cfg, db, reports, recent_runs)
     try:
         raw = p.chat(SYS_ADVISORY,
                      json.dumps(snap, ensure_ascii=False, indent=2), dry_run=False)
