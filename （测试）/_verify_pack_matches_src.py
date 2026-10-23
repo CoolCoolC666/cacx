@@ -138,6 +138,28 @@ _pos = [a for a in sys.argv[1:] if not a.startswith("-")]
 PACK = Path(_pos[0]) if _pos else _pool[-1]
 print(f"比对对象：{PACK.name}（{'瘦身包' if SLIM else '完整包'}）")
 
+# ⚠⚠ 必须先确认 PACK **真的存在且是个目录**，否则会报假结论。
+#
+#   实测踩过（2026-10-23）：从错误的当前目录调用本脚本，
+#   位置参数是**相对路径** `..\网站程序\...`，解析到了别的地方 →
+#   PACK.rglob("*") 返回空 → 「包内与源码逐字节相同：0」，
+#   同时「源码有而包里没有：10414」，看着像**整包没进源码**的大事故，
+#   其实是比对对着空气跑。
+#
+#   与上面 `--slim` 被当位置参数是同一族坑：**静默地比错东西，
+#   却输出一份看着很像真问题的报告**。假结论比不验更坏。
+if not PACK.exists():
+    print(f"🔴 要比对的目录不存在：{PACK}")
+    print(f"   （位置参数是相对路径时，当前工作目录必须是项目根；"
+          f"现在的工作目录是 {Path.cwd()}）")
+    sys.exit(1)
+if not PACK.is_dir():
+    print(f"🔴 要比对的不是一个目录：{PACK}")
+    sys.exit(1)
+if not any(PACK.rglob("*")):
+    print(f"🔴 要比对的目录是空的：{PACK}")
+    sys.exit(1)
+
 
 def sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
