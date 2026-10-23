@@ -214,6 +214,15 @@ _[a-z0-9]*.txt
 !（测试）/_verify_advisory_snapshot.py
 !（测试）/_probe_advisory_input.py
 
+# 演示用「数据健康顾问提示词」docx 生成器（2026-10-23）：
+#   _gen_advisory_prompt_docx.py —— 提示词、字段口径说明、批次字段对照、
+#     实际批次数据，全部**从源码现读**（SYS_ADVISORY + advisory_snapshot()），
+#     不手抄 —— 抄的那份必然漂，改了提示词而 docx 没跟上，演示就拿着过期内容讲。
+#   _verify_docx.py —— 验收 docx：页数/字数/表格数 + 残留检查
+#     （Markdown 记号、乱码、裸英文字段）。
+!（测试）/_gen_advisory_prompt_docx.py
+!（测试）/_verify_docx.py
+
 # 演示脚本取数（2026-10-16 丙方案）：
 #   _t10_demo_rows.py —— 一次算出演示要念的每个数：边列表行号、画布口径、
 #     两条演示边的证据首条。**行号尤其要靠它重算**：它随数据变，
